@@ -129,16 +129,31 @@ object PaperTradingScreen {
                 it.realizedPnl ?: 0.0
             }
 
+            val reservedMargin = db.getReservedMargin()
+            val availableBalance = db.getAvailableBalance()
+
             addCard(
-                "Starting Paper Balance",
+                "Paper Cash Balance",
                 balance?.let { rupees(it) } ?: "Not set",
-                "Manually configured amount"
+                "BUY cost deducted; short-sale proceeds excluded"
+            )
+
+            addCard(
+                "Available Balance",
+                availableBalance?.let { rupees(it) } ?: "Not set",
+                "Cash minus reserved short margin"
+            )
+
+            addCard(
+                "Reserved Margin",
+                rupees(reservedMargin),
+                "SELL short: 20% of entry value"
             )
 
             addCard(
                 "Realized Paper P&L",
                 rupees(realizedPnl),
-                "Calculated only from locally closed orders"
+                "Historical closed-trade P&L"
             )
 
             addCard(
@@ -232,15 +247,22 @@ object PaperTradingScreen {
                                         order.quantity * direction
 
                                     try {
-                                        db.closePaperOrder(
-                                            order.id,
-                                            exit,
-                                            pnl
-                                        )
-                                        toast(context, "Paper order closed.")
-                                        refresh()
+                                        val pnl = db.closePaperOrder(order.id, exit)
+
+                                        if (pnl == null) {
+                                            toast(context, "Order is already closed or unavailable.")
+                                        } else {
+                                            toast(
+                                                context,
+                                                "Paper order closed. P&L: ${rupees(pnl)}"
+                                            )
+                                            refresh()
+                                        }
                                     } catch (e: Exception) {
-                                        toast(context, "Could not close order.")
+                                        toast(
+                                            context,
+                                            e.message ?: "Could not close order."
+                                        )
                                     }
                                 }
                             }
