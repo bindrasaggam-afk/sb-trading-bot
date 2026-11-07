@@ -1,5 +1,6 @@
 package com.sb.backend.server
 
+import com.sb.backend.services.KotakSessionCoordinator
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.net.ServerSocket
@@ -9,7 +10,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 class EmbeddedApiServer(
-    private val port: Int = 8000
+    private val port: Int = 10000
 ) {
     private var serverSocket: ServerSocket? = null
     private val running = AtomicBoolean(false)
@@ -68,12 +69,36 @@ class EmbeddedApiServer(
                     if (header.isEmpty()) break
                 }
 
+                val authenticated =
+                    KotakSessionCoordinator.isFeedAuthenticated()
+
+                val connected =
+                    KotakSessionCoordinator.isFeedConnected()
+
+                val brokerStatus = when {
+                    authenticated -> "authenticated"
+                    connected -> "connected"
+                    else -> "disconnected"
+                }
+
+                val brokerMessage = jsonEscape(
+                    KotakSessionCoordinator.currentStatus()
+                )
+
                 val response = when {
                     method == "GET" && path == "/api/health" ->
                         """{"status":"ok","service":"SB Bot Android Backend","server":"running"}"""
 
                     method == "GET" && path == "/api/broker/status" ->
-                        """{"status":"not_configured","broker":"Kotak Neo","authenticated":false}"""
+                        """
+                        {
+                            "status": "$brokerStatus",
+                            "broker": "Kotak Neo",
+                            "connected": $connected,
+                            "authenticated": $authenticated,
+                            "message": "$brokerMessage"
+                        }
+                        """.trimIndent()
 
                     method == "GET" && path == "/api/system/status" ->
                         """{"app":"SB Bot","backend":"running","mode":"LOCAL_ANDROID"}"""
@@ -112,6 +137,36 @@ class EmbeddedApiServer(
         } catch (e: Exception) {
             e.printStackTrace()
         }
+    }
+
+    private fun jsonEscape(value: String): String {
+        val builder = StringBuilder(value.length + 16)
+
+        value.forEach { character ->
+            when (character) {
+                '"' -> builder.append("\\\"")
+                '\\' -> builder.append("\\\\")
+                '\b' -> builder.append("\\b")
+                '\u000C' -> builder.append("\\f")
+                '\n' -> builder.append("\\n")
+                '\r' -> builder.append("\\r")
+                '\t' -> builder.append("\\t")
+                else -> {
+                    if (character < ' ') {
+                        builder.append("\\u")
+                        builder.append(
+                            character.code
+                                .toString(16)
+                                .padStart(4, '0')
+                        )
+                    } else {
+                        builder.append(character)
+                    }
+                }
+            }
+        }
+
+        return builder.toString()
     }
 
     private fun readLine(input: BufferedInputStream): String? {

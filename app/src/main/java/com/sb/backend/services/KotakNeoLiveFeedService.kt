@@ -10,6 +10,11 @@ import com.sb.backend.models.Quote
 import com.sb.backend.repositories.MarketRepository
 import com.sb.backend.security.KotakNeoSecureStore
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 class KotakNeoLiveFeedService(
@@ -21,6 +26,12 @@ class KotakNeoLiveFeedService(
 
     private val parser = KotakNeoBinaryParser()
     private val tickCount = AtomicLong(0L)
+
+    private val pendingQuotes = ConcurrentHashMap<String, Quote>()
+    private val quoteFlushScheduled = AtomicBoolean(false)
+    private val quoteExecutor: ScheduledExecutorService by lazy {
+        Executors.newSingleThreadScheduledExecutor()
+    }
 
     @Volatile
     private var client: KotakNeoWebSocketClient? = null
@@ -40,12 +51,12 @@ class KotakNeoLiveFeedService(
      * nse_cm|2885
      * mcx_fo|483079
      */
-    private data class InstrumentKey(
+    private data class FeedKey(
         val feedSegment: String,
         val token: Long
     )
 
-    private fun instrumentKey(instrument: Instrument): InstrumentKey? {
+    private fun instrumentKey(instrument: Instrument): FeedKey? {
         if (!instrument.isActive) return null
 
         val token = instrument.token
@@ -55,13 +66,13 @@ class KotakNeoLiveFeedService(
 
         if (token <= 0L) return null
 
-        return InstrumentKey(
+        return FeedKey(
             feedSegment = feedSegment(instrument),
             token = token
         )
     }
 
-    private val instrumentMap: Map<InstrumentKey, Instrument> =
+    private val instrumentMap: Map<FeedKey, Instrument> =
         instruments.mapNotNull { instrument ->
             val key = try {
                 instrumentKey(instrument)?.let { it to instrument }
@@ -70,6 +81,13 @@ class KotakNeoLiveFeedService(
             }
             key
         }.toMap()
+
+    /**
+     * Instruments subscribed after the initial 3000-row snapshot.
+     * Needed so ticks for on-demand chart subscriptions are not dropped.
+     */
+    private val requestedInstruments =
+        java.util.concurrent.ConcurrentHashMap<FeedKey, Instrument>()
 
     @Synchronized
     fun connect() {
@@ -169,18 +187,32 @@ class KotakNeoLiveFeedService(
 
     @Synchronized
     fun subscribeInstrument(instrument: Instrument) {
+        val ws = client
+
+        require(ws != null) {
+            "Kotak WebSocket is not initialized"
+        }
+
+        if (instrument.segment.trim().equals("INDEX", ignoreCase = true)) {
+            val segment = feedSegment(instrument)
+            val feedName = indexFeedName(instrument.symbol)
+
+            require(feedName.isNotBlank()) {
+                "Index feed name missing: ${instrument.symbol}"
+            }
+
+            ws.subscribeIndices(listOf("$segment|$feedName"))
+            onStatus("Index subscription requested: ${instrument.symbol}")
+            return
+        }
+
         val key = instrumentKey(instrument)
 
         require(key != null) {
             "Instrument inactive or token missing/invalid: ${instrument.symbol}"
         }
 
-        val ws = client
-
-        require(ws != null && ws.isAuthenticated()) {
-            "Kotak WebSocket is not authenticated"
-        }
-
+        requestedInstruments[key] = instrument
         ws.subscribe(
             listOf("${key.feedSegment}|${key.token}")
         )
@@ -190,6 +222,25 @@ class KotakNeoLiveFeedService(
 
     @Synchronized
     fun unsubscribeInstrument(instrument: Instrument) {
+        val ws = client
+
+        if (ws == null) {
+            onStatus("Unsubscribe skipped: WebSocket disconnected")
+            return
+        }
+
+        if (instrument.segment.trim().equals("INDEX", ignoreCase = true)) {
+            val segment = feedSegment(instrument)
+            val feedName = indexFeedName(instrument.symbol)
+
+            if (feedName.isNotBlank()) {
+                ws.unsubscribeIndices(listOf("$segment|$feedName"))
+            }
+
+            onStatus("Index unsubscribe requested: ${instrument.symbol}")
+            return
+        }
+
         val key = instrumentKey(instrument)
 
         if (key == null) {
@@ -197,13 +248,7 @@ class KotakNeoLiveFeedService(
             return
         }
 
-        val ws = client
-
-        if (ws == null || !ws.isConnected()) {
-            onStatus("Unsubscribe skipped: WebSocket disconnected")
-            return
-        }
-
+        requestedInstruments.remove(key)
         ws.unsubscribe(
             listOf("${key.feedSegment}|${key.token}")
         )
@@ -277,7 +322,7 @@ class KotakNeoLiveFeedService(
                     return@forEach
                 }
             } else {
-                val key = InstrumentKey(
+                val key = FeedKey(
                     feedSegment = tick.exchange
                         .trim()
                         .toLowerCase(Locale.ROOT),
@@ -285,6 +330,7 @@ class KotakNeoLiveFeedService(
                 )
 
                 val instrument = instrumentMap[key]
+                    ?: requestedInstruments[key]
                     ?: return@forEach
 
                 symbol = instrument.symbol
@@ -314,7 +360,8 @@ class KotakNeoLiveFeedService(
                 changePercent = tick.changePercent,
                 timestamp = received,
                 isLive = true,
-                exchangeTimestamp = null,
+                exchangeTimestamp =
+                    MarketTick.normalizeMillis(tick.lastUpdateTime),
                 receivedAt = received
             )
 
@@ -322,9 +369,15 @@ class KotakNeoLiveFeedService(
                 LiveQuoteCache.update(quote)
 
                 val mKey = InstrumentKey(exchange = exchange, symbol = symbol)
-                val bids = tick.depth.take(5).map { d ->
+                val bids = tick.buyDepth.take(5).map { d ->
                     DepthLevel(price = d.price, quantity = d.quantity, orders = d.orders)
                 }
+                val asks = tick.sellDepth.take(5).map { d ->
+                    DepthLevel(price = d.price, quantity = d.quantity, orders = d.orders)
+                }
+                val bestBid = bids.firstOrNull()
+                val bestAsk = asks.firstOrNull()
+
                 val mTick = MarketTick(
                     key = mKey,
                     ltp = tick.ltp,
@@ -336,46 +389,97 @@ class KotakNeoLiveFeedService(
                     volume = tick.volume.coerceAtLeast(0L),
                     change = tick.change,
                     changePercent = tick.changePercent,
-                    bidPrice = bids.firstOrNull()?.price,
-                    bidQty = bids.firstOrNull()?.quantity,
-                    askPrice = null,
-                    askQty = null,
+                    bidPrice = bestBid?.price,
+                    bidQty = bestBid?.quantity,
+                    askPrice = bestAsk?.price,
+                    askQty = bestAsk?.quantity,
                     bids = bids,
-                    asks = emptyList(),
+                    asks = asks,
                     totalBuyQty = tick.totalBuyQuantity,
                     totalSellQty = tick.totalSellQuantity,
                     oi = tick.openInterest,
                     lastTradeQty = tick.lastTradeQuantity,
+                    lastTradeTime = MarketTick.normalizeMillis(tick.lastTradeTime),
+                    exchangeTime = MarketTick.normalizeMillis(tick.lastUpdateTime),
                     receivedAt = received,
                     isIndex = tick.isIndex
                 )
                 MarketDataManager.onNewTick(mTick)
 
-                if (!marketRepository.saveQuote(quote)) {
-                    onStatus(
-                        "Live quote database save failed: $symbol"
+                if (MarketDataManager.currentConnection() !=
+                    MarketDataManager.ConnectionState.AUTHENTICATED
+                ) {
+                    MarketDataManager.updateConnection(
+                        MarketDataManager.ConnectionState.AUTHENTICATED
                     )
-                } else {
-                    val count = tickCount.incrementAndGet()
+                }
 
-                    if (count == 1L || count % 250L == 0L) {
-                        val price = String.format(
-                            Locale.US,
-                            "%.2f",
-                            tick.ltp
-                        )
+                enqueueQuotePersistence(quote)
 
-                        onStatus(
-                            "Live ticks: $count | " +
-                                "$symbol ₹$price"
-                        )
-                    }
+                val count = tickCount.incrementAndGet()
+
+                if (count == 1L || count % 250L == 0L) {
+                    val price = String.format(
+                        Locale.US,
+                        "%.2f",
+                        tick.ltp
+                    )
+
+                    onStatus(
+                        "Live ticks: $count | " +
+                            "$symbol ₹$price"
+                    )
                 }
             } catch (e: Exception) {
                 onStatus(
                     "Live quote error $symbol: ${e.message}"
                 )
             }
+        }
+    }
+
+    private fun enqueueQuotePersistence(quote: Quote) {
+        val key = "${quote.exchange.trim().uppercase(Locale.ROOT)}|" +
+            quote.symbol.trim().uppercase(Locale.ROOT)
+
+        pendingQuotes[key] = quote
+
+        if (!quoteFlushScheduled.compareAndSet(false, true)) return
+
+        try {
+            quoteExecutor.schedule(
+                { flushPendingQuotes() },
+                500L,
+                TimeUnit.MILLISECONDS
+            )
+        } catch (_: Exception) {
+            quoteFlushScheduled.set(false)
+        }
+    }
+
+    private fun flushPendingQuotes() {
+        quoteFlushScheduled.set(false)
+
+        if (pendingQuotes.isEmpty()) return
+
+        val batch = ArrayList<Quote>(pendingQuotes.size)
+        val iterator = pendingQuotes.keys.iterator()
+
+        while (iterator.hasNext()) {
+            val key = iterator.next()
+            pendingQuotes.remove(key)?.let { batch.add(it) }
+        }
+
+        if (batch.isEmpty()) return
+
+        try {
+            val saved = marketRepository.saveQuotes(batch)
+
+            if (saved <= 0) {
+                onStatus("Live quote database save failed")
+            }
+        } catch (e: Exception) {
+            onStatus("Live quote database save error: ${e.message}")
         }
     }
 
@@ -405,11 +509,49 @@ class KotakNeoLiveFeedService(
         }
     }
 
+    private fun indexFeedName(symbol: String): String {
+        val normalized = symbol
+            .trim()
+            .toUpperCase(Locale.ROOT)
+            .replace(Regex("\\s+"), " ")
+
+        return when (normalized) {
+            "NIFTY 50", "NIFTY50" -> "Nifty 50"
+            "NIFTY BANK", "BANK NIFTY", "BANKNIFTY" -> "Nifty Bank"
+            "FINNIFTY",
+            "NIFTY FIN SERVICE",
+            "NIFTY FINANCIAL SERVICES" -> "Nifty Fin Service"
+            "SENSEX" -> "SENSEX"
+            "NIFTY MIDCAP SELECT", "MIDCPNIFTY" -> "Nifty Midcap Select"
+            "NIFTY NEXT 50" -> "Nifty Next 50"
+            "NIFTY 100" -> "Nifty 100"
+            "NIFTY 200" -> "Nifty 200"
+            "NIFTY 500" -> "Nifty 500"
+            "NIFTY MIDCAP 50" -> "Nifty Midcap 50"
+            "NIFTY MIDCAP 100" -> "Nifty Midcap 100"
+            "NIFTY SMALLCAP 100" -> "Nifty Smallcap 100"
+            "NIFTY IT" -> "Nifty IT"
+            "NIFTY AUTO" -> "Nifty Auto"
+            "NIFTY PHARMA" -> "Nifty Pharma"
+            "NIFTY FMCG" -> "Nifty FMCG"
+            "NIFTY METAL" -> "Nifty Metal"
+            "NIFTY REALTY" -> "Nifty Realty"
+            "NIFTY ENERGY" -> "Nifty Energy"
+            "NIFTY PSU BANK" -> "Nifty PSU Bank"
+            "NIFTY PRIVATE BANK" -> "Nifty Private Bank"
+            "NIFTY MEDIA" -> "Nifty Media"
+            "INDIA VIX" -> "India VIX"
+            else -> symbol.trim()
+        }
+    }
+
     fun isConnected(): Boolean =
         client?.isConnected() == true
 
     fun isAuthenticated(): Boolean =
         client?.isAuthenticated() == true
+
+    fun webSocketClient(): KotakNeoWebSocketClient? = client
 
     @Synchronized
     fun disconnect() {
@@ -424,6 +566,13 @@ class KotakNeoLiveFeedService(
         client?.unsubscribeIndices(indexTokens)
         client?.shutdown()
         client = null
+
+        try {
+            quoteExecutor.execute { flushPendingQuotes() }
+        } catch (_: Exception) {
+        }
+
+        quoteExecutor.shutdown()
         onStatus("Kotak Live Feed closed")
     }
 }

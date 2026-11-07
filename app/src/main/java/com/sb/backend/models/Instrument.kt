@@ -11,12 +11,52 @@ data class Instrument(
     val token: String? = null,
     val lotSize: Int = 1,
     val tickSize: Double = 0.05,
-    val isActive: Boolean = true
+    val isActive: Boolean = true,
+    val expiryMillis: Long? = null
 ) {
     init {
-        require(symbol.isNotBlank()) { "Symbol cannot be empty" }
-        require(exchange.isNotBlank()) { "Exchange cannot be empty" }
-        require(lotSize > 0) { "Lot size must be positive" }
-        require(tickSize > 0.0) { "Tick size must be positive" }
+        require(id >= 0L) {
+            "Instrument ID cannot be negative"
+        }
+
+        require(symbol.isNotBlank()) {
+            "Symbol cannot be empty"
+        }
+
+        require(name.isNotBlank()) {
+            "Instrument name cannot be empty"
+        }
+
+        require(exchange.isNotBlank()) {
+            "Exchange cannot be empty"
+        }
+
+        require(segment.isNotBlank()) {
+            "Segment cannot be empty"
+        }
+
+        require(instrumentType.isNotBlank()) {
+            "Instrument type cannot be empty"
+        }
+
+        require(tradingSymbol.isNotBlank()) {
+            "Trading symbol cannot be empty"
+        }
+
+        require(token == null || token.isNotBlank()) {
+            "Token cannot be blank"
+        }
+
+        require(lotSize > 0) {
+            "Lot size must be positive"
+        }
+
+        require(tickSize.isFinite() && tickSize > 0.0) {
+            "Tick size must be finite and positive"
+        }
+
+        require(expiryMillis == null || expiryMillis > 0L) {
+            "Expiry timestamp must be positive"
+        }
     }
 }

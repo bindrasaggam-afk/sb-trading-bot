@@ -1,8 +1,12 @@
-
+<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.sb">
 
+    <!-- Internet access -->
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Foreground service -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 
     <application
         android:allowBackup="true"
@@ -14,6 +18,7 @@
         android:usesCleartextTraffic="true"
         android:theme="@style/AppTheme">
 
+        <!-- Main application screen -->
         <activity
             android:name=".MainActivity"
             android:windowSoftInputMode="adjustResize"
@@ -25,6 +30,13 @@
             </intent-filter>
 
         </activity>
+
+        <!-- Persistent market runtime -->
+        <service
+            android:name=".backend.services.MarketForegroundService"
+            android:enabled="true"
+            android:exported="false"
+            android:stopWithTask="false" />
 
     </application>
 

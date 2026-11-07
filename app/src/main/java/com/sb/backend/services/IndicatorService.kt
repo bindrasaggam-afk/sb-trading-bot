@@ -573,8 +573,8 @@ object IndicatorService {
 
             if (window.size != stochPeriod) continue
 
-            val lowest = window.min() ?: continue
-            val highest = window.max() ?: continue
+            val lowest = window.minOrNull() ?: continue
+            val highest = window.maxOrNull() ?: continue
             val current = rsiValues[i] ?: continue
 
             raw[i] = if (highest - lowest <= 0.0000001) {

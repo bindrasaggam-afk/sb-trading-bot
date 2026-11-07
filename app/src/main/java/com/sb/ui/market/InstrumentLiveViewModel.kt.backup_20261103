@@ -1,0 +1,462 @@
+
+package com.sb.ui.market
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.sb.backend.market.MarketDataManager
+import com.sb.backend.market.model.InstrumentKey
+import com.sb.backend.market.model.MarketCandle
+import com.sb.backend.market.model.MarketTick
+import com.sb.backend.market.model.MarketTimeframe
+import com.sb.backend.market.model.MarketUiState
+import com.sb.backend.market.repo.MarketFeedRepository
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+import kotlin.math.max
+import kotlin.math.min
+
+class InstrumentLiveViewModel(
+    private val repository: MarketFeedRepository
+) : ViewModel() {
+
+    constructor() : this(MarketFeedRepository)
+
+    private val instrumentKey = MutableStateFlow<InstrumentKey?>(null)
+    private val timeframe = MutableStateFlow(MarketTimeframe.MIN_1)
+
+    private val _candles = MutableStateFlow<List<MarketCandle>>(emptyList())
+    val candles: StateFlow<List<MarketCandle>> = _candles.asStateFlow()
+
+    val selectedTimeframe: StateFlow<MarketTimeframe> =
+        timeframe.asStateFlow()
+
+    private var currentKey: InstrumentKey? = null
+
+    private var previousVolume: Long = 0L
+    private var previousVolumeTimestamp: Long = 0L
+    private var historicalToken: Int = 0
+
+    // Tracks the first and last live tick time inside each candle.
+    private val firstTickTime = HashMap<Long, Long>()
+    private val lastTickTime = HashMap<Long, Long>()
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val uiState: StateFlow<MarketUiState> = combine(
+        instrumentKey,
+        repository.observeConnection(),
+        instrumentKey.flatMapLatest { key ->
+            if (key == null) {
+                flowOf(null)
+            } else {
+                repository.observeTick(key)
+            }
+        },
+        timeframe
+    ) { key, connection, tick, tf ->
+
+        val connected =
+            connection == MarketDataManager.ConnectionState.CONNECTED ||
+                connection == MarketDataManager.ConnectionState.AUTHENTICATED
+
+        val authenticated =
+            connection == MarketDataManager.ConnectionState.AUTHENTICATED
+
+        val subscribed = key?.let {
+            repository.isSubscribed(it)
+        } ?: false
+
+        val status = when {
+            key == null -> "NO_INSTRUMENT"
+            connection == MarketDataManager.ConnectionState.AUTHENTICATED &&
+                tick == null -> "WAITING_TICK"
+            else -> connection.name
+        }
+
+        MarketUiState(
+            key = key,
+            tick = tick,
+            isSubscribed = subscribed,
+            isConnected = connected,
+            isAuthenticated = authenticated,
+            connection = connection.name,
+            timeframe = tf.label,
+            status = status,
+            lastUpdated = tick?.receivedAt ?: 0L
+        )
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5_000L),
+        initialValue = MarketUiState()
+    )
+
+    init {
+        viewModelScope.launch {
+            repository.observeTickStream().collect { tick: MarketTick ->
+                val active = currentKey ?: return@collect
+
+                if (tick.key.key() != active.key()) {
+                    return@collect
+                }
+
+                appendTick(tick)
+            }
+        }
+    }
+
+    fun setInstrument(exchange: String, symbol: String) {
+        setInstrument(
+            InstrumentKey(
+                exchange = exchange,
+                symbol = symbol
+            )
+        )
+    }
+
+    fun setInstrument(key: InstrumentKey) {
+        if (currentKey?.key() == key.key()) return
+
+        currentKey?.let {
+            repository.unsubscribe(it)
+        }
+
+        historicalToken++
+        currentKey = key
+        instrumentKey.value = key
+
+        resetCandleState()
+        repository.subscribe(key)
+
+        rebuildCandlesFromHistory()
+        requestHistoricalCandles()
+    }
+
+    fun setTimeframe(label: String) {
+        val parsed = MarketTimeframe.fromLabel(label) ?: return
+        if (timeframe.value == parsed) return
+
+        timeframe.value = parsed
+
+        resetVolumeState()
+        rebuildCandlesFromHistory()
+        requestHistoricalCandles()
+    }
+
+    fun releaseInstrument() {
+        historicalToken++
+
+        currentKey?.let {
+            repository.unsubscribe(it)
+        }
+
+        currentKey = null
+        instrumentKey.value = null
+
+        resetCandleState()
+    }
+
+    private fun resetCandleState() {
+        _candles.value = emptyList()
+        resetVolumeState()
+    }
+
+    private fun resetVolumeState() {
+        previousVolume = 0L
+        previousVolumeTimestamp = 0L
+        firstTickTime.clear()
+        lastTickTime.clear()
+    }
+
+    private fun requestHistoricalCandles() {
+        val key = currentKey ?: return
+        val activeTimeframe = timeframe.value
+        val requestToken = ++historicalToken
+
+        repository.loadHistoricalCandles(
+            key = key,
+            timeframe = activeTimeframe.label,
+            years = HISTORICAL_YEARS
+        ) { historical ->
+
+            if (requestToken != historicalToken) return@loadHistoricalCandles
+
+            if (historical.isEmpty()) return@loadHistoricalCandles
+
+            // Live candles take priority over historical candles
+            // when both have the same timestamp.
+            _candles.value = mergeCandles(
+                historical = historical,
+                live = _candles.value
+            )
+        }
+    }
+
+    private fun mergeCandles(
+        historical: List<MarketCandle>,
+        live: List<MarketCandle>
+    ): List<MarketCandle> {
+
+        val merged = LinkedHashMap<Long, MarketCandle>()
+
+        historical.forEach {
+            if (isValidCandle(it)) {
+                merged[it.timestamp] = it
+            }
+        }
+
+        live.forEach {
+            if (isValidCandle(it)) {
+                merged[it.timestamp] = it
+            }
+        }
+
+        return merged.values
+            .sortedBy { it.timestamp }
+            .takeLast(MAX_CANDLES)
+    }
+
+    private fun isValidCandle(candle: MarketCandle): Boolean {
+        return candle.timestamp > 0L &&
+            candle.open.isFinite() &&
+            candle.high.isFinite() &&
+            candle.low.isFinite() &&
+            candle.close.isFinite() &&
+            candle.open > 0.0 &&
+            candle.high > 0.0 &&
+            candle.low > 0.0 &&
+            candle.close > 0.0 &&
+            candle.high >= candle.low &&
+            candle.volume >= 0L
+    }
+
+    private fun rebuildCandlesFromHistory() {
+        val key = currentKey ?: run {
+            _candles.value = emptyList()
+            resetVolumeState()
+            return
+        }
+
+        val history = repository.history(key)
+
+        val source = if (history.isEmpty()) {
+            listOfNotNull(repository.getLatestTick(key))
+        } else {
+            history
+        }
+
+        val ticks = source
+            .filter {
+                it.receivedAt > 0L &&
+                    it.ltp > 0.0 &&
+                    it.ltp.isFinite()
+            }
+            .sortedBy {
+                it.receivedAt
+            }
+
+        if (ticks.isEmpty()) {
+            _candles.value = emptyList()
+            resetVolumeState()
+            return
+        }
+
+        val bucketMillis = timeframe.value.seconds * 1_000L
+        val result = ArrayList<MarketCandle>()
+
+        var lastVolume = ticks.first().volume
+        var lastVolumeTime = ticks.first().receivedAt
+
+        for (tick in ticks) {
+
+            val bucket = tick.receivedAt -
+                (tick.receivedAt % bucketMillis)
+
+            val delta = if (tick.receivedAt >= lastVolumeTime) {
+                if (tick.volume >= lastVolume) {
+                    tick.volume - lastVolume
+                } else {
+                    0L
+                }
+            } else {
+                0L
+            }
+
+            if (tick.receivedAt >= lastVolumeTime) {
+                lastVolume = tick.volume
+                lastVolumeTime = tick.receivedAt
+            }
+
+            val last = result.lastOrNull()
+
+            if (last == null || last.timestamp != bucket) {
+
+                result.add(
+                    MarketCandle(
+                        timestamp = bucket,
+                        open = tick.ltp,
+                        high = tick.ltp,
+                        low = tick.ltp,
+                        close = tick.ltp,
+                        volume = delta
+                    )
+                )
+
+                firstTickTime[bucket] = tick.receivedAt
+                lastTickTime[bucket] = tick.receivedAt
+
+            } else {
+
+                result[result.lastIndex] = last.copy(
+                    high = max(last.high, tick.ltp),
+                    low = min(last.low, tick.ltp),
+                    close = tick.ltp,
+                    volume = last.volume + delta
+                )
+
+                lastTickTime[bucket] = tick.receivedAt
+            }
+        }
+
+        previousVolume = lastVolume
+        previousVolumeTimestamp = lastVolumeTime
+
+        _candles.value = result
+            .sortedBy { it.timestamp }
+            .takeLast(MAX_CANDLES)
+    }
+
+    private fun appendTick(tick: MarketTick) {
+
+        if (tick.receivedAt <= 0L) return
+        if (tick.ltp <= 0.0 || !tick.ltp.isFinite()) return
+
+        val bucketMillis = timeframe.value.seconds * 1_000L
+
+        val bucket = tick.receivedAt -
+            (tick.receivedAt % bucketMillis)
+
+        // Only newer ticks are allowed to advance cumulative volume.
+        val isNewestVolumeTick =
+            tick.receivedAt >= previousVolumeTimestamp
+
+        val delta = if (isNewestVolumeTick) {
+            if (tick.volume >= previousVolume) {
+                tick.volume - previousVolume
+            } else {
+                // Volume counter reset: rebase without adding false volume.
+                0L
+            }
+        } else {
+            0L
+        }
+
+        if (isNewestVolumeTick) {
+            previousVolume = tick.volume
+            previousVolumeTimestamp = tick.receivedAt
+        }
+
+        val current = _candles.value.toMutableList()
+
+        val index = current.indexOfFirst {
+            it.timestamp == bucket
+        }
+
+        if (index < 0) {
+
+            val newCandle = MarketCandle(
+                timestamp = bucket,
+                open = tick.ltp,
+                high = tick.ltp,
+                low = tick.ltp,
+                close = tick.ltp,
+                volume = delta
+            )
+
+            val insertIndex = current.indexOfFirst {
+                it.timestamp > bucket
+            }
+
+            if (insertIndex < 0) {
+                current.add(newCandle)
+            } else {
+                current.add(insertIndex, newCandle)
+            }
+
+            firstTickTime[bucket] = tick.receivedAt
+            lastTickTime[bucket] = tick.receivedAt
+
+        } else {
+
+            val candle = current[index]
+
+            val firstTime = firstTickTime[bucket] ?: bucket
+            val lastTime = lastTickTime[bucket] ?: bucket
+
+            val newOpen = if (tick.receivedAt < firstTime) {
+                tick.ltp
+            } else {
+                candle.open
+            }
+
+            val newClose = if (tick.receivedAt >= lastTime) {
+                tick.ltp
+            } else {
+                candle.close
+            }
+
+            val updatedVolume = candle.volume + delta
+
+            current[index] = candle.copy(
+                open = newOpen,
+                high = max(candle.high, tick.ltp),
+                low = min(candle.low, tick.ltp),
+                close = newClose,
+                volume = updatedVolume
+            )
+
+            if (tick.receivedAt < firstTime) {
+                firstTickTime[bucket] = tick.receivedAt
+            }
+
+            if (tick.receivedAt >= lastTime) {
+                lastTickTime[bucket] = tick.receivedAt
+            }
+        }
+
+        _candles.value = current
+            .sortedBy { it.timestamp }
+            .takeLast(MAX_CANDLES)
+
+        // Remove timestamp tracking for candles no longer retained.
+        val retained = _candles.value
+            .map { it.timestamp }
+            .toHashSet()
+
+        firstTickTime.keys.retainAll(retained)
+        lastTickTime.keys.retainAll(retained)
+    }
+
+    override fun onCleared() {
+        historicalToken++
+
+        currentKey?.let {
+            repository.unsubscribe(it)
+        }
+
+        currentKey = null
+        super.onCleared()
+    }
+
+    companion object {
+        private const val MAX_CANDLES = 2000
+        private const val HISTORICAL_YEARS = 3
+    }
+}

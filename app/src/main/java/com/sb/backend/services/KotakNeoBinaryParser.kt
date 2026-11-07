@@ -1,3 +1,4 @@
+
 package com.sb.backend.services
 
 import java.nio.ByteBuffer
@@ -39,6 +40,8 @@ data class KotakDecodedTick(
     val precision: Int = 2,
     val marketLot: Long = 0L,
     val depth: List<KotakDepthRow> = emptyList(),
+    val buyDepth: List<KotakDepthRow> = emptyList(),
+    val sellDepth: List<KotakDepthRow> = emptyList(),
     val statusCode: Int = 0,
     val status: String = ""
 )
@@ -71,36 +74,55 @@ class KotakNeoBinaryParser {
     private var dividers: Map<Int, Double> = emptyMap()
 
     fun setDividers(values: Map<Int, Double>) {
-        dividers = values.filterValues { it > 0.0 }
+        dividers = values.filterValues {
+            it.isFinite() && it > 0.0
+        }
     }
 
-    private fun divider(exchangeId: Int): Double =
-        dividers[exchangeId] ?: when (exchangeId) {
+    private fun divider(exchangeId: Int): Double {
+        return dividers[exchangeId] ?: when (exchangeId) {
             3, 7 -> 10_000_000.0
             4, 8 -> 10_000.0
             10 -> 1.0
             else -> 100.0
         }
+    }
 
-    private fun buffer(bytes: ByteArray): ByteBuffer =
-        ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+    private fun buffer(bytes: ByteArray): ByteBuffer {
+        return ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+    }
 
-    private fun readUnsignedInt(b: ByteBuffer, offset: Int): Long =
-        b.getInt(offset).toLong() and 0xFFFFFFFFL
+    private fun readUnsignedInt(
+        b: ByteBuffer,
+        offset: Int
+    ): Long {
+        return b.getInt(offset).toLong() and 0xFFFFFFFFL
+    }
 
     private fun readString(
         bytes: ByteArray,
         offset: Int,
         length: Int
     ): String {
-        if (offset < 0 || length <= 0 ||
+        if (
+            offset < 0 ||
+            length <= 0 ||
             offset >= bytes.size
-        ) return ""
+        ) {
+            return ""
+        }
 
-        val end = (offset + length).coerceAtMost(bytes.size)
+        val end = minOf(
+            bytes.size.toLong(),
+            offset.toLong() + length.toLong()
+        ).toInt()
+
         var actualEnd = offset
 
-        while (actualEnd < end && bytes[actualEnd].toInt() != 0) {
+        while (
+            actualEnd < end &&
+            bytes[actualEnd].toInt() != 0
+        ) {
             actualEnd++
         }
 
@@ -112,26 +134,41 @@ class KotakNeoBinaryParser {
         ).trim()
     }
 
-    fun parseFrame(frame: ByteArray): List<KotakDecodedTick> {
+    fun parseFrame(
+        frame: ByteArray
+    ): List<KotakDecodedTick> {
+
         val result = mutableListOf<KotakDecodedTick>()
         var offset = 0
 
-        while (offset + 2 <= frame.size) {
+        while (offset <= frame.size - 2) {
+
             val length = (
                 (frame[offset].toInt() and 0xFF) or
-                    ((frame[offset + 1].toInt() and 0xFF) shl 8)
+                    (
+                        (frame[offset + 1].toInt() and 0xFF)
+                            shl 8
+                    )
                 )
 
-            if (length < HEADER_SIZE || offset + length > frame.size) {
+            if (
+                length < HEADER_SIZE ||
+                length > frame.size - offset
+            ) {
                 break
             }
 
-            val packet = frame.copyOfRange(offset, offset + length)
+            val packet = frame.copyOfRange(
+                offset,
+                offset + length
+            )
 
             try {
-                parsePacket(packet)?.let { result.add(it) }
+                parsePacket(packet)?.let {
+                    result.add(it)
+                }
             } catch (_: Exception) {
-                // Ignore malformed packet; continue with next valid packet.
+                // Ignore malformed packet.
             }
 
             offset += length
@@ -140,37 +177,75 @@ class KotakNeoBinaryParser {
         return result
     }
 
-    fun parsePacket(packet: ByteArray): KotakDecodedTick? {
+    fun parsePacket(
+        packet: ByteArray
+    ): KotakDecodedTick? {
+
         if (packet.size < HEADER_SIZE) return null
 
         val b = buffer(packet)
-        val declaredLength = b.getShort(0).toInt() and 0xFFFF
+
+        val declaredLength =
+            b.getShort(0).toInt() and 0xFFFF
 
         if (declaredLength != packet.size) return null
 
-        val messageCode = b.getShort(2).toInt() and 0xFFFF
-        val exchangeId = b.get(4).toInt()
-        val level = b.get(5).toInt() and 0xFF
-        val exchange = exchangeNames[exchangeId] ?: return null
+        val messageCode =
+            b.getShort(2).toInt() and 0xFFFF
+
+        val exchangeId =
+            b.get(4).toInt() and 0xFF
+
+        val level =
+            b.get(5).toInt() and 0xFF
+
+        val exchange =
+            exchangeNames[exchangeId] ?: return null
+
         val scale = divider(exchangeId)
 
         return when {
+
             messageCode == CODE_INDEX ->
-                parseIndex(packet, exchangeId, exchange, scale)
+                parseIndex(
+                    packet,
+                    exchangeId,
+                    exchange,
+                    scale
+                )
 
             messageCode == CODE_MARKET_STATUS ->
-                parseMarketStatus(packet, exchangeId, exchange)
+                parseMarketStatus(
+                    packet,
+                    exchangeId,
+                    exchange
+                )
 
             messageCode == CODE_CAS ->
-                parseCas(packet, exchangeId, exchange, scale)
+                parseCas(
+                    packet,
+                    exchangeId,
+                    exchange,
+                    scale
+                )
 
-            messageCode == CODE_MARKET_PICTURE && level == 1 ->
-                parseMini(packet, exchangeId, exchange, scale)
+            messageCode == CODE_MARKET_PICTURE &&
+                level == 1 ->
+                parseMini(
+                    packet,
+                    exchangeId,
+                    exchange,
+                    scale
+                )
 
             messageCode == CODE_MARKET_PICTURE &&
                 level in setOf(2, 4, 8) ->
                 parseMarketPicture(
-                    packet, exchangeId, exchange, level, scale
+                    packet,
+                    exchangeId,
+                    exchange,
+                    level,
+                    scale
                 )
 
             else -> null
@@ -183,7 +258,9 @@ class KotakNeoBinaryParser {
         exchange: String,
         scale: Double
     ): KotakDecodedTick? {
+
         if (packet.size < 87) return null
+
         val b = buffer(packet)
 
         val open = b.getInt(13) / scale
@@ -191,8 +268,12 @@ class KotakNeoBinaryParser {
         val high = b.getInt(21) / scale
         val low = b.getInt(25) / scale
         val ltp = b.getInt(29) / scale
+
         val percent = b.getInt(49) / 100.0
-        val precision = b.get(61).toInt() and 0xFF
+
+        val precision =
+            b.get(61).toInt() and 0xFF
+
         val name = readString(packet, 66, 21)
 
         return KotakDecodedTick(
@@ -223,7 +304,9 @@ class KotakNeoBinaryParser {
         exchange: String,
         scale: Double
     ): KotakDecodedTick? {
+
         if (packet.size < 54) return null
+
         val b = buffer(packet)
 
         return KotakDecodedTick(
@@ -235,7 +318,7 @@ class KotakNeoBinaryParser {
             lastTradeTime = b.getLong(13),
             ltp = readUnsignedInt(b, 21) / scale,
             lastTradeQuantity = b.getLong(25),
-            close = readUnsignedInt(b, 33).toDouble(),
+            close = readUnsignedInt(b, 33) / scale,
             changePercent = b.getInt(37) / 100.0,
             change = b.getInt(41) / scale,
             marketLot = readUnsignedInt(b, 45),
@@ -250,26 +333,42 @@ class KotakNeoBinaryParser {
         level: Int,
         scale: Double
     ): KotakDecodedTick? {
+
         if (packet.size < 144) return null
+
         val b = buffer(packet)
 
-        val buyCountRaw = readUnsignedInt(b, 89).coerceAtMost(100)
-        val sellCountRaw = readUnsignedInt(b, 93).coerceAtMost(100)
+        val buyCountRaw =
+            readUnsignedInt(b, 89).coerceAtMost(100L)
 
-        val buyCount = if (level == 4) 1 else buyCountRaw.toInt()
-        val sellCount = if (level == 4) 1 else sellCountRaw.toInt()
+        val sellCountRaw =
+            readUnsignedInt(b, 93).coerceAtMost(100L)
+
+        val buyCount =
+            if (level == 4) 1 else buyCountRaw.toInt()
+
+        val sellCount =
+            if (level == 4) 1 else sellCountRaw.toInt()
 
         val rows = mutableListOf<KotakDepthRow>()
+
         var rowOffset = 144
 
-        val availableRows = ((packet.size - rowOffset) / 16)
-        val requestedRows = (buyCount + sellCount)
-            .coerceAtMost(availableRows)
+        val availableRows =
+            (packet.size - rowOffset) / 16
+
+        val requestedRows =
+            (buyCount + sellCount).coerceAtMost(availableRows)
 
         repeat(requestedRows) {
+
             val qty = b.getLong(rowOffset)
-            val price = b.getInt(rowOffset + 8) / scale
-            val orders = b.getInt(rowOffset + 12)
+
+            val price =
+                b.getInt(rowOffset + 8) / scale
+
+            val orders =
+                b.getInt(rowOffset + 12)
 
             rows.add(
                 KotakDepthRow(
@@ -278,10 +377,13 @@ class KotakNeoBinaryParser {
                     orders = orders
                 )
             )
+
             rowOffset += 16
         }
 
-        val actualBuyCount = minOf(buyCount, rows.size)
+        val actualBuyCount =
+            minOf(buyCount, rows.size)
+
         val buys = rows.take(actualBuyCount)
         val sells = rows.drop(actualBuyCount)
 
@@ -291,28 +393,51 @@ class KotakNeoBinaryParser {
             exchange = exchange,
             level = level,
             token = readUnsignedInt(b, 9),
+
             totalBuyQuantity = b.getLong(13),
             totalSellQuantity = b.getLong(21),
             volume = b.getLong(29),
+
             lastTradeTime = b.getLong(37),
             lastUpdateTime = b.getLong(45),
+
             open = readUnsignedInt(b, 53) / scale,
             close = readUnsignedInt(b, 57) / scale,
             high = readUnsignedInt(b, 61) / scale,
             low = readUnsignedInt(b, 65) / scale,
             ltp = readUnsignedInt(b, 69) / scale,
+
             lastTradeQuantity = b.getLong(73),
-            averageTradePrice = readUnsignedInt(b, 81) / scale,
+
+            averageTradePrice =
+                readUnsignedInt(b, 81) / scale,
+
             changePercent = b.getInt(99) / 100.0,
+
             openInterest = readUnsignedInt(b, 103),
+
             change = b.getInt(115) / scale,
-            upperCircuit = readUnsignedInt(b, 119) / scale,
-            lowerCircuit = readUnsignedInt(b, 123) / scale,
-            yearlyHigh = readUnsignedInt(b, 127) / scale,
-            yearlyLow = readUnsignedInt(b, 131) / scale,
+
+            upperCircuit =
+                readUnsignedInt(b, 119) / scale,
+
+            lowerCircuit =
+                readUnsignedInt(b, 123) / scale,
+
+            yearlyHigh =
+                readUnsignedInt(b, 127) / scale,
+
+            yearlyLow =
+                readUnsignedInt(b, 131) / scale,
+
             marketLot = readUnsignedInt(b, 135),
-            precision = b.get(139).toInt() and 0xFF,
-            depth = buys + sells
+
+            precision =
+                b.get(139).toInt() and 0xFF,
+
+            depth = buys + sells,
+            buyDepth = buys,
+            sellDepth = sells
         )
     }
 
@@ -321,7 +446,9 @@ class KotakNeoBinaryParser {
         exchangeId: Int,
         exchange: String
     ): KotakDecodedTick? {
+
         if (packet.size < 16) return null
+
         val b = buffer(packet)
 
         return KotakDecodedTick(
@@ -329,8 +456,9 @@ class KotakNeoBinaryParser {
             exchangeId = exchangeId,
             exchange = exchange,
             level = b.get(5).toInt() and 0xFF,
-            token = 0,
-            statusCode = b.getShort(9).toInt() and 0xFFFF,
+            token = 0L,
+            statusCode =
+                b.getShort(9).toInt() and 0xFFFF,
             status = readString(packet, 11, 5)
         )
     }
@@ -341,7 +469,9 @@ class KotakNeoBinaryParser {
         exchange: String,
         scale: Double
     ): KotakDecodedTick? {
+
         if (packet.size < 48) return null
+
         val b = buffer(packet)
 
         return KotakDecodedTick(
@@ -349,7 +479,7 @@ class KotakNeoBinaryParser {
             exchangeId = exchangeId,
             exchange = exchange,
             level = b.get(5).toInt() and 0xFF,
-            token = b.getInt(9).toLong(),
+            token = readUnsignedInt(b, 9),
             close = b.getInt(13) / scale,
             volume = b.getLong(17)
         )

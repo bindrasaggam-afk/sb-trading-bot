@@ -1,15 +1,16 @@
+
 package com.sb
 
 import android.app.AlertDialog
 import android.content.Context
 import android.graphics.Color
-import android.view.ViewGroup
 import android.widget.*
 import com.sb.backend.security.KotakNeoSecureStore
 import com.sb.backend.services.KotakNeoAuthClient
 import com.sb.backend.services.KotakNeoMarketDataService
 import com.sb.backend.services.KotakSessionCoordinator
 import com.sb.backend.core.BackendManager
+import com.sb.ui.theme.AppDesign
 import java.text.DecimalFormat
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -20,11 +21,11 @@ class SettingsScreen(private val context: Context) {
 
     private val secureStore = KotakNeoSecureStore(context)
 
-    private val bg = Color.rgb(18, 18, 18)
-    private val panel = Color.rgb(30, 30, 30)
-    private val yellow = Color.rgb(255, 193, 7)
-    private val white = Color.WHITE
-    private val grey = Color.rgb(160, 160, 160)
+    private val bg = AppDesign.background
+    private val panel = AppDesign.field
+    private val yellow = AppDesign.accent
+    private val white = AppDesign.textPrimary
+    private val grey = AppDesign.textMuted
 
     private lateinit var statusText: TextView
 
@@ -34,7 +35,7 @@ class SettingsScreen(private val context: Context) {
     private fun label(
         parent: LinearLayout,
         value: String,
-        size: Float = 15f,
+        size: Float = 13f,
         color: Int = white,
         bold: Boolean = false
     ) {
@@ -43,7 +44,7 @@ class SettingsScreen(private val context: Context) {
             textSize = size
             setTextColor(color)
             if (bold) typeface = android.graphics.Typeface.DEFAULT_BOLD
-            setPadding(0, dp(7), 0, dp(7))
+            setPadding(0, dp(5), 0, dp(5))
         })
     }
 
@@ -57,8 +58,8 @@ class SettingsScreen(private val context: Context) {
         setTextColor(white)
         setHintTextColor(grey)
         inputType = type
-        setPadding(dp(12), dp(10), dp(12), dp(10))
-        setBackgroundColor(panel)
+        setPadding(dp(12), dp(9), dp(12), dp(9))
+        background = AppDesign.fieldBackground(context, 9)
     }
 
     private fun actionButton(
@@ -67,6 +68,11 @@ class SettingsScreen(private val context: Context) {
     ) = Button(context).apply {
         text = title
         isAllCaps = false
+        textSize = 12f
+        minHeight = 0
+        minimumHeight = 0
+        setTextColor(white)
+        background = AppDesign.roundedBackground(context, panel, 9)
         setOnClickListener { action() }
     }
 
@@ -78,15 +84,15 @@ class SettingsScreen(private val context: Context) {
 
         val body = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(16), dp(16), dp(24))
+            setPadding(dp(14), dp(10), dp(14), dp(20))
         }
 
         scroll.addView(body)
 
-        label(body, "Settings", 23f, white, true)
-        label(body, "Kotak Neo Broker Configuration", 14f, yellow)
+        label(body, "Settings", 19f, white, true)
+        label(body, "Kotak Neo Broker Configuration", 11f, grey)
 
-        label(body, "API Access Token", color = yellow, bold = true)
+        label(body, "API Access Token", 12f, yellow, true)
         val tokenInput = input(
             "Kotak Neo API Access Token",
             secureStore.getAccessToken(),
@@ -219,7 +225,11 @@ class SettingsScreen(private val context: Context) {
                 .setPositiveButton("Clear") { _, _ ->
                     KotakSessionCoordinator.clear()
                 }
-                .show()
+                .create()
+                .also { dialog ->
+                    AppDesign.styleDialog(dialog)
+                    dialog.show()
+                }
         })
 
         return scroll
@@ -328,7 +338,11 @@ class SettingsScreen(private val context: Context) {
                                         }
                                     }
                                 }
-                                .show()
+                                .create()
+                                .also { dialog ->
+                                    AppDesign.styleDialog(dialog)
+                                    dialog.show()
+                                }
                         }
                     } catch (e: Exception) {
                         android.os.Handler(context.mainLooper).post {
@@ -338,7 +352,11 @@ class SettingsScreen(private val context: Context) {
                     }
                 }
             }
-            .show()
+            .create()
+            .also { dialog ->
+                AppDesign.styleDialog(dialog)
+                dialog.show()
+            }
     }
 
     private fun syncKotakScripMaster() {
@@ -379,9 +397,10 @@ class SettingsScreen(private val context: Context) {
 
         thread {
             try {
-                BackendManager.initialize(context)
-                if (!BackendManager.isInitialized()) {
-                    throw Exception("Backend database not ready")
+                // Backend startup is owned by MarketForegroundService.
+                // SettingsScreen must not initialize BackendManager again.
+                if (!BackendManager.isReady()) {
+                    throw Exception("Backend is not ready yet")
                 }
 
                 val service = KotakNeoMarketDataService(

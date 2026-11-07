@@ -1,0 +1,1975 @@
+package com.sb
+
+import android.animation.ValueAnimator
+import android.app.AlertDialog
+import android.app.Dialog
+import android.graphics.Color
+import android.graphics.Typeface
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
+import android.view.ViewGroup
+import android.view.Window
+import android.view.WindowManager
+import android.widget.ArrayAdapter
+import android.widget.Button
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.ListView
+import android.widget.ScrollView
+import android.widget.TextView
+import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.lifecycleScope
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import com.sb.backend.core.BackendManager
+import com.sb.backend.market.MarketDataManager
+import com.sb.backend.market.model.InstrumentKey
+import com.sb.ui.market.InstrumentLiveViewModel
+import com.sb.ui.market.MarketListAdapter
+import com.sb.ui.market.MarketListItem
+import com.sb.ui.theme.AppDesign
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.util.Locale
+
+private data class MissingLivePriceReport(
+    val rows: List<String>,
+    val total: Int,
+    val noToken: Int,
+    val noTick: Int
+)
+
+class MainActivity : AppCompatActivity() {
+
+    private val bg = AppDesign.background
+    private val panel = AppDesign.surfaceSolid
+    private val yellow = AppDesign.accent
+    private val white = AppDesign.textPrimary
+    private val grey = AppDesign.textMuted
+    private val green = AppDesign.positive
+    private val red = AppDesign.negative
+
+    private lateinit var root: LinearLayout
+    private lateinit var header: LinearLayout
+    private lateinit var footer: LinearLayout
+    private lateinit var headerDivider: View
+    private lateinit var footerDivider: View
+    private lateinit var content: FrameLayout
+    private var currentScreen = "Home"
+    private var marketTab = "Equity"
+    private var marketCategory = ""
+    private lateinit var stockMasterDbHelper: StockMasterDbHelper
+    private lateinit var sbApiServer: com.sb.backend.server.EmbeddedApiServer
+    private var settingsScreen: SettingsScreen? = null
+    private val quoteHandler = Handler(Looper.getMainLooper())
+    private var quoteRefresh: Runnable? = null
+    private val marketListAdapter = MarketListAdapter()
+    private var marketTicksJob: Job? = null
+    private var marketListVisible = false
+    private lateinit var liveViewModel: InstrumentLiveViewModel
+    private var isChartFullscreen = false
+    private var chartScreen: HeikinAshiChartScreen? = null
+    private var dashboardMetricsUpdater: (() -> Unit)? = null
+    private var chromeAnimator: ValueAnimator? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        supportActionBar?.hide()
+        liveViewModel = ViewModelProvider(this)
+            .get(InstrumentLiveViewModel::class.java)
+        stockMasterDbHelper = StockMasterDbHelper(this)
+        buildApp()
+
+        sbApiServer = com.sb.backend.server.EmbeddedApiServer(10000)
+
+        val serverStarted = sbApiServer.start()
+
+        android.util.Log.d(
+            "SB_API_SERVER",
+            "Backend Server Started: $serverStarted"
+        )
+
+        val backendManager =
+            com.sb.backend.services.BackendManager(this)
+
+        val backendReady = backendManager.initialize()
+
+        android.util.Log.d(
+            "SB_BACKEND_INIT",
+            "Backend Initialized: $backendReady"
+        )
+
+        android.util.Log.d(
+            "SB_BACKEND_INIT",
+            "Database Status: ${backendManager.getDatabaseStatus()}"
+        )
+
+        val databaseTest = com.sb.backend.database.BackendDatabaseTest(this)
+        val result = databaseTest.testConnection()
+        android.util.Log.d("SB_BACKEND_TEST", result)
+
+        val instrumentTest =
+            com.sb.backend.services.InstrumentFunctionalTest(
+                backendManager.instrumentRepository
+            )
+
+        android.util.Log.d(
+            "SB_INSTRUMENT_TEST",
+            instrumentTest.runTest()
+        )
+
+        val marketTest =
+            com.sb.backend.services.MarketFunctionalTest(
+                backendManager.marketRepository
+            )
+
+        android.util.Log.d(
+            "SB_MARKET_TEST",
+            marketTest.runTest()
+        )
+
+        com.sb.backend.core.BackendManager.initialize(applicationContext)
+
+        com.sb.backend.core.BackendManager.start(
+            seedBuiltInMasters = true,
+            onReady = {
+                com.sb.backend.services.KotakSessionCoordinator.initialize(
+                    applicationContext
+                )
+                com.sb.backend.services.KotakSessionCoordinator.startIfEnabled()
+
+                if (com.sb.backend.core.BackendManager.isReady()) {
+                    val exportUri =
+                        com.sb.backend.core.BackendManager.exportDatabaseToDownloads()
+
+                    android.util.Log.d(
+                        "SB_DATABASE_EXPORT",
+                        "Database Export URI: $exportUri"
+                    )
+                } else {
+                    android.util.Log.e(
+                        "SB_DATABASE_EXPORT",
+                        "Backend initialization or seeding failed"
+                    )
+                }
+            }
+        )
+
+        showScreen("Home")
+    }
+
+    // बैक बटन दबाने पर सीधे होम स्क्रीन पर जाने का लॉजिक
+    override fun onBackPressed() {
+        if (isChartFullscreen) {
+            chartScreen?.setFullscreen(false) ?: setChartFullscreen(false)
+            return
+        }
+
+        if (currentScreen != "Home") {
+            showScreen("Home")
+        } else {
+            super.onBackPressed()
+        }
+    }
+
+    private fun dp(value: Int): Int =
+        (value * resources.displayMetrics.density).toInt()
+
+    private fun buildApp() {
+        root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(bg)
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+        setContentView(root)
+
+        header = AppDesign.header(this)
+
+        val menu = makeText("☰", 20f, yellow, true).apply {
+            gravity = Gravity.CENTER
+            setPadding(dp(4), dp(4), dp(12), dp(4))
+            setOnClickListener { showMenu() }
+        }
+
+        val title = makeText("SB BOT", 17f, white, true).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1f
+            )
+        }
+
+        val notification = makeText("♧", 19f, white, false).apply {
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            setOnClickListener {
+                val dialog = AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Notifications")
+                    .setMessage(
+                        "Live alerts will appear here when the backend " +
+                            "publishes a verified signal."
+                    )
+                    .setPositiveButton("OK", null)
+                    .create()
+                dialog.setOnShowListener { AppDesign.styleDialog(dialog) }
+                dialog.show()
+            }
+        }
+
+        val settings = makeText("⚙", 19f, white, false).apply {
+            setPadding(dp(8), dp(4), dp(2), dp(4))
+            setOnClickListener { showScreen("Settings") }
+        }
+
+        header.addView(menu)
+        header.addView(title)
+        header.addView(notification)
+        header.addView(settings)
+
+        // Main screen content - पूरी स्क्रीन को घेरने के लिए weight 1f दिया गया है
+        content = FrameLayout(this).apply {
+            setBackgroundColor(bg)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
+            )
+        }
+
+        footer = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setBackgroundColor(bg)
+            setPadding(0, dp(3), 0, dp(3))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(AppDesign.FOOTER_HEIGHT_DP)
+            )
+        }
+
+        val navItems = listOf(
+            "Home" to "⌂",
+            "Signals" to "↗",
+            "Paper" to "▤",
+            "Positions" to "▣",
+            "Market" to "⌁"
+        )
+
+        navItems.forEach { item ->
+            val nav = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                setPadding(dp(2), dp(3), dp(2), dp(3))
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
+                setOnClickListener { showScreen(item.first) }
+            }
+
+            nav.addView(makeText(item.second, 18f, white, true).apply {
+                gravity = Gravity.CENTER
+            })
+            nav.addView(makeText(item.first, 9f, grey, false).apply {
+                gravity = Gravity.CENTER
+            })
+            footer.addView(nav)
+        }
+
+        headerDivider = AppDesign.divider(this)
+        footerDivider = AppDesign.divider(this)
+
+        root.addView(header)
+        root.addView(headerDivider)
+        root.addView(content)
+        root.addView(footerDivider)
+        root.addView(footer)
+    }
+
+    private fun setChartFullscreen(fullscreen: Boolean) {
+        isChartFullscreen = fullscreen
+        setChromeVisible(!fullscreen)
+    }
+
+    private fun setChromeVisible(visible: Boolean, animate: Boolean = true) {
+        chromeAnimator?.cancel()
+        chromeAnimator = null
+
+        val headerTarget = if (visible) dp(AppDesign.HEADER_HEIGHT_DP) else 0
+        val footerTarget = if (visible) dp(AppDesign.FOOTER_HEIGHT_DP) else 0
+
+        if (!animate) {
+            applyChromeHeights(headerTarget, footerTarget)
+            header.alpha = if (visible) 1f else 0f
+            footer.alpha = if (visible) 1f else 0f
+            header.visibility = if (visible) View.VISIBLE else View.GONE
+            footer.visibility = if (visible) View.VISIBLE else View.GONE
+            headerDivider.visibility = if (visible) View.VISIBLE else View.GONE
+            footerDivider.visibility = if (visible) View.VISIBLE else View.GONE
+            return
+        }
+
+        if (visible) {
+            header.visibility = View.VISIBLE
+            footer.visibility = View.VISIBLE
+            headerDivider.visibility = View.VISIBLE
+            footerDivider.visibility = View.VISIBLE
+        }
+
+        val startHeader = header.layoutParams.height.coerceAtLeast(0)
+        val startFooter = footer.layoutParams.height.coerceAtLeast(0)
+
+        val animator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 200L
+            addUpdateListener { valueAnimator ->
+                val fraction = valueAnimator.animatedValue as Float
+                val headerHeight = (
+                    startHeader + (headerTarget - startHeader) * fraction
+                    ).toInt()
+                val footerHeight = (
+                    startFooter + (footerTarget - startFooter) * fraction
+                    ).toInt()
+                applyChromeHeights(headerHeight, footerHeight)
+
+                val alpha = if (visible) fraction else 1f - fraction
+                header.alpha = alpha
+                footer.alpha = alpha
+                headerDivider.alpha = alpha
+                footerDivider.alpha = alpha
+            }
+            addListener(object : android.animation.AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: android.animation.Animator) {
+                    if (!visible) {
+                        header.visibility = View.GONE
+                        footer.visibility = View.GONE
+                        headerDivider.visibility = View.GONE
+                        footerDivider.visibility = View.GONE
+                    }
+                    if (chromeAnimator === animation) {
+                        chromeAnimator = null
+                    }
+                }
+            })
+        }
+        chromeAnimator = animator
+        animator.start()
+    }
+
+    private fun applyChromeHeights(headerHeight: Int, footerHeight: Int) {
+        header.layoutParams = (header.layoutParams as? LinearLayout.LayoutParams)
+            ?: LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                headerHeight
+            )
+        header.layoutParams.height = headerHeight
+        header.requestLayout()
+
+        footer.layoutParams = (footer.layoutParams as? LinearLayout.LayoutParams)
+            ?: LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                footerHeight
+            )
+        footer.layoutParams.height = footerHeight
+        footer.requestLayout()
+    }
+
+    private fun formatPrice(value: Double?): String {
+        if (value == null || !value.isFinite()) return "—"
+        return String.format(Locale.US, "%.2f", value)
+    }
+
+    private fun formatRupees(value: Double): String {
+        val sign = if (value < 0.0) "-" else ""
+        val absValue = kotlin.math.abs(value)
+        return if (absValue >= 1_000_000_000.0) {
+            String.format(Locale.US, "%s₹%.2fB", sign, absValue / 1_000_000_000.0)
+        } else if (absValue >= 1_000_000.0) {
+            String.format(Locale.US, "%s₹%.2fCr", sign, absValue / 10_000_000.0)
+        } else if (absValue >= 1_000.0) {
+            String.format(Locale.US, "%s₹%.2fK", sign, absValue / 1_000.0)
+        } else {
+            String.format(Locale.US, "%s₹%.2f", sign, absValue)
+        }
+    }
+
+    private fun makeText(
+        value: String,
+        size: Float,
+        color: Int,
+        bold: Boolean
+    ): TextView {
+        return TextView(this).apply {
+            text = value
+            textSize = size
+            setTextColor(color)
+            if (bold) typeface = Typeface.DEFAULT_BOLD
+        }
+    }
+
+    private fun addLabel(
+        parent: LinearLayout,
+        value: String,
+        size: Float = 16f,
+        color: Int = white,
+        bold: Boolean = false
+    ) {
+        val textView = makeText(value, size, color, bold)
+        textView.setPadding(0, dp(5), 0, dp(5))
+        parent.addView(textView)
+    }
+
+    private fun addMetricCard(
+        parent: LinearLayout,
+        heading: String,
+        value: String
+    ): TextView {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = AppDesign.cardBackground(this@MainActivity, 10)
+            setPadding(dp(12), dp(10), dp(8), dp(10))
+            layoutParams = LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1f
+            ).apply {
+                setMargins(dp(3), dp(4), dp(3), dp(6))
+            }
+        }
+        addLabel(card, heading, 11f, grey)
+        val valueView = makeText(value, 18f, white, true)
+        valueView.setPadding(0, dp(5), 0, dp(5))
+        card.addView(valueView)
+        parent.addView(card)
+        return valueView
+    }
+
+    private fun openChart(
+        symbol: String,
+        exchange: String,
+        category: String = ""
+    ) {
+        val resolvedExchange = exchange.ifBlank { inferExchange(symbol) }
+        val chartSymbol = resolveInstrumentSymbol(symbol, resolvedExchange)
+        val chartCategory = category.ifBlank {
+            when (resolvedExchange.uppercase(Locale.ROOT)) {
+                "MCX" -> "Commodity"
+                "BSE" -> "BSE"
+                else -> "Market"
+            }
+        }
+
+        currentScreen = "Chart"
+        marketListVisible = false
+        stopQuoteRefresh()
+        stopMarketTicks()
+        marketListAdapter.release()
+        content.removeAllViews()
+        chartScreen = null
+
+        if (isChartFullscreen) {
+            isChartFullscreen = false
+        }
+        setChromeVisible(true, animate = false)
+
+        val chart = HeikinAshiChartScreen(
+            this,
+            initialSymbol = chartSymbol,
+            instrumentCategory = chartCategory,
+            exchange = resolvedExchange,
+            viewModel = liveViewModel,
+            onFullscreenChanged = { fullscreen ->
+                setChartFullscreen(fullscreen)
+            }
+        )
+        chartScreen = chart
+        content.addView(
+            chart.createView(),
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+    }
+
+    private fun showScreen(screen: String) {
+        currentScreen = screen
+        marketListVisible = false
+        stopQuoteRefresh()
+        stopMarketTicks()
+        marketListAdapter.release()
+        content.removeAllViews()
+        chartScreen = null
+
+        if (isChartFullscreen) {
+            isChartFullscreen = false
+        }
+        setChromeVisible(true, animate = false)
+
+        if (screen == "No Live Price") {
+            showMissingLivePrices()
+            return
+        }
+
+        // Stock Search ko ScrollView ke andar mat rakho.
+        // Isse search input aur results ko poora available area milega.
+        if (screen == "Stock Search") {
+            val searchView = StockSearchScreen(
+                context = this,
+                onOpenScreen = { destination ->
+                    showScreen(destination)
+                },
+                onStockSelected = { stock ->
+                    openChart(stock.symbol, stock.exchange, "Market")
+                }
+            ).createView()
+
+            content.addView(
+                searchView,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            )
+            return
+        }
+
+        val scroll = ScrollView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+            isFillViewport = true
+        }
+
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), dp(24))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+
+        scroll.addView(body)
+        content.addView(scroll)
+
+        when (screen) {
+            "Home" -> showDashboard(body)
+            "Signals" -> showSignals(body)
+            "Paper" -> {
+                content.removeAllViews()
+                content.addView(
+                    PaperTradingScreen.create(
+                        this,
+                        onOpenChart = { symbol, exchange ->
+                            openChart(symbol, exchange, "Market")
+                        }
+                    ),
+                    FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                )
+            }
+            "Chart" -> {
+                openChart("NIFTY 50", "NSE", "Index")
+            }
+            "Positions" -> showPositions(body)
+            "Market" -> showMarket(body)
+            "Settings" -> {
+                content.removeAllViews()
+
+                if (settingsScreen == null) {
+                    settingsScreen = SettingsScreen(this)
+                }
+
+                content.addView(
+                    settingsScreen!!.createView(),
+                    FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                )
+            }
+            else -> showDashboard(body)
+        }
+    }
+
+    private fun showDashboard(body: LinearLayout) {
+        addLabel(body, "Trading Dashboard", 23f, white, true)
+        addLabel(
+            body,
+            "Live paper account  •  No broker connection",
+            12f, yellow
+        )
+
+        // Compact metric cards
+        val firstRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        val secondRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        val capitalValue = addMetricCard(
+            firstRow,
+            "Available Capital",
+            "—"
+        )
+        val pnlValue = addMetricCard(
+            firstRow,
+            "Today's P&L",
+            "—"
+        )
+
+        val signalsValue = addMetricCard(
+            secondRow,
+            "Live Signals",
+            "—"
+        )
+        val positionsValue = addMetricCard(
+            secondRow,
+            "Open Positions",
+            "—"
+        )
+
+        body.addView(firstRow)
+        body.addView(secondRow)
+
+        fun updateMetrics() {
+            if (!BackendManager.isInitialized()) {
+                return
+            }
+
+            try {
+                val snapshot = BackendManager.paperEngine().snapshot()
+                capitalValue.text = snapshot?.let {
+                    formatRupees(it.availableBalance)
+                } ?: "—"
+
+                val pnl = snapshot?.let {
+                    it.realizedPnl + it.unrealizedPnl
+                }
+                pnlValue.text = pnl?.let { formatRupees(it) } ?: "—"
+                pnlValue.setTextColor(
+                    when {
+                        pnl == null -> white
+                        pnl >= 0.0 -> green
+                        else -> red
+                    }
+                )
+
+                positionsValue.text =
+                    snapshot?.openPositions?.size?.toString() ?: "—"
+            } catch (_: Exception) {
+                capitalValue.text = "—"
+                pnlValue.text = "—"
+                positionsValue.text = "—"
+            }
+
+            signalsValue.text = try {
+                BackendManager.signals().getActive().size.toString()
+            } catch (_: Exception) {
+                "—"
+            }
+        }
+
+        updateMetrics()
+        dashboardMetricsUpdater = { updateMetrics() }
+
+        addLabel(body, "Quick Access", 18f, yellow, true)
+        addActionCard(body, "📈  Live Signals", "Signals")
+        addActionCard(body, "📝  Paper Trading", "Paper")
+        addActionCard(body, "▣  Open Positions", "Positions")
+        addActionCard(body, "⌁  Market Watch", "Market")
+        addActionCard(body, "▥  Chart", "Chart")
+
+        addLabel(body, "Market Watch", 18f, yellow, true)
+        addLabel(
+            body,
+            "Live prices connect होने पर स्वतः update होंगे।",
+            13f, grey
+        )
+
+        val quoteViews = ArrayList<Triple<String, String, TextView>>()
+
+        listOf(
+            "NIFTY 50" to "NSE",
+            "BANK NIFTY" to "NSE",
+            "RELIANCE" to "NSE",
+            "GOLD" to "MCX",
+            "SILVER" to "MCX"
+        ).forEach { item ->
+            val symbol = item.first
+            val exchange = item.second
+
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                background = AppDesign.cardBackground(this@MainActivity, 10)
+                setPadding(dp(14), dp(10), dp(14), dp(10))
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    setMargins(0, 0, 0, dp(6))
+                }
+            }
+
+            val name = makeText(symbol, 14f, white, true)
+            name.layoutParams = LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1f
+            )
+
+            val price = makeText("—", 14f, grey, false)
+
+            row.addView(name)
+            row.addView(price)
+            row.setOnClickListener {
+                openChart(symbol, exchange, if (exchange == "MCX") "Commodity" else "Market")
+            }
+            body.addView(row)
+
+            quoteViews.add(Triple(symbol, exchange, price))
+        }
+
+        startQuoteRefresh(quoteViews)
+    }
+
+    private fun startQuoteRefresh(
+        views: List<Triple<String, String, TextView>>
+    ) {
+        quoteRefresh?.let {
+            quoteHandler.removeCallbacks(it)
+        }
+        quoteRefresh = null
+
+        val runnable = object : Runnable {
+            override fun run() {
+                updateQuoteViews(views)
+                dashboardMetricsUpdater?.invoke()
+                quoteHandler.postDelayed(this, 1000L)
+            }
+        }
+
+        quoteRefresh = runnable
+        quoteHandler.post(runnable)
+    }
+
+    private fun updateQuoteViews(
+        views: List<Triple<String, String, TextView>>
+    ) {
+        if (!com.sb.backend.core.BackendManager.isInitialized()) {
+            return
+        }
+
+        val market = com.sb.backend.core.BackendManager.market()
+
+        views.forEach { item ->
+            val symbol = item.first
+            val exchange = item.second
+            val view = item.third
+
+            val quote = try {
+                com.sb.backend.services.LiveQuoteCache.get(symbol, exchange)
+                    ?: market.getQuote(symbol, exchange)
+            } catch (_: Exception) {
+                try {
+                    com.sb.backend.services.LiveQuoteCache.get(symbol, exchange)
+                } catch (_: Exception) {
+                    null
+                }
+            } ?: return@forEach
+
+            view.text = String.format(
+                Locale.US,
+                "₹%.2f",
+                quote.ltp
+            )
+
+            val change = quote.change
+                ?: quote.previousClose?.let {
+                    quote.ltp - it
+                }
+                ?: 0.0
+
+            view.setTextColor(if (change >= 0.0) green else red)
+        }
+    }
+
+    private fun stopQuoteRefresh() {
+        quoteRefresh?.let {
+            quoteHandler.removeCallbacks(it)
+        }
+        quoteRefresh = null
+        dashboardMetricsUpdater = null
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (marketListVisible) {
+            startMarketTicks()
+        }
+    }
+
+    override fun onStop() {
+        stopMarketTicks()
+        super.onStop()
+    }
+
+    override fun onDestroy() {
+        chromeAnimator?.cancel()
+        chromeAnimator = null
+        stopQuoteRefresh()
+        stopMarketTicks()
+        marketListAdapter.release()
+        settingsScreen?.close()
+        settingsScreen = null
+        super.onDestroy()
+    }
+
+    private fun addActionCard(
+        body: LinearLayout,
+        label: String,
+        destination: String
+    ) {
+        val row = makeText(label, 15f, white, true).apply {
+            background = AppDesign.cardBackground(this@MainActivity, 10)
+            setPadding(dp(16), dp(13), dp(16), dp(13))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                setMargins(0, 0, 0, dp(8))
+            }
+            setOnClickListener { showScreen(destination) }
+        }
+        body.addView(row)
+    }
+
+    private fun showSignals(body: LinearLayout) {
+        addLabel(body, "Signals", 22f, white, true)
+        addLabel(body, "Live signal engine output", 12f, yellow)
+
+        val signals = try {
+            if (BackendManager.isInitialized()) {
+                BackendManager.signals().getActive()
+            } else {
+                emptyList()
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+
+        if (signals.isEmpty()) {
+            addLabel(body, "No active signals right now.", 13f, grey)
+            return
+        }
+
+        signals.forEach { signal ->
+            val card = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                background = AppDesign.cardBackground(this@MainActivity, 10)
+                setPadding(dp(14), dp(10), dp(14), dp(10))
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    setMargins(0, 0, 0, dp(8))
+                }
+            }
+
+            val sideColor = when (signal.signal.name) {
+                "BUY" -> green
+                "SELL" -> red
+                else -> yellow
+            }
+
+            card.addView(
+                makeText(
+                    "${signal.symbol}  •  ${signal.signal.name}",
+                    16f,
+                    sideColor,
+                    true
+                )
+            )
+            card.addView(
+                makeText(
+                    "${signal.exchange}  •  ${signal.timeframe}  •  " +
+                        "${signal.tradingStyle.name}",
+                    11f,
+                    grey,
+                    false
+                )
+            )
+            card.addView(
+                makeText(
+                    buildString {
+                        append("Entry ").append(formatPrice(signal.entryPrice))
+                        append("   SL ").append(formatPrice(signal.stopLoss))
+                        append("   T1 ").append(formatPrice(signal.target1))
+                        append("   T2 ").append(formatPrice(signal.target2))
+                    },
+                    12f,
+                    white,
+                    false
+                ).apply { setPadding(0, dp(5), 0, 0) }
+            )
+            card.addView(
+                makeText(
+                    String.format(
+                        Locale.US,
+                        "Confidence %.0f%%  •  %s",
+                        signal.confidence,
+                        signal.status.name
+                    ),
+                    10f,
+                    grey,
+                    false
+                ).apply { setPadding(0, dp(3), 0, 0) }
+            )
+
+            body.addView(card)
+            card.setOnClickListener {
+                openChart(signal.symbol, signal.exchange, "Market")
+            }
+        }
+    }
+
+    private fun showPositions(body: LinearLayout) {
+        addLabel(body, "Open Positions", 22f, white, true)
+        addLabel(body, "Live paper engine positions", 12f, yellow)
+
+        val positions = try {
+            if (BackendManager.isInitialized()) {
+                BackendManager.paperEngine().getPositions(true)
+            } else {
+                emptyList()
+            }
+        } catch (_: Exception) {
+            emptyList()
+        }
+
+        if (positions.isEmpty()) {
+            addLabel(body, "No open paper positions.", 13f, grey)
+            return
+        }
+
+        positions.forEach { position ->
+            val sideColor = if (position.side == "BUY") green else red
+            val card = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                background = AppDesign.cardBackground(this@MainActivity, 10)
+                setPadding(dp(14), dp(10), dp(14), dp(10))
+                layoutParams = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    setMargins(0, 0, 0, dp(8))
+                }
+            }
+
+            card.addView(
+                makeText(
+                    "${position.symbol}  •  ${position.side} ${position.quantity}",
+                    16f,
+                    sideColor,
+                    true
+                )
+            )
+            card.addView(
+                makeText(
+                    "Entry ${formatPrice(position.entryPrice)}   " +
+                        "LTP ${formatPrice(position.lastPrice)}",
+                    12f,
+                    white,
+                    false
+                ).apply { setPadding(0, dp(5), 0, 0) }
+            )
+            card.addView(
+                makeText(
+                    "Unrealized P&L ${formatRupees(position.unrealizedPnl)}",
+                    13f,
+                    if (position.unrealizedPnl >= 0.0) green else red,
+                    true
+                ).apply { setPadding(0, dp(4), 0, 0) }
+            )
+
+            body.addView(card)
+            card.setOnClickListener {
+                openChart(position.symbol, position.exchange, "Market")
+            }
+        }
+    }
+
+    private fun createMarketTabs(): LinearLayout {
+        val tabs = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(6), 0, dp(8))
+        }
+
+        listOf("Equity", "Index", "F&O", "ETFs").forEach { tab ->
+            val selected = marketTab == tab
+            val button = Button(this).apply {
+                text = tab
+                isAllCaps = false
+                textSize = 12f
+                minHeight = 0
+                minimumHeight = 0
+                setTextColor(if (selected) yellow else grey)
+                background = AppDesign.roundedBackground(
+                    this@MainActivity,
+                    if (selected) Color.argb(46, 255, 193, 7) else AppDesign.surface,
+                    8
+                )
+                layoutParams = LinearLayout.LayoutParams(
+                    0, dp(38), 1f
+                ).apply {
+                    setMargins(dp(2), 0, dp(2), 0)
+                }
+                setOnClickListener {
+                    marketTab = tab
+                    marketCategory = ""
+                    showScreen("Market")
+                }
+            }
+            tabs.addView(button)
+        }
+
+        return tabs
+    }
+
+    private fun showMarket(body: LinearLayout) {
+        addLabel(body, "Market Watch", 22f, white, true)
+        body.addView(createMarketTabs())
+
+        if (marketTab == "F&O" && marketCategory.isBlank()) {
+            addLabel(body, "F&O Categories", 17f, yellow, true)
+
+            listOf(
+                "Equity F&O",
+                "Index F&O",
+                "Commodity / MCX"
+            ).forEach { category ->
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    background = AppDesign.cardBackground(this@MainActivity, 10)
+                    setPadding(dp(14), dp(11), dp(14), dp(11))
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply {
+                        setMargins(0, 0, 0, dp(7))
+                    }
+
+                    setOnClickListener {
+                        marketCategory = category
+                        showScreen("Market")
+                    }
+                }
+
+                val name = makeText(category, 15f, white, true)
+                name.layoutParams = LinearLayout.LayoutParams(
+                    0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    1f
+                )
+
+                row.addView(name)
+                row.addView(makeText("›", 22f, yellow, true))
+                body.addView(row)
+            }
+
+            return
+        }
+
+        val categories: List<String> = when (marketTab) {
+            "Equity" -> listOf("NSE", "BSE")
+            "Index" -> listOf(
+                "NIFTY 50",
+                "BANK NIFTY",
+                "FINNIFTY",
+                "NIFTY 100",
+                "NIFTY 200",
+                "NIFTY 500",
+                "NIFTY NEXT 50",
+                "NIFTY MIDCAP 50",
+                "NIFTY MIDCAP 100",
+                "NIFTY SMALLCAP 100",
+                "NIFTY IT",
+                "NIFTY AUTO",
+                "NIFTY PHARMA",
+                "NIFTY FMCG",
+                "NIFTY METAL",
+                "NIFTY REALTY",
+                "NIFTY ENERGY",
+                "OTHER INDICES"
+            )
+            else -> emptyList()
+        }
+
+        if (categories.isNotEmpty()) {
+            addLabel(
+                body,
+                if (marketTab == "Equity") "Equity Categories"
+                else "Index Categories",
+                17f, yellow, true
+            )
+
+            categories.forEach { category ->
+                val row = LinearLayout(this).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    background = AppDesign.roundedBackground(
+                        this@MainActivity,
+                        if (marketCategory == category) {
+                            Color.argb(46, 255, 193, 7)
+                        } else {
+                            AppDesign.surface
+                        },
+                        10
+                    )
+                    setPadding(dp(14), dp(11), dp(14), dp(11))
+                    layoutParams = LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    ).apply {
+                        setMargins(0, 0, 0, dp(7))
+                    }
+                    setOnClickListener {
+                        marketCategory = category
+                        showScreen("Market")
+                    }
+                }
+
+                val name = makeText(category, 15f, white, true)
+                name.layoutParams = LinearLayout.LayoutParams(
+                    0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    1f
+                )
+
+                row.addView(name)
+                row.addView(makeText("›", 22f, yellow, true))
+                body.addView(row)
+            }
+
+            if (marketCategory.isBlank()) {
+                addLabel(
+                    body,
+                    "ऊपर से category चुनें।",
+                    13f, grey
+                )
+                return
+            }
+
+            addLabel(body, "$marketCategory Instruments", 17f, yellow, true)
+        }
+
+        val symbols: List<String> = when (marketTab) {
+            "Equity" -> when (marketCategory) {
+                "NSE" -> EquityStockMaster.allEquities.map {
+                    "${it.first} — ${it.second}"
+                }
+
+                "BSE" -> BseEquityStockMaster.stocks.map {
+                    "${it.symbol} — ${it.name}"
+                }
+
+                else -> emptyList()
+            }
+
+            "F&O" -> when (marketCategory) {
+                "Index F&O" -> listOf(
+                    "NIFTY — Nifty 50",
+                    "BANKNIFTY — Bank Nifty",
+                    "FINNIFTY — Nifty Financial Services",
+                    "MIDCPNIFTY — Nifty Midcap Select"
+                )
+
+                "Equity F&O" -> listOf(
+                    "RELIANCE — Reliance Industries Limited",
+                    "TCS — Tata Consultancy Services Limited",
+                    "HDFCBANK — HDFC Bank Limited",
+                    "INFY — Infosys Limited",
+                    "ICICIBANK — ICICI Bank Limited",
+                    "SBIN — State Bank of India",
+                    "TATAMOTORS — Tata Motors Limited",
+                    "TATASTEEL — Tata Steel Limited",
+                    "AXISBANK — Axis Bank Limited",
+                    "BHARTIARTL — Bharti Airtel Limited",
+                    "ITC — ITC Limited",
+                    "LT — Larsen & Toubro Limited",
+                    "BAJFINANCE — Bajaj Finance Limited",
+                    "MARUTI — Maruti Suzuki India Limited",
+                    "SUNPHARMA — Sun Pharmaceutical Industries Limited",
+                    "NTPC — NTPC Limited",
+                    "POWERGRID — Power Grid Corporation of India Limited",
+                    "ONGC — Oil & Natural Gas Corporation Limited",
+                    "COALINDIA — Coal India Limited",
+                    "TITAN — Titan Company Limited",
+                    "WIPRO — Wipro Limited",
+                    "ADANIENT — Adani Enterprises Limited",
+                    "ADANIPORTS — Adani Ports and SEZ Limited",
+                    "ZOMATO — Zomato Limited",
+                    "JSWSTEEL — JSW Steel Limited"
+                )
+
+                "Commodity / MCX" -> listOf(
+                    "GOLD — Gold",
+                    "GOLD MINI — Gold Mini",
+                    "GOLD PETAL — Gold Petal",
+                    "SILVER — Silver",
+                    "SILVER M — Silver Mini",
+                    "SILVER MICRO — Silver Micro",
+                    "CRUDEOIL — Crude Oil",
+                    "CRUDEOILM — Crude Oil Mini",
+                    "NATURALGAS — Natural Gas",
+                    "NATGASMINI — Natural Gas Mini",
+                    "COPPER — Copper",
+                    "COPPER MINI — Copper Mini",
+                    "ZINC — Zinc",
+                    "ZINC MINI — Zinc Mini",
+                    "ALUMINIUM — Aluminium",
+                    "ALUMINIUM MINI — Aluminium Mini",
+                    "LEAD — Lead",
+                    "LEAD MINI — Lead Mini",
+                    "MENTHAOIL — Mentha Oil",
+                    "COTTON — Cotton",
+                    "KAPAS — Kapas",
+                    "GUARSEED — Guar Seed",
+                    "GUARGUM — Guar Gum"
+                )
+
+                else -> emptyList()
+            }
+
+            "Index" -> when (marketCategory) {
+                "NIFTY 50" -> Nifty50StockMaster.allStocks.map {
+                    "${it.first} — ${it.second}"
+                }
+                "BANK NIFTY" -> BankNiftyStockMaster.allStocks.map {
+                    "${it.first} — ${it.second}"
+                }
+                "FINNIFTY" -> FinniftyStockMaster.allStocks.map {
+                    "${it.first} — ${it.second}"
+                }
+                "NIFTY 100" -> Nifty100StockMaster.allStocks.map {
+                    "${it.first} — ${it.second}"
+                }
+                "NIFTY 200" -> Nifty200StockMaster.allStocks.map {
+                    "${it.first} — ${it.second}"
+                }
+                "NIFTY 500" -> Nifty500StockMaster.allStocks.map {
+                    "${it.first} — ${it.second}"
+                }
+                "NIFTY NEXT 50" -> NiftyNext50StockMaster.allStocks.map {
+                    "${it.first} — ${it.second}"
+                }
+                "NIFTY MIDCAP 50" -> NiftyMidcap50StockMaster.allStocks.map {
+                    "${it.first} — ${it.second}"
+                }
+                "NIFTY MIDCAP 100" -> NiftyMidcap100StockMaster.allStocks.map {
+                    "${it.first} — ${it.second}"
+                }
+                "NIFTY SMALLCAP 100" -> NiftySmallcap100StockMaster.allStocks.map {
+                    "${it.first} — ${it.second}"
+                }
+                "NIFTY IT" -> NiftyITStockMaster.allStocks.map {
+                    "${it.first} — ${it.second}"
+                }
+                "NIFTY AUTO" -> NiftyAutoStockMaster.allStocks.map {
+                    "${it.first} — ${it.second}"
+                }
+                "NIFTY PHARMA" -> NiftyPharmaStockMaster.allStocks.map {
+                    "${it.first} — ${it.second}"
+                }
+                "NIFTY FMCG" -> NiftyFMCGStockMaster.allStocks.map {
+                    "${it.first} — ${it.second}"
+                }
+                "NIFTY METAL" -> NiftyMetalStockMaster.allStocks.map {
+                    "${it.first} — ${it.second}"
+                }
+                "NIFTY REALTY" -> NiftyRealtyStockMaster.allStocks.map {
+                    "${it.first} — ${it.second}"
+                }
+                "NIFTY ENERGY" -> NiftyEnergyStockMaster.allStocks.map {
+                    "${it.first} — ${it.second}"
+                }
+                "OTHER INDICES" -> listOf(
+                    "NIFTY 100",
+                    "NIFTY NEXT 50",
+                    "NIFTY MIDCAP 50",
+                    "NIFTY MIDCAP 100",
+                    "NIFTY SMALLCAP 100",
+                    "NIFTY IT",
+                    "NIFTY AUTO",
+                    "NIFTY PHARMA",
+                    "NIFTY FMCG",
+                    "NIFTY METAL",
+                    "NIFTY REALTY",
+                    "NIFTY ENERGY",
+                    "NIFTY 500"
+                )
+                else -> emptyList()
+            }
+
+            "ETFs" -> NseEtfStockMaster.allEtfs.map { etf ->
+                "${etf.symbol} — ${etf.name}"
+            }
+
+            else -> listOf(
+                "GOLD", "GOLD MINI", "GOLD PETAL",
+                "SILVER", "SILVER MINI", "SILVER MICRO",
+                "CRUDE OIL", "CRUDE OIL MINI",
+                "NATURAL GAS", "NATURAL GAS MINI",
+                "ZINC", "ZINC MINI", "COPPER",
+                "ALUMINIUM", "LEAD MINI", "MENTHA OIL"
+            )
+        }
+
+        if (symbols.isEmpty()) {
+            if (marketTab == "Equity" &&
+                marketCategory in setOf("NSE", "BSE") &&
+                symbols.isEmpty()
+            ) {
+                addLabel(
+                    body,
+                    "$marketCategory master data अभी उपलब्ध नहीं है।",
+                    13f,
+                    yellow
+                )
+                return
+            }
+            return
+        }
+
+        val liveExchange = resolveLiveExchange(marketTab, marketCategory)
+
+        val listItems = symbols.map { symbol ->
+            val selected = symbol.substringBefore(" — ").trim()
+            val liveSymbol =
+                resolveLiveSymbol(selected, marketTab, marketCategory)
+
+            MarketListItem(
+                key = InstrumentKey(liveExchange, liveSymbol),
+                title = selected,
+                subtitle = symbol.substringAfter(" — ", "").trim()
+            )
+        }
+
+        showMarketInstruments(listItems)
+    }
+
+    private fun showMarketInstruments(items: List<MarketListItem>) {
+        marketListVisible = true
+        content.removeAllViews()
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(bg)
+            setPadding(dp(12), dp(12), dp(12), 0)
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+
+        root.addView(makeText("Market Watch", 22f, white, true))
+        root.addView(createMarketTabs())
+
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(10), 0, dp(8))
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        val heading = if (marketCategory.isBlank()) {
+            marketTab
+        } else {
+            "$marketCategory Instruments"
+        }
+
+        val headingView = makeText(heading, 15f, yellow, true)
+        headingView.layoutParams = LinearLayout.LayoutParams(
+            0,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            1f
+        )
+        header.addView(headingView)
+
+        val missing = makeText("No LTP", 12f, yellow, false).apply {
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            setOnClickListener {
+                showScreen("No Live Price")
+            }
+        }
+        header.addView(missing)
+
+        if (marketCategory.isNotBlank()) {
+            val back = makeText("‹ Categories", 12f, grey, false).apply {
+                setPadding(dp(8), dp(4), 0, dp(4))
+                setOnClickListener {
+                    marketCategory = ""
+                    showScreen("Market")
+                }
+            }
+            header.addView(back)
+        }
+
+        root.addView(header)
+
+        val recycler = RecyclerView(this).apply {
+            layoutManager = LinearLayoutManager(this@MainActivity)
+            setHasFixedSize(true)
+            itemAnimator = null
+            setBackgroundColor(bg)
+            clipToPadding = false
+            setPadding(0, 0, 0, dp(8))
+            adapter = marketListAdapter
+        }
+
+        root.addView(
+            recycler,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+        )
+
+        content.addView(root)
+
+        marketListAdapter.onItemClick = { item ->
+            val category = marketCategory.ifBlank { marketTab }
+            marketListVisible = false
+            openChart(item.key.symbol, item.key.exchange, category)
+        }
+
+        marketListAdapter.submitItems(items)
+        startMarketTicks()
+    }
+
+    private fun showMissingLivePrices() {
+        marketListVisible = false
+        stopMarketTicks()
+        marketListAdapter.release()
+        content.removeAllViews()
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(bg)
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            layoutParams = FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        val title = makeText("No Live Price", 17f, white, true)
+        title.layoutParams = LinearLayout.LayoutParams(
+            0,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            1f
+        )
+        header.addView(title)
+
+        val back = makeText("‹ Market", 12f, yellow, false).apply {
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+            setOnClickListener { showScreen("Market") }
+        }
+        header.addView(back)
+
+        val refresh = makeText("Refresh", 12f, grey, false).apply {
+            setPadding(dp(8), dp(6), 0, dp(6))
+            setOnClickListener { showMissingLivePrices() }
+        }
+        header.addView(refresh)
+
+        root.addView(header)
+
+        val summary = makeText("Scanning instruments...", 11f, grey, false)
+        summary.setPadding(0, dp(4), 0, dp(6))
+        root.addView(summary)
+
+        val list = ListView(this).apply {
+            setBackgroundColor(Color.TRANSPARENT)
+            divider = android.graphics.drawable.ColorDrawable(AppDesign.divider)
+            dividerHeight = 1
+        }
+        root.addView(
+            list,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+        )
+
+        content.addView(root)
+
+        lifecycleScope.launch {
+            val report = withContext(Dispatchers.IO) {
+                buildMissingLivePriceReport()
+            }
+
+            if (currentScreen != "No Live Price") {
+                return@launch
+            }
+
+            summary.text = buildString {
+                append("Missing: ").append(report.total)
+                append("  •  No token: ").append(report.noToken)
+                append("  •  No tick: ").append(report.noTick)
+                if (report.total > report.rows.size) {
+                    append("  •  Showing first ")
+                    append(report.rows.size)
+                }
+            }
+
+            list.adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_list_item_1,
+                report.rows.ifEmpty {
+                    listOf("All active instruments have a live price.")
+                }
+            )
+        }
+    }
+
+    private fun buildMissingLivePriceReport(): MissingLivePriceReport {
+        if (!BackendManager.isInitialized()) {
+            return MissingLivePriceReport(
+                rows = listOf("Backend is not initialized yet."),
+                total = 0,
+                noToken = 0,
+                noTick = 0
+            )
+        }
+
+        val instruments = try {
+            BackendManager.instruments().getActive(5000)
+        } catch (_: Exception) {
+            emptyList()
+        }
+
+        if (instruments.isEmpty()) {
+            return MissingLivePriceReport(
+                rows = listOf("No active instruments found. Sync scrip master."),
+                total = 0,
+                noToken = 0,
+                noTick = 0
+            )
+        }
+
+        val rows = ArrayList<String>()
+        var noToken = 0
+        var noTick = 0
+
+        instruments.forEach { instrument ->
+            val key = InstrumentKey(
+                exchange = instrument.exchange,
+                symbol = instrument.symbol
+            )
+
+            if (MarketDataManager.getTick(key) != null) {
+                return@forEach
+            }
+
+            if (instrument.token.isNullOrBlank()) {
+                noToken++
+                if (rows.size < MAX_MISSING_LIVE_PRICE_ROWS) {
+                    rows.add(
+                        "${instrument.symbol}  •  ${instrument.exchange}" +
+                            "  —  no Kotak token"
+                    )
+                }
+                return@forEach
+            }
+
+            noTick++
+            if (rows.size < MAX_MISSING_LIVE_PRICE_ROWS) {
+                val reason = if (MarketDataManager.isSubscribed(key)) {
+                    "subscribed, waiting for tick"
+                } else {
+                    "no live tick received"
+                }
+                rows.add(
+                    "${instrument.symbol}  •  ${instrument.exchange}" +
+                        "  —  $reason"
+                )
+            }
+        }
+
+        return MissingLivePriceReport(
+            rows = rows,
+            total = noToken + noTick,
+            noToken = noToken,
+            noTick = noTick
+        )
+    }
+
+    private fun startMarketTicks() {
+        stopMarketTicks()
+
+        marketListAdapter.refreshFromSnapshot()
+
+        marketTicksJob = lifecycleScope.launch {
+            launch {
+                MarketDataManager.tickStream
+                    .conflate()
+                    .collect { tick ->
+                        marketListAdapter.onTick(tick)
+                    }
+            }
+
+            launch {
+                MarketDataManager.connectionState.collect { state ->
+                    if (state ==
+                        MarketDataManager.ConnectionState.AUTHENTICATED
+                    ) {
+                        marketListAdapter.resubscribeVisible()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun stopMarketTicks() {
+        marketTicksJob?.cancel()
+        marketTicksJob = null
+    }
+
+    private fun resolveLiveExchange(
+        tab: String,
+        category: String
+    ): String {
+        return when {
+            tab == "F&O" && category == "Commodity / MCX" -> "MCX"
+            tab == "Equity" && category == "BSE" -> "BSE"
+            tab == "Equity" -> "NSE"
+            tab == "Index" -> "NSE"
+            tab == "ETFs" -> "NSE"
+            tab == "F&O" -> "NSE"
+            else -> "MCX"
+        }
+    }
+
+    private fun resolveLiveSymbol(
+        symbol: String,
+        tab: String,
+        category: String
+    ): String {
+        if (tab == "F&O" && category == "Index F&O") {
+            return when (symbol.uppercase(Locale.ROOT)) {
+                "NIFTY" -> "NIFTY 50"
+                "BANKNIFTY" -> "BANK NIFTY"
+                "FINNIFTY" -> "FINNIFTY"
+                "MIDCPNIFTY" -> "MIDCPNIFTY"
+                else -> symbol
+            }
+        }
+
+        if (tab == "F&O" && category == "Commodity / MCX") {
+            return when (symbol.uppercase(Locale.ROOT)) {
+                "CRUDEOIL" -> "CRUDE OIL"
+                "CRUDEOILM" -> "CRUDE OIL MINI"
+                "NATURALGAS" -> "NATURAL GAS"
+                "NATGASMINI" -> "NATURAL GAS MINI"
+                "MENTHAOIL" -> "MENTHA OIL"
+                "SILVER M" -> "SILVER MINI"
+                "COPPER MINI" -> "COPPER"
+                "ALUMINIUM MINI" -> "ALUMINIUM"
+                "LEAD" -> "LEAD MINI"
+                else -> symbol
+            }
+        }
+
+        return symbol
+    }
+
+    private fun resolveInstrumentSymbol(
+        symbol: String,
+        exchange: String
+    ): String {
+        return try {
+            if (com.sb.backend.core.BackendManager.isInitialized()) {
+                com.sb.backend.core.BackendManager.instruments()
+                    .findBySymbol(symbol, exchange)
+                    ?.symbol
+                    ?: symbol
+            } else {
+                symbol
+            }
+        } catch (_: Exception) {
+            symbol
+        }
+    }
+
+    private fun showMenu() {
+        val dialog = Dialog(this)
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+
+        val screenWidth = resources.displayMetrics.widthPixels
+        val minWidth = dp(220)
+        val maxWidth = (screenWidth * 0.90f).toInt()
+        var drawerWidth = (screenWidth * 0.78f).toInt()
+            .coerceIn(minWidth, maxWidth)
+
+        val overlay = FrameLayout(this).apply {
+            setBackgroundColor(AppDesign.scrim)
+            setOnClickListener { dialog.dismiss() }
+        }
+
+        val drawer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = AppDesign.overlayBackground(this@MainActivity, 0)
+            elevation = dp(10).toFloat()
+            isClickable = true
+        }
+
+        val drawerParams = FrameLayout.LayoutParams(
+            drawerWidth,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            Gravity.START
+        )
+        overlay.addView(drawer, drawerParams)
+
+        // Header
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(
+                dp(18),
+                dp(14),
+                dp(10),
+                dp(14)
+            )
+            setBackgroundColor(Color.TRANSPARENT)
+        }
+
+        val title = makeText(
+            "SB BOT",
+            19f,
+            white,
+            true
+        )
+        title.layoutParams = LinearLayout.LayoutParams(
+            0,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            1f
+        )
+
+        val close = makeText("✕", 24f, yellow, true).apply {
+            gravity = Gravity.CENTER
+            setPadding(
+                dp(12),
+                dp(8),
+                dp(8),
+                dp(8)
+            )
+            setOnClickListener { dialog.dismiss() }
+        }
+
+        header.addView(title)
+        header.addView(close)
+        drawer.addView(header)
+
+        val status = makeText(
+            "MENU  •  NOT VERIFIED",
+            10f,
+            yellow,
+            true
+        ).apply {
+            setPadding(
+                dp(18),
+                dp(10),
+                dp(12),
+                dp(8)
+            )
+        }
+        drawer.addView(status)
+
+        val menuItems = listOf(
+            "Home" to "⌂",
+            "Signals" to "↗",
+            "Paper" to "▤",
+            "Positions" to "▣",
+            "Market" to "⌁",
+            "No Live Price" to "⚠",
+            "Chart" to "▥",
+            "Stock Search" to "⌕",
+            "Settings" to "⚙"
+        )
+
+        menuItems.forEach { item ->
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(
+                    dp(18),
+                    dp(12),
+                    dp(12),
+                    dp(12)
+                )
+                setBackgroundColor(
+                    if (currentScreen == item.first) {
+                        Color.argb(42, 255, 193, 7)
+                    } else {
+                        Color.TRANSPARENT
+                    }
+                )
+                isClickable = true
+                isFocusable = true
+                setOnClickListener {
+                    dialog.dismiss()
+                    showScreen(item.first)
+                }
+            }
+
+            val icon = makeText(
+                item.second,
+                18f,
+                yellow,
+                true
+            )
+            icon.gravity = Gravity.CENTER
+            icon.layoutParams = LinearLayout.LayoutParams(
+                dp(34),
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+
+            val label = makeText(
+                item.first,
+                14f,
+                white,
+                currentScreen == item.first
+            )
+            label.layoutParams = LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1f
+            )
+
+            val arrow = makeText(
+                "›",
+                18f,
+                grey,
+                false
+            )
+
+            row.addView(icon)
+            row.addView(label)
+            row.addView(arrow)
+            drawer.addView(row)
+        }
+
+        // Flexible empty space
+        drawer.addView(
+            android.view.View(this),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+        )
+
+        // Draggable resize handle
+        val handle = android.view.View(this).apply {
+            setBackgroundColor(yellow)
+            contentDescription = "Drag to resize menu"
+        }
+
+        drawer.addView(
+            handle,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(8)
+            )
+        )
+
+        var startX = 0f
+        var startWidth = drawerWidth
+
+        handle.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    startX = event.rawX
+                    startWidth = drawerParams.width
+                    true
+                }
+
+                MotionEvent.ACTION_MOVE -> {
+                    drawerWidth = (
+                        startWidth + event.rawX - startX
+                    ).toInt().coerceIn(minWidth, maxWidth)
+
+                    drawerParams.width = drawerWidth
+                    drawer.layoutParams = drawerParams
+                    true
+                }
+
+                MotionEvent.ACTION_UP,
+                MotionEvent.ACTION_CANCEL -> true
+
+                else -> false
+            }
+        }
+
+        dialog.setContentView(overlay)
+        dialog.setCanceledOnTouchOutside(true)
+
+        dialog.window?.apply {
+            setBackgroundDrawableResource(android.R.color.transparent)
+            setLayout(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT
+            )
+            setGravity(Gravity.START or Gravity.TOP)
+            addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            setDimAmount(0.25f)
+        }
+
+        dialog.show()
+
+        dialog.window?.setLayout(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT
+        )
+    }
+
+    private companion object {
+        const val MAX_MISSING_LIVE_PRICE_ROWS = 2000
+    }
+}

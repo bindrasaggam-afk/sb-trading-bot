@@ -1,3 +1,4 @@
+
 package com.sb.backend.database
 
 import android.database.sqlite.SQLiteDatabase
@@ -19,9 +20,18 @@ object DatabaseMigrations {
                 lot_size INTEGER NOT NULL DEFAULT 1,
                 tick_size REAL NOT NULL DEFAULT 0.05,
                 is_active INTEGER NOT NULL DEFAULT 1,
+                expiry_millis INTEGER,
                 UNIQUE(exchange, symbol)
             )
             """.trimIndent()
+        )
+
+        // Existing database में भी expiry column सुनिश्चित करें।
+        addColumnIfMissing(
+            db,
+            "instruments",
+            "expiry_millis",
+            "INTEGER"
         )
 
         db.execSQL(
@@ -175,6 +185,10 @@ object DatabaseMigrations {
                 "ON instruments(segment)"
         )
         db.execSQL(
+            "CREATE INDEX IF NOT EXISTS idx_instruments_expiry " +
+                "ON instruments(exchange, segment, expiry_millis)"
+        )
+        db.execSQL(
             "CREATE INDEX IF NOT EXISTS idx_candles_lookup " +
                 "ON candles(symbol, timeframe, timestamp)"
         )
@@ -207,6 +221,7 @@ object DatabaseMigrations {
                 "exchange_timestamp",
                 "INTEGER"
             )
+
             addColumnIfMissing(
                 db,
                 "quotes",
@@ -222,6 +237,15 @@ object DatabaseMigrations {
                 """.trimIndent()
             )
         }
+
+        if (oldVersion < 4) {
+            addColumnIfMissing(
+                db,
+                "instruments",
+                "expiry_millis",
+                "INTEGER"
+            )
+        }
     }
 
     private fun addColumnIfMissing(
@@ -232,11 +256,18 @@ object DatabaseMigrations {
     ) {
         var exists = false
 
-        db.rawQuery("PRAGMA table_info($table)", null).use { cursor ->
+        db.rawQuery(
+            "PRAGMA table_info($table)",
+            null
+        ).use { cursor ->
+
             val nameIndex = cursor.getColumnIndex("name")
 
             while (cursor.moveToNext()) {
-                if (cursor.getString(nameIndex).equals(column, true)) {
+                if (
+                    cursor.getString(nameIndex)
+                        .equals(column, true)
+                ) {
                     exists = true
                     break
                 }

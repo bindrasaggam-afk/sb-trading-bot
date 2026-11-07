@@ -14,21 +14,24 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import com.sb.ui.theme.AppDesign
 import java.util.Locale
 
 object PaperTradingScreen {
 
-    private const val BG = 0xFF0B1220.toInt()
-    private const val PANEL = 0xFF121D2E.toInt()
-    private const val PANEL_ALT = 0xFF182538.toInt()
-    private const val TEXT = 0xFFF1F5F9.toInt()
-    private const val MUTED = 0xFF9AA9BD.toInt()
-    private const val BLUE = 0xFF60A5FA.toInt()
-    private const val GREEN = 0xFF4ADE80.toInt()
-    private const val RED = 0xFFF87171.toInt()
-    private const val BORDER = 0xFF2A3A50.toInt()
+    private val BG = AppDesign.background
+    private val PANEL = AppDesign.surfaceSolid
+    private val PANEL_ALT = AppDesign.surface
+    private val TEXT = AppDesign.textPrimary
+    private val MUTED = AppDesign.textMuted
+    private val BLUE = AppDesign.accent
+    private val GREEN = AppDesign.positive
+    private val RED = AppDesign.negative
 
-    fun create(context: Context): View {
+    fun create(
+        context: Context,
+        onOpenChart: ((String, String) -> Unit)? = null
+    ): View {
         val db = DashboardDbHelper(context)
 
         val scroll = ScrollView(context).apply {
@@ -38,8 +41,8 @@ object PaperTradingScreen {
 
         val page = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(context, 16), dp(context, 18),
-                dp(context, 16), dp(context, 28))
+            setPadding(dp(context, 14), dp(context, 12),
+                dp(context, 14), dp(context, 20))
         }
 
         scroll.addView(page)
@@ -67,9 +70,11 @@ object PaperTradingScreen {
             val button = Button(context).apply {
                 text = title
                 isAllCaps = false
-                textSize = 14f
+                textSize = 13f
+                minHeight = 0
+                minimumHeight = 0
                 setTextColor(TEXT)
-                background = rounded(BLUE, 10)
+                background = rounded(context, BLUE, 9)
                 setOnClickListener { action() }
             }
 
@@ -87,18 +92,18 @@ object PaperTradingScreen {
         fun addCard(title: String, value: String, note: String) {
             val card = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(dp(context, 14), dp(context, 13),
-                    dp(context, 14), dp(context, 13))
-                background = rounded(PANEL, 14)
+                setPadding(dp(context, 13), dp(context, 10),
+                    dp(context, 13), dp(context, 10))
+                background = rounded(context, PANEL, 10)
             }
 
-            card.addView(makeText(context, title, 13, MUTED, false))
+            card.addView(makeText(context, title, 11, MUTED, false))
             card.addView(
-                makeText(context, value, 23, TEXT, true).apply {
-                    setPadding(0, dp(context, 5), 0, dp(context, 3))
+                makeText(context, value, 19, TEXT, true).apply {
+                    setPadding(0, dp(context, 3), 0, dp(context, 2))
                 }
             )
-            card.addView(makeText(context, note, 12, MUTED, false))
+            card.addView(makeText(context, note, 10, MUTED, false))
 
             page.addView(
                 card,
@@ -114,11 +119,11 @@ object PaperTradingScreen {
         fun refresh() {
             page.removeAllViews()
 
-            addText("Paper Trading", 26, TEXT, true)
+            addText("Paper Trading", 20, TEXT, true)
             addText(
                 "Local practice mode · No broker connection",
-                13, MUTED
-            ).setPadding(0, dp(context, 5), 0, dp(context, 12))
+                11, MUTED
+            ).setPadding(0, dp(context, 3), 0, dp(context, 8))
 
             val balance = db.getPaperBalance()
             val orders = db.getPaperOrders()
@@ -205,8 +210,8 @@ object PaperTradingScreen {
                 }
             }
 
-            addText("Open Positions", 19, TEXT, true)
-                .setPadding(0, dp(context, 22), 0, dp(context, 6))
+            addText("Open Positions", 17, TEXT, true)
+                .setPadding(0, dp(context, 16), 0, dp(context, 4))
 
             if (openOrders.isEmpty()) {
                 addCard(
@@ -216,13 +221,14 @@ object PaperTradingScreen {
                 )
             } else {
                 openOrders.forEach { order ->
-                    val card = orderCard(context, order)
+                    val card = orderCard(context, order, onOpenChart)
 
                     val closeButton = Button(context).apply {
                         text = "Close Paper Order"
                         isAllCaps = false
+                        textSize = 12f
                         setTextColor(TEXT)
-                        background = rounded(PANEL_ALT, 9)
+                        background = rounded(context, PANEL_ALT, 9)
 
                         setOnClickListener {
                             showInputDialog(
@@ -288,8 +294,8 @@ object PaperTradingScreen {
                 }
             }
 
-            addText("Trade History", 19, TEXT, true)
-                .setPadding(0, dp(context, 22), 0, dp(context, 6))
+            addText("Trade History", 17, TEXT, true)
+                .setPadding(0, dp(context, 16), 0, dp(context, 4))
 
             if (closedOrders.isEmpty()) {
                 addCard(
@@ -300,7 +306,7 @@ object PaperTradingScreen {
             } else {
                 closedOrders.forEach { order ->
                     page.addView(
-                        orderCard(context, order),
+                        orderCard(context, order, onOpenChart),
                         matchParams(context).apply {
                             topMargin = dp(context, 8)
                         }
@@ -429,6 +435,7 @@ object PaperTradingScreen {
                         }
                 }
 
+                AppDesign.styleDialog(dialog)
                 dialog.show()
             }
     }
@@ -469,18 +476,24 @@ object PaperTradingScreen {
                 }
         }
 
+        AppDesign.styleDialog(dialog)
         dialog.show()
     }
 
     private fun orderCard(
         context: Context,
-        order: PaperOrder
+        order: PaperOrder,
+        onOpenChart: ((String, String) -> Unit)? = null
     ): LinearLayout {
         val card = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(context, 14), dp(context, 13),
-                dp(context, 14), dp(context, 13))
-            background = rounded(PANEL, 13)
+            setPadding(dp(context, 13), dp(context, 10),
+                dp(context, 13), dp(context, 10))
+            background = rounded(context, PANEL, 10)
+            isClickable = true
+            setOnClickListener {
+                onOpenChart?.invoke(order.symbol, "")
+            }
         }
 
         card.addView(
@@ -558,14 +571,11 @@ object PaperTradingScreen {
     }
 
     private fun rounded(
+        context: Context,
         color: Int,
         radiusDp: Int
     ): GradientDrawable {
-        return GradientDrawable().apply {
-            setColor(color)
-            cornerRadius = dpFloat(radiusDp)
-            setStroke(dpStatic(1), BORDER)
-        }
+        return AppDesign.roundedBackground(context, color, radiusDp)
     }
 
     private fun matchParams(
@@ -589,10 +599,6 @@ object PaperTradingScreen {
         return (value * context.resources.displayMetrics.density + 0.5f)
             .toInt()
     }
-
-    private fun dpFloat(value: Int): Float = value.toFloat()
-
-    private fun dpStatic(value: Int): Int = value
 
     private inline fun <T> Iterable<T>.sumOfCompat(
         selector: (T) -> Double

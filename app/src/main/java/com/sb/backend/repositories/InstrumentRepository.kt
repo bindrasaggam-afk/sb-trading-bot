@@ -18,14 +18,16 @@ class InstrumentRepository(
     private val databaseHelper: SBDatabaseHelper
 ) {
 
+    // ------------------------------------------------------------
+    // SAVE
+    // ------------------------------------------------------------
+
     fun save(instrument: Instrument): Long {
         if (!isValid(instrument)) return -1L
 
-        return databaseHelper.writableDatabase.insertWithOnConflict(
-            SBDatabaseHelper.TABLE_INSTRUMENTS,
-            null,
-            valuesOf(instrument),
-            SQLiteDatabase.CONFLICT_REPLACE
+        return upsertPreservingId(
+            databaseHelper.writableDatabase,
+            instrument
         )
     }
 
@@ -40,14 +42,9 @@ class InstrumentRepository(
             instruments.forEach { instrument ->
                 if (!isValid(instrument)) return@forEach
 
-                val id = db.insertWithOnConflict(
-                    SBDatabaseHelper.TABLE_INSTRUMENTS,
-                    null,
-                    valuesOf(instrument),
-                    SQLiteDatabase.CONFLICT_REPLACE
-                )
-
-                if (id != -1L) saved++
+                if (upsertPreservingId(db, instrument) != -1L) {
+                    saved++
+                }
             }
 
             db.setTransactionSuccessful()
@@ -57,6 +54,240 @@ class InstrumentRepository(
 
         return saved
     }
+
+    /**
+     * Inserts a new row or updates the existing row without
+     * deleting/replacing its primary key.
+     *
+     * Instrument identity is exchange + symbol.
+     */
+    private fun upsertPreservingId(
+        db: SQLiteDatabase,
+        instrument: Instrument
+    ): Long {
+        if (!isValid(instrument)) return -1L
+
+        val normalizedInstrument = instrument.copy(
+            symbol = normalize(instrument.symbol),
+            exchange = normalize(instrument.exchange),
+            segment = normalize(instrument.segment),
+            instrumentType = normalize(instrument.instrumentType),
+            tradingSymbol = normalize(
+                instrument.tradingSymbol.ifBlank { instrument.symbol }
+            )
+        )
+
+        val values = valuesOf(normalizedInstrument)
+
+        val insertedId = db.insertWithOnConflict(
+            SBDatabaseHelper.TABLE_INSTRUMENTS,
+            null,
+            values,
+            SQLiteDatabase.CONFLICT_IGNORE
+        )
+
+        if (insertedId != -1L) {
+            return insertedId
+        }
+
+        val selection = "UPPER(exchange) = ? AND UPPER(symbol) = ?"
+        val args = arrayOf(
+            normalize(normalizedInstrument.exchange),
+            normalize(normalizedInstrument.symbol)
+        )
+
+        val updated = db.update(
+            SBDatabaseHelper.TABLE_INSTRUMENTS,
+            values,
+            selection,
+            args
+        )
+
+        if (updated <= 0) return -1L
+
+        db.query(
+            SBDatabaseHelper.TABLE_INSTRUMENTS,
+            arrayOf("id"),
+            selection,
+            args,
+            null,
+            null,
+            null,
+            "1"
+        ).use { cursor ->
+            return if (cursor.moveToFirst()) {
+                cursor.getLong(0)
+            } else {
+                -1L
+            }
+        }
+    }
+
+    // ------------------------------------------------------------
+    // MCX CONTRACT UPSERT
+    // ------------------------------------------------------------
+
+    /**
+     * Saves expiry-specific MCX futures as separate instrument rows.
+     *
+     * Actual trading symbol is used as the contract identity.
+     * Existing row IDs are preserved during updates.
+     */
+    fun upsertMcxContracts(contracts: List<Instrument>): Int {
+        if (contracts.isEmpty()) return 0
+
+        val db = databaseHelper.writableDatabase
+        var saved = 0
+
+        db.beginTransaction()
+        try {
+            contracts.forEach { contract ->
+
+                if (!contract.exchange.equals("MCX", ignoreCase = true)) {
+                    return@forEach
+                }
+
+                if (!contract.segment.equals("COMMODITY", ignoreCase = true)) {
+                    return@forEach
+                }
+
+                if (contract.expiryMillis == null ||
+                    contract.expiryMillis <= 0L
+                ) {
+                    return@forEach
+                }
+
+                if (contract.token.isNullOrBlank()) {
+                    return@forEach
+                }
+
+                val contractSymbol = contract.tradingSymbol.trim()
+                if (contractSymbol.isBlank()) return@forEach
+
+                // Normalize before validation.
+                // This allows a valid tradingSymbol even if the
+                // incoming base symbol is blank.
+                val mcxContract = contract.copy(
+                    symbol = contractSymbol,
+                    tradingSymbol = contractSymbol,
+                    exchange = "MCX",
+                    segment = "COMMODITY",
+                    instrumentType = "FUT",
+                    isActive = true
+                )
+
+                if (!isValid(mcxContract)) return@forEach
+
+                if (upsertPreservingId(db, mcxContract) != -1L) {
+                    saved++
+                }
+            }
+
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+
+        return saved
+    }
+
+    // ------------------------------------------------------------
+    // MCX FUTURES QUERIES
+    // ------------------------------------------------------------
+
+    fun getActiveMcxFutures(
+        now: Long = System.currentTimeMillis()
+    ): List<Instrument> {
+        val result = ArrayList<Instrument>()
+
+        databaseHelper.readableDatabase.query(
+            SBDatabaseHelper.TABLE_INSTRUMENTS,
+            projection,
+            "exchange = 'MCX' AND segment = 'COMMODITY' " +
+                "AND instrument_type = 'FUT' AND is_active = 1 " +
+                "AND token IS NOT NULL AND TRIM(token) != '' " +
+                "AND expiry_millis IS NOT NULL AND expiry_millis > ?",
+            arrayOf(now.toString()),
+            null,
+            null,
+            "name COLLATE NOCASE, expiry_millis ASC, symbol COLLATE NOCASE"
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                result.add(readInstrument(cursor))
+            }
+        }
+
+        return result
+    }
+
+    fun countActiveMcxFutures(
+        now: Long = System.currentTimeMillis()
+    ): Int {
+        databaseHelper.readableDatabase.rawQuery(
+            "SELECT COUNT(*) FROM ${SBDatabaseHelper.TABLE_INSTRUMENTS} " +
+                "WHERE exchange = 'MCX' AND segment = 'COMMODITY' " +
+                "AND instrument_type = 'FUT' AND is_active = 1 " +
+                "AND token IS NOT NULL AND TRIM(token) != '' " +
+                "AND expiry_millis IS NOT NULL AND expiry_millis > ?",
+            arrayOf(now.toString())
+        ).use { cursor ->
+            return if (cursor.moveToFirst()) cursor.getInt(0) else 0
+        }
+    }
+
+    fun deactivateExpiredMcxContracts(
+        now: Long = System.currentTimeMillis()
+    ): Int {
+        val values = ContentValues().apply {
+            put("is_active", 0)
+        }
+
+        return databaseHelper.writableDatabase.update(
+            SBDatabaseHelper.TABLE_INSTRUMENTS,
+            values,
+            "exchange = 'MCX' AND segment = 'COMMODITY' " +
+                "AND instrument_type = 'FUT' " +
+                "AND expiry_millis IS NOT NULL AND expiry_millis <= ?",
+            arrayOf(now.toString())
+        )
+    }
+
+    /**
+     * Deactivates MCX futures not present in the latest valid master.
+     *
+     * Empty input intentionally does nothing to prevent accidental
+     * deactivation of every MCX contract.
+     */
+    fun deactivateMcxFuturesNotIn(
+        symbols: Collection<String>
+    ): Int {
+        val activeSymbols = symbols
+            .map { normalize(it) }
+            .filter { it.isNotBlank() }
+            .distinct()
+
+        if (activeSymbols.isEmpty()) return 0
+
+        val values = ContentValues().apply {
+            put("is_active", 0)
+        }
+
+        val placeholders = activeSymbols.joinToString(",") { "?" }
+
+        return databaseHelper.writableDatabase.update(
+            SBDatabaseHelper.TABLE_INSTRUMENTS,
+            values,
+            "exchange = 'MCX' AND segment = 'COMMODITY' " +
+                "AND instrument_type = 'FUT' " +
+                "AND expiry_millis IS NOT NULL " +
+                "AND UPPER(symbol) NOT IN ($placeholders)",
+            activeSymbols.toTypedArray()
+        )
+    }
+
+    // ------------------------------------------------------------
+    // FIND BY SYMBOL
+    // ------------------------------------------------------------
 
     fun findBySymbol(
         symbol: String,
@@ -96,6 +327,10 @@ class InstrumentRepository(
             }
         }
     }
+
+    // ------------------------------------------------------------
+    // SEARCH
+    // ------------------------------------------------------------
 
     fun search(
         query: String,
@@ -172,6 +407,10 @@ class InstrumentRepository(
         return result
     }
 
+    // ------------------------------------------------------------
+    // SEGMENT QUERIES
+    // ------------------------------------------------------------
+
     fun getBySegment(
         segment: String,
         exchange: String? = null,
@@ -201,8 +440,37 @@ class InstrumentRepository(
             args.toTypedArray(),
             null,
             null,
-            "symbol COLLATE NOCASE",
+            "CASE WHEN expiry_millis IS NULL THEN 1 ELSE 0 END, " +
+                "expiry_millis ASC, symbol COLLATE NOCASE",
             limit.coerceIn(1, 2000).toString()
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                result.add(readInstrument(cursor))
+            }
+        }
+
+        return result
+    }
+
+    // ------------------------------------------------------------
+    // ACTIVE INSTRUMENTS
+    // ------------------------------------------------------------
+
+    fun getActive(limit: Int = 5000): List<Instrument> {
+        val result = ArrayList<Instrument>()
+
+        databaseHelper.readableDatabase.query(
+            SBDatabaseHelper.TABLE_INSTRUMENTS,
+            projection,
+            "is_active = 1",
+            null,
+            null,
+            null,
+            "CASE WHEN exchange = 'NSE' THEN 0 " +
+                "WHEN exchange = 'BSE' THEN 1 ELSE 2 END, " +
+                "CASE WHEN expiry_millis IS NULL THEN 1 ELSE 0 END, " +
+                "expiry_millis ASC, symbol COLLATE NOCASE",
+            limit.coerceIn(1, 10000).toString()
         ).use { cursor ->
             while (cursor.moveToNext()) {
                 result.add(readInstrument(cursor))
@@ -224,7 +492,8 @@ class InstrumentRepository(
             null,
             "CASE WHEN exchange = 'NSE' THEN 0 " +
                 "WHEN exchange = 'BSE' THEN 1 ELSE 2 END, " +
-                "symbol COLLATE NOCASE",
+                "CASE WHEN expiry_millis IS NULL THEN 1 ELSE 0 END, " +
+                "expiry_millis ASC, symbol COLLATE NOCASE",
             limit.coerceIn(1, 5000).toString()
         ).use { cursor ->
             while (cursor.moveToNext()) {
@@ -244,6 +513,10 @@ class InstrumentRepository(
         }
     }
 
+    // ------------------------------------------------------------
+    // KNOWN TOKEN BACKFILL
+    // ------------------------------------------------------------
+
     fun backfillKnownTokens(): Int {
         val db = databaseHelper.writableDatabase
         var updated = 0
@@ -251,8 +524,17 @@ class InstrumentRepository(
         db.beginTransaction()
         try {
             KotakKnownTokenMaster.instruments.forEach { known ->
+
+                if (known.token.isBlank() ||
+                    known.symbol.isBlank() ||
+                    known.exchange.isBlank() ||
+                    known.segment.isBlank()
+                ) {
+                    return@forEach
+                }
+
                 val values = ContentValues().apply {
-                    put("token", known.token)
+                    put("token", known.token.trim())
                 }
 
                 updated += db.update(
@@ -280,7 +562,13 @@ class InstrumentRepository(
         return updated
     }
 
-    fun applyKotakScripTokens(tokens: List<KotakScripToken>): Int {
+    // ------------------------------------------------------------
+    // KOTAK SCRIP MASTER TOKEN UPDATE
+    // ------------------------------------------------------------
+
+    fun applyKotakScripTokens(
+        tokens: List<KotakScripToken>
+    ): Int {
         if (tokens.isEmpty()) return 0
 
         val db = databaseHelper.writableDatabase
@@ -289,22 +577,36 @@ class InstrumentRepository(
         db.beginTransaction()
         try {
             tokens.forEach { token ->
-                if (token.token.isBlank() || token.segments.isEmpty()) {
+
+                val normalizedSymbol = normalizedSymbol(token.symbol)
+                val normalizedExchange = normalize(token.exchange)
+                val normalizedSegments = token.segments
+                    .map { normalize(it) }
+                    .filter { it.isNotBlank() }
+                    .distinct()
+
+                val normalizedToken = token.token.trim()
+
+                if (normalizedSymbol.isBlank() ||
+                    normalizedExchange.isBlank() ||
+                    normalizedToken.isBlank() ||
+                    normalizedSegments.isEmpty()
+                ) {
                     return@forEach
                 }
 
-                val placeholders = token.segments.joinToString(",") {
+                val placeholders = normalizedSegments.joinToString(",") {
                     "?"
                 }
 
                 val values = ContentValues().apply {
-                    put("token", token.token.trim())
+                    put("token", normalizedToken)
                 }
 
                 val args = ArrayList<String>()
-                args.add(normalizedSymbol(token.symbol))
-                args.add(normalize(token.exchange))
-                token.segments.forEach { args.add(normalize(it)) }
+                args.add(normalizedSymbol)
+                args.add(normalizedExchange)
+                normalizedSegments.forEach { args.add(it) }
 
                 updated += db.update(
                     SBDatabaseHelper.TABLE_INSTRUMENTS,
@@ -326,6 +628,10 @@ class InstrumentRepository(
         return updated
     }
 
+    // ------------------------------------------------------------
+    // DELETE
+    // ------------------------------------------------------------
+
     fun deleteAll(): Int {
         return databaseHelper.writableDatabase.delete(
             SBDatabaseHelper.TABLE_INSTRUMENTS,
@@ -333,6 +639,10 @@ class InstrumentRepository(
             null
         )
     }
+
+    // ------------------------------------------------------------
+    // BUILT-IN MASTER SEEDING
+    // ------------------------------------------------------------
 
     fun seedBuiltInMasters(): Int {
         val db = databaseHelper.writableDatabase
@@ -494,10 +804,9 @@ class InstrumentRepository(
 
         val knownToken = KotakKnownTokenMaster.find(instrument.symbol)
 
-        // Token तभी लगाएँ जब Exchange और Segment भी match हों।
         val matchedToken = knownToken?.takeIf {
             it.exchange.equals(instrument.exchange, ignoreCase = true) &&
-            it.segment.equals(instrument.segment, ignoreCase = true)
+                it.segment.equals(instrument.segment, ignoreCase = true)
         }?.token
 
         val instrumentWithToken = instrument.copy(
@@ -513,7 +822,6 @@ class InstrumentRepository(
             SQLiteDatabase.CONFLICT_IGNORE
         )
 
-        // पहले से मौजूद instrument में केवल खाली token update करें।
         if (insertedId == -1L && !matchedToken.isNullOrBlank()) {
             val tokenValues = ContentValues().apply {
                 put("token", matchedToken)
@@ -539,6 +847,10 @@ class InstrumentRepository(
         return insertedId
     }
 
+    // ------------------------------------------------------------
+    // VALIDATION
+    // ------------------------------------------------------------
+
     private fun isValid(instrument: Instrument): Boolean {
         return instrument.symbol.isNotBlank() &&
             instrument.name.isNotBlank() &&
@@ -550,6 +862,10 @@ class InstrumentRepository(
             instrument.tickSize > 0.0
     }
 
+    // ------------------------------------------------------------
+    // CONTENT VALUES
+    // ------------------------------------------------------------
+
     private fun valuesOf(instrument: Instrument): ContentValues {
         val symbol = normalize(instrument.symbol)
 
@@ -559,6 +875,7 @@ class InstrumentRepository(
             put("exchange", normalize(instrument.exchange))
             put("segment", normalize(instrument.segment))
             put("instrument_type", normalize(instrument.instrumentType))
+
             put(
                 "trading_symbol",
                 normalize(instrument.tradingSymbol.ifBlank { symbol })
@@ -573,8 +890,18 @@ class InstrumentRepository(
             put("lot_size", instrument.lotSize)
             put("tick_size", instrument.tickSize)
             put("is_active", if (instrument.isActive) 1 else 0)
+
+            if (instrument.expiryMillis == null) {
+                putNull("expiry_millis")
+            } else {
+                put("expiry_millis", instrument.expiryMillis)
+            }
         }
     }
+
+    // ------------------------------------------------------------
+    // CURSOR MAPPING
+    // ------------------------------------------------------------
 
     private fun readInstrument(cursor: Cursor): Instrument {
         return Instrument(
@@ -588,12 +915,21 @@ class InstrumentRepository(
             token = if (cursor.isNull(7)) null else cursor.getString(7),
             lotSize = cursor.getInt(8),
             tickSize = cursor.getDouble(9),
-            isActive = cursor.getInt(10) == 1
+            isActive = cursor.getInt(10) == 1,
+            expiryMillis = if (cursor.isNull(11)) {
+                null
+            } else {
+                cursor.getLong(11)
+            }
         )
     }
 
+    // ------------------------------------------------------------
+    // NORMALIZATION
+    // ------------------------------------------------------------
+
     private fun normalize(value: String): String {
-        return value.trim().toUpperCase(Locale.ROOT)
+        return value.trim().uppercase(Locale.ROOT)
     }
 
     private fun normalizedSymbol(value: String): String {
@@ -605,6 +941,10 @@ class InstrumentRepository(
             .replace("%", "\\%")
             .replace("_", "\\_")
     }
+
+    // ------------------------------------------------------------
+    // PROJECTION
+    // ------------------------------------------------------------
 
     companion object {
         private val projection = arrayOf(
@@ -618,7 +958,8 @@ class InstrumentRepository(
             "token",
             "lot_size",
             "tick_size",
-            "is_active"
+            "is_active",
+            "expiry_millis"
         )
     }
 }

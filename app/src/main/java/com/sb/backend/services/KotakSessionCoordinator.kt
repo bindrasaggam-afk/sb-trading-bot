@@ -6,6 +6,7 @@ import android.os.Looper
 import android.util.Log
 import com.sb.backend.core.BackendManager
 import com.sb.backend.market.MarketDataManager
+import com.sb.backend.models.Candle
 import com.sb.backend.security.KotakNeoSecureStore
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -18,6 +19,9 @@ object KotakSessionCoordinator {
     private val lock = Any()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val executor: ExecutorService by lazy {
+        Executors.newSingleThreadExecutor()
+    }
+    private val historicalExecutor: ExecutorService by lazy {
         Executors.newSingleThreadExecutor()
     }
 
@@ -145,7 +149,15 @@ object KotakSessionCoordinator {
                         "Segments: ${result.downloadedSegments}\n" +
                         "Records: ${result.parsedRecords}\n" +
                         "Matched: ${result.matchedRecords}\n" +
-                        "Tokens updated: ${result.updatedRows}" +
+                        "Tokens updated: ${result.updatedRows}\n" +
+                        "MCX futures saved: ${result.mcxContractsSaved}\n" +
+                        "MCX active contracts: " +
+                        "${result.mcxActiveContracts}\n" +
+                        "MCX commodities: ${result.mcxCommodities}\n" +
+                        "MCX expired deactivated: " +
+                        "${result.mcxExpiredDeactivated}\n" +
+                        "MCX stale deactivated: " +
+                        "${result.mcxStaleDeactivated}" +
                         errorText
                 )
 
@@ -190,7 +202,7 @@ object KotakSessionCoordinator {
                 }
 
                 val instruments = BackendManager.instruments()
-                    .getActiveWithTokens(3000)
+                    .getActiveWithTokens(2950)
 
                 require(instruments.isNotEmpty()) {
                     "No instruments with Kotak tokens. Sync scrip master first."
@@ -216,6 +228,98 @@ object KotakSessionCoordinator {
             } finally {
                 connecting.set(false)
             }
+        }
+    }
+
+    /**
+     * Subscribe one instrument on demand (used by the live chart screen).
+     * The global feed already subscribes all tokenised instruments; this
+     * additionally handles indices and instruments outside that snapshot.
+     */
+    fun requestSubscription(symbol: String, exchange: String) {
+        val context = appContext
+
+        if (context == null) {
+            updateStatus("Live subscribe skipped: session not initialized")
+            return
+        }
+
+        executor.execute {
+            try {
+                BackendManager.initialize(context)
+
+                val instrument = BackendManager.instruments()
+                    .findBySymbol(symbol, exchange)
+
+                if (instrument == null) {
+                    updateStatus(
+                        "Live subscribe skipped: $exchange:$symbol not found"
+                    )
+                    return@execute
+                }
+
+                val service = synchronized(lock) {
+                    liveFeedService
+                }
+
+                if (service == null) {
+                    updateStatus(
+                        "Live subscribe pending: Kotak feed not connected"
+                    )
+                    return@execute
+                }
+
+                service.subscribeInstrument(instrument)
+            } catch (e: Exception) {
+                updateStatus(
+                    "Live subscribe failed for $exchange:$symbol: ${e.message}"
+                )
+            }
+        }
+    }
+
+    fun loadHistoricalCandles(
+        symbol: String,
+        exchange: String,
+        timeframe: String,
+        years: Int = 3,
+        callback: (List<Candle>) -> Unit
+    ) {
+        val context = appContext
+        val store = secureStore
+
+        if (context == null || store == null) {
+            mainHandler.post { callback(emptyList()) }
+            return
+        }
+
+        historicalExecutor.execute {
+            val candles = try {
+                BackendManager.initialize(context)
+
+                val instrument = BackendManager.instruments()
+                    .findBySymbol(symbol, exchange)
+
+                if (instrument == null) {
+                    emptyList()
+                } else {
+                    KotakNeoMarketDataService(
+                        secureStore = store,
+                        marketRepository = BackendManager.market()
+                    ).fetchHistoricalCandles(
+                        instrument = instrument,
+                        timeframe = timeframe,
+                        years = years
+                    )
+                }
+            } catch (e: Exception) {
+                updateStatus(
+                    "Historical load failed for $exchange:$symbol: ${e.message}"
+                )
+                emptyList()
+            }
+
+            mainHandler.post { callback(candles) }
         }
     }
 
@@ -255,6 +359,13 @@ object KotakSessionCoordinator {
         }
         return service?.isAuthenticated() == true
     }
+
+    fun liveFeed(): KotakNeoLiveFeedService? = synchronized(lock) {
+        liveFeedService
+    }
+
+    fun webSocketClient(): KotakNeoWebSocketClient? =
+        liveFeed()?.webSocketClient()
 
     fun isAutoLoginRunning(): Boolean {
         val manager = synchronized(lock) {
@@ -312,12 +423,27 @@ object KotakSessionCoordinator {
 
         val lower = message.toLowerCase()
         when {
-            lower.contains("authenticated") -> MarketDataManager.updateConnection(MarketDataManager.ConnectionState.AUTHENTICATED)
-            lower.contains("connected") && !lower.contains("disconnected") -> MarketDataManager.updateConnection(MarketDataManager.ConnectionState.CONNECTED)
-            lower.contains("connecting") -> MarketDataManager.updateConnection(MarketDataManager.ConnectionState.CONNECTING)
-            lower.contains("reconnecting") -> MarketDataManager.updateConnection(MarketDataManager.ConnectionState.RECONNECTING)
-            lower.contains("error") || lower.contains("failed") -> MarketDataManager.updateConnection(MarketDataManager.ConnectionState.ERROR)
-            lower.contains("disconnected") || lower.contains("closed") -> MarketDataManager.updateConnection(MarketDataManager.ConnectionState.DISCONNECTED)
+            lower.contains("live ticks") || lower.contains("authenticated") ->
+                MarketDataManager.updateConnection(MarketDataManager.ConnectionState.AUTHENTICATED)
+
+            lower.contains("reconnecting") ->
+                MarketDataManager.updateConnection(MarketDataManager.ConnectionState.RECONNECTING)
+
+            lower.contains("connecting") ->
+                MarketDataManager.updateConnection(MarketDataManager.ConnectionState.CONNECTING)
+
+            lower.contains("disconnected") || lower.contains("closed") ->
+                MarketDataManager.updateConnection(MarketDataManager.ConnectionState.DISCONNECTED)
+
+            lower.startsWith("error") ||
+                lower.contains("authentication failed") ||
+                lower.contains("websocket error") ||
+                lower.contains("failed") ->
+                MarketDataManager.updateConnection(MarketDataManager.ConnectionState.ERROR)
+
+            lower.contains("connected") ->
+                MarketDataManager.updateConnection(MarketDataManager.ConnectionState.CONNECTED)
+
             else -> {}
         }
 

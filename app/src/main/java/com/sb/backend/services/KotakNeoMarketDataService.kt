@@ -1,5 +1,7 @@
 package com.sb.backend.services
 
+import com.sb.backend.market.TimeframeBuckets
+import com.sb.backend.market.model.MarketTimeframe
 import com.sb.backend.models.Candle
 import com.sb.backend.models.Instrument
 import com.sb.backend.models.Quote
@@ -11,6 +13,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Locale
 import java.util.TimeZone
 
@@ -237,83 +240,282 @@ class KotakNeoMarketDataService(
             ?: throw Exception("Invalid candle timestamp: $value")
     }
 
+    private data class HistoricalRange(
+        val interval: String,
+        val maxDays: Int,
+        val aggregation: Int,
+        val baseSeconds: Long,
+        val lookbackDays: Int
+    )
+
+    private fun historicalRange(timeframe: String): HistoricalRange {
+        val label = timeframe.trim()
+        val lower = label.lowercase(Locale.ROOT)
+
+        return when {
+            label.endsWith("M") || label.endsWith("Y") ->
+                HistoricalRange("D", 180, 1, 86_400L, THREE_YEARS_DAYS)
+
+            label.endsWith("D") ->
+                HistoricalRange("D", 180, 1, 86_400L, THREE_YEARS_DAYS)
+
+            label.endsWith("W") ->
+                HistoricalRange("W", 180, 1, 604_800L, THREE_YEARS_DAYS)
+
+            lower == "1m" || lower == "1min" ->
+                HistoricalRange("1min", 30, 1, 60L, 30)
+
+            lower == "2m" || lower == "2min" ->
+                HistoricalRange("1min", 30, 1, 60L, 30)
+
+            lower == "3m" || lower == "3min" ->
+                HistoricalRange("3min", 30, 1, 180L, 30)
+
+            lower == "5m" || lower == "5min" ->
+                HistoricalRange("5min", 30, 1, 300L, 30)
+
+            lower == "10m" || lower == "10min" ->
+                HistoricalRange("10min", 60, 1, 600L, 60)
+
+            lower == "15m" || lower == "15min" ->
+                HistoricalRange("15min", 60, 1, 900L, 60)
+
+            lower == "30m" || lower == "30min" ->
+                HistoricalRange("30min", 90, 1, 1_800L, 90)
+
+            lower == "1h" || lower == "60m" || lower == "60min" ->
+                HistoricalRange("60min", 90, 1, 3_600L, 90)
+
+            lower == "2h" ->
+                HistoricalRange("60min", 90, 1, 3_600L, 90)
+
+            lower == "4h" ->
+                HistoricalRange("60min", 90, 1, 3_600L, 90)
+
+            else -> throw IllegalArgumentException(
+                "Unsupported historical timeframe: $timeframe"
+            )
+        }
+    }
+
     fun fetchHistoricalCandles(
         instrument: Instrument,
         timeframe: String,
-        fromDate: String,
-        toDate: String
-    ): Int {
-        require(instrument.exchange == "NSE" ||
-            instrument.exchange == "BSE") {
-            "Historical candles currently support NSE/BSE only"
+        years: Int = 3
+    ): List<Candle> {
+        require(instrument.isActive) {
+            "Instrument is inactive: ${instrument.symbol}"
         }
 
-        val token = instrument.token
+        val exchange = instrument.exchange.trim().uppercase(Locale.ROOT)
+        require(exchange == "NSE" || exchange == "BSE" || exchange == "MCX") {
+            "Historical candles are available for NSE/BSE/MCX only"
+        }
+
+        val token = instrument.token?.trim()
         require(!token.isNullOrBlank()) {
             "Verified instrument token missing: ${instrument.symbol}"
         }
 
-        val interval = when (timeframe.toUpperCase(Locale.ROOT)) {
-            "5M", "5MIN" -> "5min"
-            "15M", "15MIN" -> "15min"
-            else -> throw IllegalArgumentException(
-                "Only 5m and 15m candles are supported"
-            )
-        }
-
+        val range = historicalRange(timeframe)
         val segment = segmentFor(instrument.exchange)
         val neoSymbol = URLEncoder.encode(
             "$segment|$token",
             "UTF-8"
         )
 
-        val endpoint =
-            "${baseUrl()}/market-data/1.0/historical/details" +
-                "?neosymbol=$neoSymbol" +
-                "&fromdate=$fromDate" +
-                "&todate=$toDate" +
-                "&interval=$interval"
+        val lookback = if (range.lookbackDays >= THREE_YEARS_DAYS) {
+            365 * years.coerceIn(1, 5)
+        } else {
+            range.lookbackDays
+        }
 
-        val root = JSONObject(request(endpoint))
+        val timezone = TimeZone.getTimeZone("Asia/Kolkata")
+        val formatter = SimpleDateFormat("yyyy-MM-dd", Locale.US).apply {
+            this.timeZone = timezone
+        }
+
+        val anchor = Calendar.getInstance(timezone).apply {
+            set(Calendar.HOUR_OF_DAY, 0)
+            set(Calendar.MINUTE, 0)
+            set(Calendar.SECOND, 0)
+            set(Calendar.MILLISECOND, 0)
+        }
+
+        val collected = ArrayList<Candle>()
+        var remainingDays = lookback
+        var lastError: Exception? = null
+
+        while (remainingDays > 0) {
+            val chunkDays = minOf(range.maxDays, remainingDays)
+            val chunkEnd = anchor.time
+            anchor.add(Calendar.DAY_OF_YEAR, -(chunkDays - 1))
+            val chunkStart = anchor.time
+
+            val fromDate = formatter.format(chunkStart)
+            val toDate = formatter.format(chunkEnd)
+
+            val endpoint =
+                "${baseUrl()}/market-data/1.0/historical/details" +
+                    "?neosymbol=$neoSymbol" +
+                    "&fromdate=$fromDate" +
+                    "&todate=$toDate" +
+                    "&interval=${range.interval}"
+
+            try {
+                collected.addAll(
+                    parseHistoricalRows(
+                        request(endpoint),
+                        instrument,
+                        timeframe
+                    )
+                )
+            } catch (e: Exception) {
+                lastError = e
+            }
+
+            remainingDays -= chunkDays
+            anchor.add(Calendar.DAY_OF_YEAR, -1)
+        }
+
+        if (collected.isEmpty()) {
+            throw lastError ?: Exception(
+                "No historical candles returned for ${instrument.symbol}"
+            )
+        }
+
+        val ordered = collected
+            .distinctBy { it.timestamp }
+            .sortedBy { it.timestamp }
+
+        val candles = aggregateCandles(
+            ordered,
+            timeframe.trim(),
+            instrument.exchange
+        )
+
+        marketRepository.saveCandles(
+            symbol = instrument.symbol,
+            exchange = instrument.exchange,
+            timeframe = timeframe.trim(),
+            candles = candles
+        )
+
+        return candles
+    }
+
+    private fun parseHistoricalRows(
+        body: String,
+        instrument: Instrument,
+        timeframe: String
+    ): List<Candle> {
+        val root = JSONObject(body)
+
+        if (root.optString("status", "")
+                .equals("error", ignoreCase = true)
+        ) {
+            throw Exception(
+                root.optString("message", "Kotak historical data error")
+            )
+        }
+
         val data = root.optJSONObject("data")
-            ?: throw Exception("Historical candle data missing")
-
-        val rows = data.optJSONArray("candles")
+        val rows = data?.optJSONArray("candles")
+            ?: root.optJSONArray("candles")
+            ?: root.optJSONArray("data")
             ?: throw Exception("Historical candles array missing")
 
-        val candles = ArrayList<Candle>()
+        val result = ArrayList<Candle>(rows.length())
 
         for (i in 0 until rows.length()) {
             val row = rows.optJSONArray(i) ?: continue
             if (row.length() < 6) continue
 
-            val timestamp = parseCandleTime(row.getString(0))
-            val open = row.getDouble(1)
-            val high = row.getDouble(2)
-            val low = row.getDouble(3)
-            val close = row.getDouble(4)
-            val volume = row.getDouble(5).toLong()
+            val open = row.optDouble(1, Double.NaN)
+            val high = row.optDouble(2, Double.NaN)
+            val low = row.optDouble(3, Double.NaN)
+            val close = row.optDouble(4, Double.NaN)
+            val volume = row.optDouble(5, 0.0)
 
-            candles.add(
+            if (!open.isFinite() || !high.isFinite() ||
+                !low.isFinite() || !close.isFinite()
+            ) continue
+
+            if (open < 0.0 || high < 0.0 || low < 0.0 || close < 0.0) {
+                continue
+            }
+
+            if (high < low) continue
+
+            val timestamp = try {
+                parseCandleTime(row.getString(0))
+            } catch (_: Exception) {
+                continue
+            }
+
+            result.add(
                 Candle(
                     symbol = instrument.symbol,
-                    timeframe = interval,
+                    timeframe = timeframe.trim(),
                     timestamp = timestamp,
                     open = open,
                     high = high,
                     low = low,
                     close = close,
-                    volume = volume,
+                    volume = if (volume.isFinite()) {
+                        volume.toLong().coerceAtLeast(0L)
+                    } else {
+                        0L
+                    },
                     isComplete = true
                 )
             )
         }
 
-        return marketRepository.saveCandles(
-            symbol = instrument.symbol,
-            exchange = instrument.exchange,
-            timeframe = interval,
-            candles = candles
-        )
+        return result
+    }
+
+    private fun aggregateCandles(
+        candles: List<Candle>,
+        timeframe: String,
+        exchange: String
+    ): List<Candle> {
+        if (candles.isEmpty()) return candles
+
+        val parsed = MarketTimeframe.fromLabel(timeframe) ?: return candles
+        val result = ArrayList<Candle>()
+
+        for (candle in candles) {
+            val bucket = TimeframeBuckets.bucketStart(
+                timestamp = candle.timestamp,
+                timeframe = parsed,
+                exchange = exchange
+            )
+            if (bucket <= 0L) continue
+
+            val last = result.lastOrNull()
+
+            if (last == null || last.timestamp != bucket) {
+                result.add(candle.copy(timestamp = bucket))
+            } else {
+                result[result.lastIndex] = last.copy(
+                    high = maxOf(last.high, candle.high),
+                    low = minOf(last.low, candle.low),
+                    close = candle.close,
+                    volume = safeAdd(last.volume, candle.volume)
+                )
+            }
+        }
+
+        return result
+    }
+
+    private fun safeAdd(first: Long, second: Long): Long {
+        if (second > 0L && first > Long.MAX_VALUE - second) return Long.MAX_VALUE
+        return (first + second).coerceAtLeast(0L)
+    }
+
+    private companion object {
+        private const val THREE_YEARS_DAYS = 1095
     }
 }

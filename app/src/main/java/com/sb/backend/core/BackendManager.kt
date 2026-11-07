@@ -5,13 +5,18 @@ import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
+import android.util.Log
 import com.sb.backend.database.DatabaseBackup
 import com.sb.backend.database.SBDatabaseHelper
+import com.sb.backend.market.repo.MarketFeedRepository
 import com.sb.backend.repositories.InstrumentRepository
 import com.sb.backend.repositories.MarketRepository
 import com.sb.backend.repositories.PaperRepository
 import com.sb.backend.repositories.SignalRepository
 import com.sb.backend.security.DeviceIdentity
+import com.sb.backend.services.KotakNeoLiveFeedService
+import com.sb.backend.services.KotakNeoWebSocketClient
+import com.sb.backend.services.KotakSessionCoordinator
 import com.sb.backend.services.MarketDataService
 import com.sb.backend.services.PaperTradingEngine
 import com.sb.backend.services.RiskManager
@@ -20,8 +25,11 @@ import java.io.File
 import java.io.IOException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 
 object BackendManager {
+
+    private const val TAG = "BackendManager"
 
     private val lock = Any()
 
@@ -84,27 +92,78 @@ object BackendManager {
         onReady: (() -> Unit)? = null
     ) {
         checkInitialized()
+
         synchronized(lock) {
             if (started) {
-                if (ready) onReady?.invoke()
-                return
-            }
-            started = true
-            val worker = executor ?: return
-            worker.execute {
-                try {
-                    if (seedBuiltInMasters) {
-                        if (instrumentRepository.count() == 0) {
-                            instrumentRepository.seedBuiltInMasters()
-                        }
-
-                        instrumentRepository.backfillKnownTokens()
-                    }
-                    signalRepository.expireOld()
-                    ready = true
-                } finally {
+                if (ready) {
                     onReady?.invoke()
                 }
+                return
+            }
+
+            val worker = executor ?: run {
+                Log.e(TAG, "Backend startup failed: executor is unavailable.")
+                return
+            }
+
+            started = true
+
+            try {
+                worker.execute {
+                    try {
+                        if (seedBuiltInMasters) {
+                            if (instrumentRepository.count() == 0) {
+                                instrumentRepository.seedBuiltInMasters()
+                            }
+
+                            instrumentRepository.backfillKnownTokens()
+                        }
+
+                        signalRepository.expireOld()
+
+                        synchronized(lock) {
+                            if (!initialized) {
+                                Log.w(TAG, "Backend stopped before startup completed.")
+                                return@execute
+                            }
+
+                            ready = true
+                        }
+
+                        Log.i(TAG, "Backend initialization completed successfully.")
+
+                        try {
+                            onReady?.invoke()
+                        } catch (callbackError: Exception) {
+                            Log.e(
+                                TAG,
+                                "Backend ready callback failed.",
+                                callbackError
+                            )
+                        }
+
+                    } catch (error: Exception) {
+                        synchronized(lock) {
+                            ready = false
+                            started = false
+                        }
+
+                        Log.e(
+                            TAG,
+                            "Backend initialization failed.",
+                            error
+                        )
+                    }
+                }
+            } catch (error: RejectedExecutionException) {
+                started = false
+                ready = false
+
+                Log.e(
+                    TAG,
+                    "Backend startup rejected by executor.",
+                    error
+                )
             }
         }
     }
@@ -157,6 +216,16 @@ object BackendManager {
         checkInitialized()
         return marketDataService
     }
+
+    fun marketFeed(): MarketFeedRepository = MarketFeedRepository
+
+    fun session(): KotakSessionCoordinator = KotakSessionCoordinator
+
+    fun liveFeed(): KotakNeoLiveFeedService? =
+        KotakSessionCoordinator.liveFeed()
+
+    fun webSocket(): KotakNeoWebSocketClient? =
+        KotakSessionCoordinator.webSocketClient()
 
     fun signalEngine(): SignalEngine {
         checkInitialized()

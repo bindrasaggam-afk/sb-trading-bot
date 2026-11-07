@@ -2,6 +2,7 @@
 package com.sb
 
 import android.content.Context
+import android.graphics.Color
 import android.graphics.Typeface
 import android.text.Editable
 import android.text.TextWatcher
@@ -13,6 +14,7 @@ import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
 import android.widget.Toast
+import com.sb.ui.theme.AppDesign
 
 private data class UniversalSearchItem(
     val title: String,
@@ -68,33 +70,43 @@ class StockSearchScreen(
     fun createView(): View {
         val root = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
+            setBackgroundColor(AppDesign.background)
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
-            setPadding(16, 16, 16, 16)
+            setPadding(14, 10, 14, 8)
         }
 
         val title = TextView(context).apply {
             text = "Universal Search"
-            textSize = 22f
+            textSize = 19f
+            setTextColor(AppDesign.textPrimary)
             typeface = Typeface.DEFAULT_BOLD
         }
 
         val count = TextView(context).apply {
             text = "Loaded instruments: ${repository.getStockCount()}"
-            textSize = 14f
-            setPadding(0, 8, 0, 12)
+            textSize = 11f
+            setTextColor(AppDesign.textMuted)
+            setPadding(0, 3, 0, 8)
         }
 
         val searchBox = EditText(context).apply {
             hint = "Search stocks, symbols, ISIN or app screens"
             setSingleLine(true)
-            textSize = 15f
-            setPadding(12, 12, 12, 12)
+            textSize = 13f
+            setTextColor(AppDesign.textPrimary)
+            setHintTextColor(AppDesign.textMuted)
+            background = AppDesign.fieldBackground(context, 9)
+            setPadding(12, 9, 12, 9)
         }
 
-        val results = ListView(context)
+        val results = ListView(context).apply {
+            setBackgroundColor(Color.TRANSPARENT)
+            divider = android.graphics.drawable.ColorDrawable(AppDesign.divider)
+            dividerHeight = 1
+        }
 
         val adapter = object : ArrayAdapter<UniversalSearchItem>(
             context,
@@ -110,13 +122,24 @@ class StockSearchScreen(
                 val view = super.getView(position, convertView, parent)
                 val item = getItem(position) ?: return view
 
+                view.setBackgroundColor(Color.TRANSPARENT)
+                view.setPadding(4, 8, 4, 8)
+
                 view.findViewById<TextView>(
                     android.R.id.text1
-                ).text = item.title
+                ).apply {
+                    text = item.title
+                    setTextColor(AppDesign.textPrimary)
+                    textSize = 13f
+                }
 
                 view.findViewById<TextView>(
                     android.R.id.text2
-                ).text = item.subtitle
+                ).apply {
+                    text = item.subtitle
+                    setTextColor(AppDesign.textMuted)
+                    textSize = 10.5f
+                }
 
                 return view
             }
