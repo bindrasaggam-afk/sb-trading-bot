@@ -29,6 +29,7 @@ class KotakNeoLiveFeedService(
 
     private val pendingQuotes = ConcurrentHashMap<String, Quote>()
     private val quoteFlushScheduled = AtomicBoolean(false)
+    private val retryWorkerStarted = AtomicBoolean(false)
     private val quoteExecutor: ScheduledExecutorService by lazy {
         Executors.newSingleThreadScheduledExecutor()
     }
@@ -122,6 +123,7 @@ class KotakNeoLiveFeedService(
             },
             onAuthenticated = {
                 subscribeAll()
+                startQuoteRetryWorker()
             }
         )
 
@@ -307,10 +309,6 @@ class KotakNeoLiveFeedService(
                 return@forEach
             }
 
-            if (tick.ltp <= 0.0 || !tick.ltp.isFinite()) {
-                return@forEach
-            }
-
             val symbol: String
             val exchange: String
 
@@ -331,10 +329,31 @@ class KotakNeoLiveFeedService(
 
                 val instrument = instrumentMap[key]
                     ?: requestedInstruments[key]
-                    ?: return@forEach
+                    ?: run {
+                        marketRepository.recordTickAudit(
+                            exchange = exchangeName(tick.exchange)
+                                .ifBlank { tick.exchange },
+                            symbol = tick.symbol.ifBlank {
+                                tick.token.toString()
+                            },
+                            rejected = 1
+                        )
+                        return@forEach
+                    }
 
                 symbol = instrument.symbol
                 exchange = instrument.exchange
+            }
+
+            if (tick.ltp <= 0.0 || !tick.ltp.isFinite()) {
+                marketRepository.recordTickAudit(
+                    exchange = exchange,
+                    symbol = symbol,
+                    received = 1,
+                    parsed = 1,
+                    rejected = 1
+                )
+                return@forEach
             }
 
             val received = System.currentTimeMillis()
@@ -404,6 +423,28 @@ class KotakNeoLiveFeedService(
                     receivedAt = received,
                     isIndex = tick.isIndex
                 )
+                // Persist every mapped market tick before quote batching.
+                // Raw ticks must not be lost when pendingQuotes overwrites older quotes.
+                val rawSaved = try {
+                    marketRepository.saveRawTick(mTick)
+                } catch (e: Exception) {
+                    onStatus("Raw tick save error $symbol: ${e.message}")
+                    false
+                }
+
+                // Record per-instrument feed and raw persistence counters.
+                marketRepository.recordTickAudit(
+                    exchange = exchange,
+                    symbol = symbol,
+                    received = 1,
+                    parsed = 1,
+                    mapped = 1,
+                    rejected = 0,
+                    rawSaved = if (rawSaved) 1 else 0,
+                    quoteSaved = 0,
+                    saveFailed = if (rawSaved) 0 else 1
+                )
+
                 MarketDataManager.onNewTick(mTick)
 
                 if (MarketDataManager.currentConnection() !=
@@ -462,24 +503,110 @@ class KotakNeoLiveFeedService(
 
         if (pendingQuotes.isEmpty()) return
 
-        val batch = ArrayList<Quote>(pendingQuotes.size)
-        val iterator = pendingQuotes.keys.iterator()
-
-        while (iterator.hasNext()) {
-            val key = iterator.next()
-            pendingQuotes.remove(key)?.let { batch.add(it) }
+        val batch = pendingQuotes.entries.map { entry ->
+            entry.key to entry.value
         }
 
         if (batch.isEmpty()) return
 
-        try {
-            val saved = marketRepository.saveQuotes(batch)
+        batch.forEach { (key, quote) ->
+            try {
+                val saved = marketRepository.saveQuote(quote)
 
-            if (saved <= 0) {
-                onStatus("Live quote database save failed")
+                if (saved) {
+                    // केवल वही quote हटेगी जो अभी save की गई है।
+                    // इस बीच नई quote आई हो तो वह सुरक्षित रहेगी।
+                    pendingQuotes.remove(key, quote)
+
+                    marketRepository.recordTickAudit(
+                        exchange = quote.exchange,
+                        symbol = quote.symbol,
+                        quoteSaved = 1
+                    )
+                } else {
+                    val queued = marketRepository.enqueueQuoteRetry(
+                        quote,
+                        "Initial quote persistence returned false"
+                    )
+
+                    marketRepository.recordTickAudit(
+                        exchange = quote.exchange,
+                        symbol = quote.symbol,
+                        saveFailed = 1
+                    )
+
+                    if (queued) {
+                        pendingQuotes.remove(key, quote)
+                    } else {
+                        onStatus(
+                            "Quote save and retry enqueue failed: ${quote.symbol}"
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                val queued = marketRepository.enqueueQuoteRetry(
+                    quote,
+                    e.message ?: "Initial quote persistence exception"
+                )
+
+                marketRepository.recordTickAudit(
+                    exchange = quote.exchange,
+                    symbol = quote.symbol,
+                    saveFailed = 1
+                )
+
+                if (queued) {
+                    pendingQuotes.remove(key, quote)
+                } else {
+                    onStatus(
+                        "Quote persistence recovery failed: ${quote.symbol}"
+                    )
+                }
             }
+        }
+
+        // अगर flush के दौरान नई quotes आई हैं तो अगला flush schedule करें।
+        if (pendingQuotes.isNotEmpty() &&
+            quoteFlushScheduled.compareAndSet(false, true)
+        ) {
+            try {
+                quoteExecutor.schedule(
+                    { flushPendingQuotes() },
+                    500L,
+                    TimeUnit.MILLISECONDS
+                )
+            } catch (e: Exception) {
+                quoteFlushScheduled.set(false)
+                onStatus("Quote flush scheduling failed: ${e.message}")
+            }
+        }
+    }
+
+    private fun startQuoteRetryWorker() {
+        if (!retryWorkerStarted.compareAndSet(false, true)) return
+
+        try {
+            quoteExecutor.scheduleWithFixedDelay(
+                {
+                    try {
+                        val recovered = marketRepository.retryPendingQuotes(100)
+
+                        if (recovered > 0) {
+                            onStatus("Quote retry recovered: $recovered")
+                        }
+                    } catch (e: Exception) {
+                        onStatus(
+                            "Quote retry worker error: ${e.message}"
+                        )
+                    }
+                },
+                5L,
+                5L,
+                TimeUnit.SECONDS
+            )
         } catch (e: Exception) {
-            onStatus("Live quote database save error: ${e.message}")
+            retryWorkerStarted.set(false)
+            onStatus("Quote retry scheduler failed: ${e.message}")
         }
     }
 

@@ -73,6 +73,90 @@ object DatabaseMigrations {
             """.trimIndent()
         )
 
+        // Durable raw market tick history.
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS raw_ticks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                exchange TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                ltp REAL NOT NULL CHECK (ltp > 0),
+                volume INTEGER NOT NULL DEFAULT 0 CHECK (volume >= 0),
+                last_trade_qty INTEGER NOT NULL DEFAULT 0
+                    CHECK (last_trade_qty >= 0),
+                last_trade_time INTEGER,
+                exchange_time INTEGER,
+                received_at INTEGER NOT NULL
+            )
+            """.trimIndent()
+        )
+
+        // Durable per-instrument tick processing counters.
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS tick_audit (
+                exchange TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                received INTEGER NOT NULL DEFAULT 0,
+                parsed INTEGER NOT NULL DEFAULT 0,
+                mapped INTEGER NOT NULL DEFAULT 0,
+                rejected INTEGER NOT NULL DEFAULT 0,
+                raw_saved INTEGER NOT NULL DEFAULT 0,
+                quote_saved INTEGER NOT NULL DEFAULT 0,
+                save_failed INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY(exchange, symbol)
+            )
+            """.trimIndent()
+        )
+
+        // Durable retry queue: one latest pending quote per instrument.
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS quote_persistence_retry (
+                symbol TEXT NOT NULL,
+                exchange TEXT NOT NULL,
+                ltp REAL NOT NULL,
+                open REAL,
+                high REAL,
+                low REAL,
+                previous_close REAL,
+                volume INTEGER NOT NULL DEFAULT 0,
+                change REAL,
+                change_percent REAL,
+                timestamp INTEGER NOT NULL,
+                is_live INTEGER NOT NULL DEFAULT 0,
+                exchange_timestamp INTEGER,
+                received_at INTEGER NOT NULL DEFAULT 0,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                queued_at INTEGER NOT NULL,
+                PRIMARY KEY(symbol, exchange)
+            )
+            """.trimIndent()
+        )
+
+        // Candle completeness metadata.
+        addColumnIfMissing(db, "candles", "status",
+            "TEXT NOT NULL DEFAULT 'FINAL'")
+        addColumnIfMissing(db, "candles", "source_tick_count",
+            "INTEGER NOT NULL DEFAULT 0")
+        addColumnIfMissing(db, "candles", "first_tick_timestamp",
+            "INTEGER")
+        addColumnIfMissing(db, "candles", "last_tick_timestamp",
+            "INTEGER")
+        addColumnIfMissing(db, "candles", "finalized_at",
+            "INTEGER")
+
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS idx_raw_ticks_instrument_time " +
+                "ON raw_ticks(exchange, symbol, received_at)"
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS idx_quote_retry_queued " +
+                "ON quote_persistence_retry(queued_at)"
+        )
+
         db.execSQL(
             """
             CREATE TABLE IF NOT EXISTS signals (
@@ -208,27 +292,19 @@ object DatabaseMigrations {
             "CREATE INDEX IF NOT EXISTS idx_positions_status " +
                 "ON positions(status)"
         )
+
+        createV5Schema(db)
     }
 
     fun upgrade(db: SQLiteDatabase, oldVersion: Int) {
-        // Existing tables and indexes are preserved.
+        // Preserve existing schema and records.
         createAll(db)
 
         if (oldVersion < 3) {
+            addColumnIfMissing(db, "quotes", "exchange_timestamp", "INTEGER")
             addColumnIfMissing(
-                db,
-                "quotes",
-                "exchange_timestamp",
-                "INTEGER"
+                db, "quotes", "received_at", "INTEGER NOT NULL DEFAULT 0"
             )
-
-            addColumnIfMissing(
-                db,
-                "quotes",
-                "received_at",
-                "INTEGER NOT NULL DEFAULT 0"
-            )
-
             db.execSQL(
                 """
                 UPDATE quotes
@@ -239,13 +315,82 @@ object DatabaseMigrations {
         }
 
         if (oldVersion < 4) {
-            addColumnIfMissing(
-                db,
-                "instruments",
-                "expiry_millis",
-                "INTEGER"
-            )
+            addColumnIfMissing(db, "instruments", "expiry_millis", "INTEGER")
         }
+
+        if (oldVersion < 5) {
+            createV5Schema(db)
+        }
+    }
+
+    private fun createV5Schema(db: SQLiteDatabase) {
+
+        // Instrument identity lookup. Non-unique to avoid breaking
+        // existing databases that may contain duplicate tokens.
+        db.execSQL(
+            """
+            CREATE INDEX IF NOT EXISTS idx_instruments_exchange_token
+            ON instruments(exchange, token)
+            """.trimIndent()
+        )
+
+        db.execSQL(
+            """
+            CREATE INDEX IF NOT EXISTS idx_instruments_exchange_segment_symbol
+            ON instruments(exchange, segment, symbol)
+            """.trimIndent()
+        )
+
+        // Database-level OHLC validation.
+        // SQLite stores non-finite REAL values as NULL; NOT NULL and
+        // these checks prevent invalid persisted candles.
+        db.execSQL("DROP TRIGGER IF EXISTS trg_candles_validate_insert")
+        db.execSQL("DROP TRIGGER IF EXISTS trg_candles_validate_update")
+
+        val validation = """
+            SELECT CASE
+                WHEN NEW.timestamp <= 0
+                  OR NEW.open IS NULL OR NEW.high IS NULL
+                  OR NEW.low IS NULL OR NEW.close IS NULL
+                  OR NEW.open <= 0 OR NEW.high <= 0
+                  OR NEW.low <= 0 OR NEW.close <= 0
+                  OR NEW.high < NEW.open
+                  OR NEW.high < NEW.close
+                  OR NEW.high < NEW.low
+                  OR NEW.low > NEW.open
+                  OR NEW.low > NEW.close
+                  OR NEW.volume < 0
+                THEN RAISE(ABORT, 'Invalid OHLC candle')
+            END;
+        """.trimIndent()
+
+        db.execSQL(
+            """
+            CREATE TRIGGER trg_candles_validate_insert
+            BEFORE INSERT ON candles
+            BEGIN
+                $validation
+            END
+            """.trimIndent()
+        )
+
+        db.execSQL(
+            """
+            CREATE TRIGGER trg_candles_validate_update
+            BEFORE UPDATE ON candles
+            BEGIN
+                $validation
+            END
+            """.trimIndent()
+        )
+
+        // Retention support: 7 days by default at the caller level.
+        db.execSQL(
+            """
+            CREATE INDEX IF NOT EXISTS idx_raw_ticks_received
+            ON raw_ticks(received_at)
+            """.trimIndent()
+        )
     }
 
     private fun addColumnIfMissing(

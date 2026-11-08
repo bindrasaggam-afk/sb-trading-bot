@@ -34,12 +34,13 @@ class SBDatabaseHelper(context: Context) : SQLiteOpenHelper(
         oldVersion: Int,
         newVersion: Int
     ) {
-        DatabaseMigrations.createAll(db)
+        // Do not drop or recreate tables during downgrade.
+        // Preserve existing user data.
     }
 
     companion object {
         const val DATABASE_NAME = "sb_backend.db"
-        const val DATABASE_VERSION = 4
+        const val DATABASE_VERSION = 5
 
         const val TABLE_INSTRUMENTS = "instruments"
         const val TABLE_QUOTES = "quotes"
