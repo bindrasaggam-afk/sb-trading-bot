@@ -13,6 +13,8 @@ class SBDatabaseHelper(context: Context) : SQLiteOpenHelper(
 
     override fun onConfigure(db: SQLiteDatabase) {
         super.onConfigure(db)
+
+        // Enable foreign key constraints.
         db.setForeignKeyConstraintsEnabled(true)
     }
 
@@ -26,6 +28,7 @@ class SBDatabaseHelper(context: Context) : SQLiteOpenHelper(
         newVersion: Int
     ) {
         if (newVersion <= oldVersion) return
+
         DatabaseMigrations.upgrade(db, oldVersion)
     }
 
@@ -34,21 +37,35 @@ class SBDatabaseHelper(context: Context) : SQLiteOpenHelper(
         oldVersion: Int,
         newVersion: Int
     ) {
-        // Do not drop or recreate tables during downgrade.
-        // Preserve existing user data.
+        // Never drop or recreate existing tables.
+        // Preserve existing user data during downgrade.
     }
 
     companion object {
+
         const val DATABASE_NAME = "sb_backend.db"
+
+        // Must match the latest DatabaseMigrations version.
         const val DATABASE_VERSION = 5
 
+        // Core market tables
         const val TABLE_INSTRUMENTS = "instruments"
         const val TABLE_QUOTES = "quotes"
         const val TABLE_CANDLES = "candles"
+
+        // Tick persistence and audit tables
+        const val TABLE_RAW_TICKS = "raw_ticks"
+        const val TABLE_TICK_AUDIT = "tick_audit"
+        const val TABLE_QUOTE_PERSISTENCE_RETRY =
+            "quote_persistence_retry"
+
+        // Trading tables
         const val TABLE_SIGNALS = "signals"
         const val TABLE_PAPER_ACCOUNT = "paper_account"
         const val TABLE_PAPER_ORDERS = "paper_orders"
         const val TABLE_POSITIONS = "positions"
+
+        // Application tables
         const val TABLE_DEVICE_IDENTITY = "device_identity"
         const val TABLE_APP_STATE = "app_state"
     }

@@ -144,11 +144,11 @@ class KotakNeoLiveFeedService(
      */
     @Synchronized
     fun subscribeAll() {
-        val tokens = instrumentMap.keys
-            .map { key ->
-                "${key.feedSegment}|${key.token}"
-            }
-            .distinct()
+        val allKeys = (instrumentMap.keys + requestedInstruments.keys).distinct()
+
+        val tokens = allKeys.map { key ->
+            "${key.feedSegment}|${key.token}"
+        }.distinct()
 
         if (tokens.isEmpty()) {
             onStatus("No active instruments with valid Kotak tokens")
@@ -251,9 +251,14 @@ class KotakNeoLiveFeedService(
         }
 
         requestedInstruments.remove(key)
-        ws.unsubscribe(
-            listOf("${key.feedSegment}|${key.token}")
-        )
+
+        // शुरुआती instrumentMap में मौजूद इंस्ट्रूमेंट को
+        // ऑन-डिमांड unsubscribe से हटाना नहीं है।
+        if (key !in instrumentMap) {
+            ws.unsubscribe(
+                listOf("${key.feedSegment}|${key.token}")
+            )
+        }
 
         onStatus("Unsubscribe requested: ${instrument.symbol}")
     }
@@ -288,6 +293,36 @@ class KotakNeoLiveFeedService(
 
             else -> throw IllegalArgumentException(
                 "Unsupported exchange: ${instrument.exchange}"
+            )
+        }
+    }
+
+    private fun safeRecordTickAudit(
+        exchange: String,
+        symbol: String,
+        received: Int = 0,
+        parsed: Int = 0,
+        mapped: Int = 0,
+        rejected: Int = 0,
+        rawSaved: Int = 0,
+        quoteSaved: Int = 0,
+        saveFailed: Int = 0
+    ) {
+        try {
+            marketRepository.recordTickAudit(
+                exchange = exchange,
+                symbol = symbol,
+                received = received,
+                parsed = parsed,
+                mapped = mapped,
+                rejected = rejected,
+                rawSaved = rawSaved,
+                quoteSaved = quoteSaved,
+                saveFailed = saveFailed
+            )
+        } catch (e: Exception) {
+            onStatus(
+                "Tick audit persistence error $symbol: ${e.message}"
             )
         }
     }
@@ -330,7 +365,7 @@ class KotakNeoLiveFeedService(
                 val instrument = instrumentMap[key]
                     ?: requestedInstruments[key]
                     ?: run {
-                        marketRepository.recordTickAudit(
+                        safeRecordTickAudit(
                             exchange = exchangeName(tick.exchange)
                                 .ifBlank { tick.exchange },
                             symbol = tick.symbol.ifBlank {
@@ -346,7 +381,7 @@ class KotakNeoLiveFeedService(
             }
 
             if (tick.ltp <= 0.0 || !tick.ltp.isFinite()) {
-                marketRepository.recordTickAudit(
+                safeRecordTickAudit(
                     exchange = exchange,
                     symbol = symbol,
                     received = 1,
@@ -433,7 +468,7 @@ class KotakNeoLiveFeedService(
                 }
 
                 // Record per-instrument feed and raw persistence counters.
-                marketRepository.recordTickAudit(
+                safeRecordTickAudit(
                     exchange = exchange,
                     symbol = symbol,
                     received = 1,
@@ -518,7 +553,7 @@ class KotakNeoLiveFeedService(
                     // इस बीच नई quote आई हो तो वह सुरक्षित रहेगी।
                     pendingQuotes.remove(key, quote)
 
-                    marketRepository.recordTickAudit(
+                    safeRecordTickAudit(
                         exchange = quote.exchange,
                         symbol = quote.symbol,
                         quoteSaved = 1
@@ -529,7 +564,7 @@ class KotakNeoLiveFeedService(
                         "Initial quote persistence returned false"
                     )
 
-                    marketRepository.recordTickAudit(
+                    safeRecordTickAudit(
                         exchange = quote.exchange,
                         symbol = quote.symbol,
                         saveFailed = 1
@@ -549,7 +584,7 @@ class KotakNeoLiveFeedService(
                     e.message ?: "Initial quote persistence exception"
                 )
 
-                marketRepository.recordTickAudit(
+                safeRecordTickAudit(
                     exchange = quote.exchange,
                     symbol = quote.symbol,
                     saveFailed = 1

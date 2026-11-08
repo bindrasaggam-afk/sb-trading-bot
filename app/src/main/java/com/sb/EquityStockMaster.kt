@@ -2,7 +2,7 @@ package com.sb
 
 object EquityStockMaster {
 
-    val equityListPart1 = listOf(
+    val allEquities = listOf(
         Triple("20MICRONS", "20 Microns Limited", "EQ"),
         Triple("21STCENMGM", "21st Century Management Services Limited", "EQ"),
         Triple("360ONE", "360 ONE WAM LIMITED", "EQ"),
@@ -487,10 +487,7 @@ object EquityStockMaster {
         Triple("GRAPHITE", "Graphite India Limited", "EQ"),
         Triple("GRASIM", "Grasim Industries Limited", "EQ"),
         Triple("GRAUWEIL", "Grauer & Weil India Limited", "EQ"),
-        Triple("GRAVISSHO", "Graviss Hospitality Limited", "BE")
-    )
-
-    val equityListPart2 = listOf(
+        Triple("GRAVISSHO", "Graviss Hospitality Limited", "BE"),
         Triple("DELTALOGIC", "Delta Technology and Management Services Limited", "EQ"),
         Triple("DEMPO", "Dempo Industries Limited", "EQ"),
         Triple("DEN", "Den Networks Limited", "EQ"),
@@ -778,10 +775,7 @@ object EquityStockMaster {
         Triple("GRAPHITE", "Graphite India Limited", "EQ"),
         Triple("GRASIM", "Grasim Industries Limited", "EQ"),
         Triple("GRAUWEIL", "Grauer & Weil India Limited", "EQ"),
-        Triple("GRAVISSHO", "Graviss Hospitality Limited", "BE")
-    )
-
-    val equityListPart3 = listOf(
+        Triple("GRAVISSHO", "Graviss Hospitality Limited", "BE"),
         Triple("PILITA", "Pil Italica Lifestyle Limited", "EQ"),
         Triple("PIONEEREMB", "Pioneer Embroideries Limited", "EQ"),
         Triple("PIONDIST", "Pioneer Distilleries Limited", "BZ"),
@@ -1214,10 +1208,7 @@ object EquityStockMaster {
         Triple("ZUARI", "Zuari Industries Limited", "EQ"),
         Triple("ZUARIGROUP", "Zuari Agro Chemicals Limited", "EQ"),
         Triple("ZYDUSLIFE", "Zydus Lifesciences Limited", "EQ"),
-        Triple("ZYDUSWELL", "Zydus Wellness Limited", "EQ")
-    )
-
-    val equityListPart4A = listOf(
+        Triple("ZYDUSWELL", "Zydus Wellness Limited", "EQ"),
         Triple("AADHARHFC", "Aadhar Housing Finance Limited", "EQ"),
         Triple("AAREYDRUGS", "Aarey Drugs & Pharmaceuticals Limited", "EQ"),
         Triple("AARNAV", "Aarnav Fashions Limited", "BE"),
@@ -1397,10 +1388,7 @@ object EquityStockMaster {
         Triple("BHARATGEAR", "Bharat Gears Limited", "EQ"),
         Triple("BHARATRAS", "Bharat Rasayan Limited", "EQ"),
         Triple("BHARATSE", "Bharat Seats Limited", "EQ"),
-        Triple("BHARATWIRE", "Bharat Wire Ropes Limited", "EQ")
-    )
-
-    val equityListPart4B = listOf(
+        Triple("BHARATWIRE", "Bharat Wire Ropes Limited", "EQ"),
         Triple("BHARTIARTL", "Bharti Airtel Limited", "EQ"),
         Triple("BHARTIHEXA", "Bharti Hexacom Limited", "EQ"),
         Triple("BI", "Bilcare Limited", "BE"),
@@ -1948,10 +1936,7 @@ object EquityStockMaster {
         Triple("TRENT", "Trent Limited", "EQ"),
         Triple("ULTRACEMCO", "UltraTech Cement Limited", "EQ"),
         Triple("WIPRO", "Wipro Limited", "EQ"),
-        Triple("ZEEL", "Zee Entertainment Enterprises Limited", "EQ")
-    )
-
-    val equityListPart4C = listOf(
+        Triple("ZEEL", "Zee Entertainment Enterprises Limited", "EQ"),
         Triple("HINDUNILVR", "Hindustan Unilever Limited", "EQ"),
         Triple("HINDWAREAP", "Hindware Home Innovation Limited", "EQ"),
         Triple("HINDZINC", "Hindustan Zinc Limited", "EQ"),
@@ -2051,10 +2036,7 @@ object EquityStockMaster {
         Triple("INNOVACAP", "Innova Captab Limited", "EQ"),
         Triple("INNOVANA", "Innovana Thinklabs Limited", "EQ"),
         Triple("INNOVISION", "Innovision Limited", "EQ"),
-        Triple("INOXGREEN", "Inox Green Energy Services Limited", "EQ")
-    )
-
-    val equityListPart4D = listOf(
+        Triple("INOXGREEN", "Inox Green Energy Services Limited", "EQ"),
         Triple("INOXINDIA", "INOX India Limited", "EQ"),
         Triple("INOXWIND", "Inox Wind Limited", "EQ"),
         Triple("INSECTICID", "Insecticides (India) Limited", "EQ"),
@@ -2154,10 +2136,7 @@ object EquityStockMaster {
         Triple("JUNIPER", "Juniper Hotels Limited", "EQ"),
         Triple("JUSTDIAL", "Just Dial Limited", "EQ"),
         Triple("JWL", "Jupiter Wagons Limited", "EQ"),
-        Triple("JYOTHYLAB", "Jyothy Labs Limited", "EQ")
-    )
-
-    val equityListPart4E = listOf(
+        Triple("JYOTHYLAB", "Jyothy Labs Limited", "EQ"),
         Triple("KAJARIACER", "Kajaria Ceramics Limited", "EQ"),
         Triple("KAKATCEM", "Kakatiya Cement Sugar & Industries Limited", "EQ"),
         Triple("KALAMANDIR", "Sai Silks (Kalamandir) Limited", "EQ"),
@@ -2257,10 +2236,7 @@ object EquityStockMaster {
         Triple("KTKBANK", "The Karnataka Bank Limited", "EQ"),
         Triple("KUANTUM", "Kuantum Papers Limited", "EQ"),
         Triple("KUSUMGAR", "Kusumgar Limited", "EQ"),
-        Triple("KWIL", "Kwality Wall's (India) Limited", "EQ")
-    )
-
-    val equityListPart4F = listOf(
+        Triple("KWIL", "Kwality Wall's (India) Limited", "EQ"),
         Triple("LAGNAM", "Lagnam Spintex Limited", "EQ"),
         Triple("LAHOTIOV", "Lahoti Overseas Limited", "EQ"),
         Triple("LAKSHMIMIL", "Lakshmi Mills Company Limited", "EQ"),
@@ -2510,10 +2486,7 @@ object EquityStockMaster {
         Triple("NESTLEIND", "Nestle India Limited", "EQ"),
         Triple("NETWEB", "Netweb Technologies India Limited", "EQ"),
         Triple("NETWORK18", "Network18 Media & Investments Limited", "EQ"),
-        Triple("NEULANDLAB", "Neuland Laboratories Limited", "EQ")
-    )
-
-    val equityListPart4G = listOf(
+        Triple("NEULANDLAB", "Neuland Laboratories Limited", "EQ"),
         Triple("NEWGEN", "Newgen Software Technologies Limited", "EQ"),
         Triple("NEXTMEDIA", "Next Mediaworks Limited", "EQ"),
         Triple("NFL", "National Fertilizers Limited", "EQ"),
@@ -2765,8 +2738,6 @@ object EquityStockMaster {
         Triple("S&SPOWER", "S&S Power Switchgears Limited", "EQ"),
         Triple("SAATVIKGL", "Saatvik Green Energy Limited", "EQ")
     )
-
-    val allEquities = equityListPart1 + equityListPart2 + equityListPart3
 }
 
 object BseEquityStockMaster {

@@ -5,10 +5,28 @@ import android.database.sqlite.SQLiteDatabase
 
 object DatabaseMigrations {
 
+    private const val TABLE_INSTRUMENTS =
+        SBDatabaseHelper.TABLE_INSTRUMENTS
+    private const val TABLE_QUOTES =
+        SBDatabaseHelper.TABLE_QUOTES
+    private const val TABLE_CANDLES =
+        SBDatabaseHelper.TABLE_CANDLES
+    private const val TABLE_RAW_TICKS =
+        SBDatabaseHelper.TABLE_RAW_TICKS
+    private const val TABLE_TICK_AUDIT =
+        SBDatabaseHelper.TABLE_TICK_AUDIT
+    private const val TABLE_QUOTE_RETRY =
+        SBDatabaseHelper.TABLE_QUOTE_PERSISTENCE_RETRY
+
     fun createAll(db: SQLiteDatabase) {
+
+        // ---------------------------------------------------------
+        // 1. INSTRUMENTS
+        // ---------------------------------------------------------
+
         db.execSQL(
             """
-            CREATE TABLE IF NOT EXISTS instruments (
+            CREATE TABLE IF NOT EXISTS `$TABLE_INSTRUMENTS` (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol TEXT NOT NULL,
                 name TEXT NOT NULL,
@@ -26,17 +44,18 @@ object DatabaseMigrations {
             """.trimIndent()
         )
 
-        // Existing database में भी expiry column सुनिश्चित करें।
-        addColumnIfMissing(
-            db,
-            "instruments",
-            "expiry_millis",
-            "INTEGER"
+        ensureColumn(
+            db, TABLE_INSTRUMENTS,
+            "expiry_millis", "INTEGER"
         )
+
+        // ---------------------------------------------------------
+        // 2. QUOTES
+        // ---------------------------------------------------------
 
         db.execSQL(
             """
-            CREATE TABLE IF NOT EXISTS quotes (
+            CREATE TABLE IF NOT EXISTS `$TABLE_QUOTES` (
                 symbol TEXT NOT NULL,
                 exchange TEXT NOT NULL,
                 ltp REAL NOT NULL,
@@ -56,9 +75,28 @@ object DatabaseMigrations {
             """.trimIndent()
         )
 
+        // पुराने Quotes database को भी compatible रखें।
+        ensureColumn(db, TABLE_QUOTES, "exchange_timestamp", "INTEGER")
+        ensureColumn(
+            db, TABLE_QUOTES,
+            "received_at", "INTEGER NOT NULL DEFAULT 0"
+        )
+
         db.execSQL(
             """
-            CREATE TABLE IF NOT EXISTS candles (
+            UPDATE `$TABLE_QUOTES`
+            SET received_at = timestamp
+            WHERE received_at = 0 AND timestamp > 0
+            """.trimIndent()
+        )
+
+        // ---------------------------------------------------------
+        // 3. CANDLES
+        // ---------------------------------------------------------
+
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS `$TABLE_CANDLES` (
                 symbol TEXT NOT NULL,
                 exchange TEXT NOT NULL,
                 timeframe TEXT NOT NULL,
@@ -68,20 +106,51 @@ object DatabaseMigrations {
                 low REAL NOT NULL,
                 close REAL NOT NULL,
                 volume INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY(symbol, exchange, timeframe, timestamp)
+                PRIMARY KEY(
+                    symbol,
+                    exchange,
+                    timeframe,
+                    timestamp
+                )
             )
             """.trimIndent()
         )
 
-        // Durable raw market tick history.
+        // Candle completeness metadata.
+        ensureColumn(
+            db, TABLE_CANDLES,
+            "status", "TEXT NOT NULL DEFAULT 'FINAL'"
+        )
+        ensureColumn(
+            db, TABLE_CANDLES,
+            "source_tick_count", "INTEGER NOT NULL DEFAULT 0"
+        )
+        ensureColumn(
+            db, TABLE_CANDLES,
+            "first_tick_timestamp", "INTEGER"
+        )
+        ensureColumn(
+            db, TABLE_CANDLES,
+            "last_tick_timestamp", "INTEGER"
+        )
+        ensureColumn(
+            db, TABLE_CANDLES,
+            "finalized_at", "INTEGER"
+        )
+
+        // ---------------------------------------------------------
+        // 4. RAW TICKS
+        // ---------------------------------------------------------
+
         db.execSQL(
             """
-            CREATE TABLE IF NOT EXISTS raw_ticks (
+            CREATE TABLE IF NOT EXISTS `$TABLE_RAW_TICKS` (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 exchange TEXT NOT NULL,
                 symbol TEXT NOT NULL,
                 ltp REAL NOT NULL CHECK (ltp > 0),
-                volume INTEGER NOT NULL DEFAULT 0 CHECK (volume >= 0),
+                volume INTEGER NOT NULL DEFAULT 0
+                    CHECK (volume >= 0),
                 last_trade_qty INTEGER NOT NULL DEFAULT 0
                     CHECK (last_trade_qty >= 0),
                 last_trade_time INTEGER,
@@ -91,10 +160,13 @@ object DatabaseMigrations {
             """.trimIndent()
         )
 
-        // Durable per-instrument tick processing counters.
+        // ---------------------------------------------------------
+        // 5. TICK AUDIT
+        // ---------------------------------------------------------
+
         db.execSQL(
             """
-            CREATE TABLE IF NOT EXISTS tick_audit (
+            CREATE TABLE IF NOT EXISTS `$TABLE_TICK_AUDIT` (
                 exchange TEXT NOT NULL,
                 symbol TEXT NOT NULL,
                 received INTEGER NOT NULL DEFAULT 0,
@@ -104,16 +176,19 @@ object DatabaseMigrations {
                 raw_saved INTEGER NOT NULL DEFAULT 0,
                 quote_saved INTEGER NOT NULL DEFAULT 0,
                 save_failed INTEGER NOT NULL DEFAULT 0,
-                updated_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(exchange, symbol)
             )
             """.trimIndent()
         )
 
-        // Durable retry queue: one latest pending quote per instrument.
+        // ---------------------------------------------------------
+        // 6. QUOTE PERSISTENCE RETRY
+        // ---------------------------------------------------------
+
         db.execSQL(
             """
-            CREATE TABLE IF NOT EXISTS quote_persistence_retry (
+            CREATE TABLE IF NOT EXISTS `$TABLE_QUOTE_RETRY` (
                 symbol TEXT NOT NULL,
                 exchange TEXT NOT NULL,
                 ltp REAL NOT NULL,
@@ -136,26 +211,9 @@ object DatabaseMigrations {
             """.trimIndent()
         )
 
-        // Candle completeness metadata.
-        addColumnIfMissing(db, "candles", "status",
-            "TEXT NOT NULL DEFAULT 'FINAL'")
-        addColumnIfMissing(db, "candles", "source_tick_count",
-            "INTEGER NOT NULL DEFAULT 0")
-        addColumnIfMissing(db, "candles", "first_tick_timestamp",
-            "INTEGER")
-        addColumnIfMissing(db, "candles", "last_tick_timestamp",
-            "INTEGER")
-        addColumnIfMissing(db, "candles", "finalized_at",
-            "INTEGER")
-
-        db.execSQL(
-            "CREATE INDEX IF NOT EXISTS idx_raw_ticks_instrument_time " +
-                "ON raw_ticks(exchange, symbol, received_at)"
-        )
-        db.execSQL(
-            "CREATE INDEX IF NOT EXISTS idx_quote_retry_queued " +
-                "ON quote_persistence_retry(queued_at)"
-        )
+        // ---------------------------------------------------------
+        // 7. SIGNALS
+        // ---------------------------------------------------------
 
         db.execSQL(
             """
@@ -183,6 +241,10 @@ object DatabaseMigrations {
             """.trimIndent()
         )
 
+        // ---------------------------------------------------------
+        // 8. PAPER ACCOUNT
+        // ---------------------------------------------------------
+
         db.execSQL(
             """
             CREATE TABLE IF NOT EXISTS paper_account (
@@ -195,6 +257,10 @@ object DatabaseMigrations {
             )
             """.trimIndent()
         )
+
+        // ---------------------------------------------------------
+        // 9. PAPER ORDERS
+        // ---------------------------------------------------------
 
         db.execSQL(
             """
@@ -216,6 +282,10 @@ object DatabaseMigrations {
             """.trimIndent()
         )
 
+        // ---------------------------------------------------------
+        // 10. POSITIONS
+        // ---------------------------------------------------------
+
         db.execSQL(
             """
             CREATE TABLE IF NOT EXISTS positions (
@@ -236,6 +306,10 @@ object DatabaseMigrations {
             """.trimIndent()
         )
 
+        // ---------------------------------------------------------
+        // 11. DEVICE IDENTITY
+        // ---------------------------------------------------------
+
         db.execSQL(
             """
             CREATE TABLE IF NOT EXISTS device_identity (
@@ -245,6 +319,10 @@ object DatabaseMigrations {
             )
             """.trimIndent()
         )
+
+        // ---------------------------------------------------------
+        // 12. APP STATE
+        // ---------------------------------------------------------
 
         db.execSQL(
             """
@@ -256,118 +334,260 @@ object DatabaseMigrations {
             """.trimIndent()
         )
 
-        db.execSQL(
-            "CREATE INDEX IF NOT EXISTS idx_instruments_symbol " +
-                "ON instruments(symbol)"
-        )
-        db.execSQL(
-            "CREATE INDEX IF NOT EXISTS idx_instruments_name " +
-                "ON instruments(name)"
-        )
-        db.execSQL(
-            "CREATE INDEX IF NOT EXISTS idx_instruments_segment " +
-                "ON instruments(segment)"
-        )
-        db.execSQL(
-            "CREATE INDEX IF NOT EXISTS idx_instruments_expiry " +
-                "ON instruments(exchange, segment, expiry_millis)"
-        )
-        db.execSQL(
-            "CREATE INDEX IF NOT EXISTS idx_candles_lookup " +
-                "ON candles(symbol, timeframe, timestamp)"
-        )
-        db.execSQL(
-            "CREATE INDEX IF NOT EXISTS idx_signals_status " +
-                "ON signals(status, created_at)"
-        )
-        db.execSQL(
-            "CREATE INDEX IF NOT EXISTS idx_signals_symbol " +
-                "ON signals(symbol, created_at)"
-        )
-        db.execSQL(
-            "CREATE INDEX IF NOT EXISTS idx_orders_status " +
-                "ON paper_orders(status, created_at)"
-        )
-        db.execSQL(
-            "CREATE INDEX IF NOT EXISTS idx_positions_status " +
-                "ON positions(status)"
+        // ---------------------------------------------------------
+        // 13. INDEXES
+        // ---------------------------------------------------------
+
+        createIndex(
+            db,
+            "idx_instruments_symbol",
+            TABLE_INSTRUMENTS,
+            "symbol"
         )
 
-        createV5Schema(db)
+        createIndex(
+            db,
+            "idx_instruments_name",
+            TABLE_INSTRUMENTS,
+            "name"
+        )
+
+        createIndex(
+            db,
+            "idx_instruments_segment",
+            TABLE_INSTRUMENTS,
+            "segment"
+        )
+
+        createIndex(
+            db,
+            "idx_instruments_expiry",
+            TABLE_INSTRUMENTS,
+            "exchange, segment, expiry_millis"
+        )
+
+        createIndex(
+            db,
+            "idx_instruments_exchange_token",
+            TABLE_INSTRUMENTS,
+            "exchange, token"
+        )
+
+        createIndex(
+            db,
+            "idx_instruments_exchange_segment_symbol",
+            TABLE_INSTRUMENTS,
+            "exchange, segment, symbol"
+        )
+
+        createIndex(
+            db,
+            "idx_candles_lookup",
+            TABLE_CANDLES,
+            "symbol, timeframe, timestamp"
+        )
+
+        createIndex(
+            db,
+            "idx_raw_ticks_instrument_time",
+            TABLE_RAW_TICKS,
+            "exchange, symbol, received_at"
+        )
+
+        createIndex(
+            db,
+            "idx_raw_ticks_received",
+            TABLE_RAW_TICKS,
+            "received_at"
+        )
+
+        createIndex(
+            db,
+            "idx_quote_retry_queued",
+            TABLE_QUOTE_RETRY,
+            "queued_at"
+        )
+
+        createIndex(
+            db,
+            "idx_signals_status",
+            "signals",
+            "status, created_at"
+        )
+
+        createIndex(
+            db,
+            "idx_signals_symbol",
+            "signals",
+            "symbol, created_at"
+        )
+
+        createIndex(
+            db,
+            "idx_orders_status",
+            "paper_orders",
+            "status, created_at"
+        )
+
+        createIndex(
+            db,
+            "idx_positions_status",
+            "positions",
+            "status"
+        )
+
+        // ---------------------------------------------------------
+        // 14. CANDLE VALIDATION TRIGGERS
+        // ---------------------------------------------------------
+
+        createCandleValidationTriggers(db)
     }
 
+    // -------------------------------------------------------------
+    // DATABASE UPGRADE
+    // -------------------------------------------------------------
+
     fun upgrade(db: SQLiteDatabase, oldVersion: Int) {
-        // Preserve existing schema and records.
+
+        // Idempotent schema creation and missing-column repair.
+        // Existing rows are preserved.
         createAll(db)
 
         if (oldVersion < 3) {
-            addColumnIfMissing(db, "quotes", "exchange_timestamp", "INTEGER")
-            addColumnIfMissing(
-                db, "quotes", "received_at", "INTEGER NOT NULL DEFAULT 0"
-            )
             db.execSQL(
                 """
-                UPDATE quotes
+                UPDATE `$TABLE_QUOTES`
                 SET received_at = timestamp
-                WHERE received_at = 0
+                WHERE received_at = 0 AND timestamp > 0
                 """.trimIndent()
             )
         }
+    }
 
-        if (oldVersion < 4) {
-            addColumnIfMissing(db, "instruments", "expiry_millis", "INTEGER")
+    // -------------------------------------------------------------
+    // SAFE COLUMN MIGRATION
+    // -------------------------------------------------------------
+
+    private fun ensureColumn(
+        db: SQLiteDatabase,
+        table: String,
+        column: String,
+        definition: String
+    ) {
+        requireValidIdentifier(table)
+        requireValidIdentifier(column)
+
+        if (columnExists(db, table, column)) return
+
+        db.execSQL(
+            "ALTER TABLE `$table` ADD COLUMN `$column` $definition"
+        )
+    }
+
+    private fun columnExists(
+        db: SQLiteDatabase,
+        table: String,
+        column: String
+    ): Boolean {
+        requireValidIdentifier(table)
+
+        db.rawQuery(
+            "PRAGMA table_info(`$table`)",
+            null
+        ).use { cursor ->
+
+            val nameIndex = cursor.getColumnIndex("name")
+            if (nameIndex < 0) return false
+
+            while (cursor.moveToNext()) {
+                if (
+                    cursor.getString(nameIndex)
+                        .equals(column, ignoreCase = true)
+                ) {
+                    return true
+                }
+            }
         }
 
-        if (oldVersion < 5) {
-            createV5Schema(db)
+        return false
+    }
+
+    private fun requireValidIdentifier(value: String) {
+        require(
+            value.matches(Regex("[A-Za-z_][A-Za-z0-9_]*"))
+        ) {
+            "Invalid SQLite identifier: $value"
         }
     }
 
-    private fun createV5Schema(db: SQLiteDatabase) {
+    // -------------------------------------------------------------
+    // SAFE INDEX CREATION
+    // -------------------------------------------------------------
 
-        // Instrument identity lookup. Non-unique to avoid breaking
-        // existing databases that may contain duplicate tokens.
+    private fun createIndex(
+        db: SQLiteDatabase,
+        indexName: String,
+        table: String,
+        columns: String
+    ) {
+        requireValidIdentifier(indexName)
+        requireValidIdentifier(table)
+
+        val safeColumns = columns.split(",").map { raw ->
+            val column = raw.trim()
+            requireValidIdentifier(column)
+            "`$column`"
+        }.joinToString(", ")
+
         db.execSQL(
             """
-            CREATE INDEX IF NOT EXISTS idx_instruments_exchange_token
-            ON instruments(exchange, token)
+            CREATE INDEX IF NOT EXISTS `$indexName`
+            ON `$table` ($safeColumns)
             """.trimIndent()
         )
+    }
 
-        db.execSQL(
-            """
-            CREATE INDEX IF NOT EXISTS idx_instruments_exchange_segment_symbol
-            ON instruments(exchange, segment, symbol)
-            """.trimIndent()
-        )
+    // -------------------------------------------------------------
+    // CANDLE VALIDATION
+    // -------------------------------------------------------------
 
-        // Database-level OHLC validation.
-        // SQLite stores non-finite REAL values as NULL; NOT NULL and
-        // these checks prevent invalid persisted candles.
-        db.execSQL("DROP TRIGGER IF EXISTS trg_candles_validate_insert")
-        db.execSQL("DROP TRIGGER IF EXISTS trg_candles_validate_update")
-
+    private fun createCandleValidationTriggers(
+        db: SQLiteDatabase
+    ) {
         val validation = """
             SELECT CASE
-                WHEN NEW.timestamp <= 0
-                  OR NEW.open IS NULL OR NEW.high IS NULL
-                  OR NEW.low IS NULL OR NEW.close IS NULL
-                  OR NEW.open <= 0 OR NEW.high <= 0
-                  OR NEW.low <= 0 OR NEW.close <= 0
+                WHEN NEW.timestamp IS NULL
+                  OR NEW.timestamp <= 0
+
+                  OR NEW.open IS NULL
+                  OR NEW.high IS NULL
+                  OR NEW.low IS NULL
+                  OR NEW.close IS NULL
+
+                  OR NEW.open <= 0
+                  OR NEW.high <= 0
+                  OR NEW.low <= 0
+                  OR NEW.close <= 0
+
                   OR NEW.high < NEW.open
                   OR NEW.high < NEW.close
                   OR NEW.high < NEW.low
+
                   OR NEW.low > NEW.open
                   OR NEW.low > NEW.close
+
+                  OR NEW.volume IS NULL
                   OR NEW.volume < 0
+
                 THEN RAISE(ABORT, 'Invalid OHLC candle')
             END;
         """.trimIndent()
 
         db.execSQL(
             """
-            CREATE TRIGGER trg_candles_validate_insert
-            BEFORE INSERT ON candles
+            CREATE TRIGGER IF NOT EXISTS
+                trg_candles_validate_insert
+            BEFORE INSERT ON `$TABLE_CANDLES`
             BEGIN
                 $validation
             END
@@ -376,53 +596,13 @@ object DatabaseMigrations {
 
         db.execSQL(
             """
-            CREATE TRIGGER trg_candles_validate_update
-            BEFORE UPDATE ON candles
+            CREATE TRIGGER IF NOT EXISTS
+                trg_candles_validate_update
+            BEFORE UPDATE ON `$TABLE_CANDLES`
             BEGIN
                 $validation
             END
             """.trimIndent()
         )
-
-        // Retention support: 7 days by default at the caller level.
-        db.execSQL(
-            """
-            CREATE INDEX IF NOT EXISTS idx_raw_ticks_received
-            ON raw_ticks(received_at)
-            """.trimIndent()
-        )
-    }
-
-    private fun addColumnIfMissing(
-        db: SQLiteDatabase,
-        table: String,
-        column: String,
-        definition: String
-    ) {
-        var exists = false
-
-        db.rawQuery(
-            "PRAGMA table_info($table)",
-            null
-        ).use { cursor ->
-
-            val nameIndex = cursor.getColumnIndex("name")
-
-            while (cursor.moveToNext()) {
-                if (
-                    cursor.getString(nameIndex)
-                        .equals(column, true)
-                ) {
-                    exists = true
-                    break
-                }
-            }
-        }
-
-        if (!exists) {
-            db.execSQL(
-                "ALTER TABLE $table ADD COLUMN $column $definition"
-            )
-        }
     }
 }

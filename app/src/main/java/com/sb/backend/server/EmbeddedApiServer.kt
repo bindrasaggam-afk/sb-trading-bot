@@ -1,7 +1,10 @@
+
 package com.sb.backend.server
 
 import com.sb.backend.core.BackendManager
+import com.sb.backend.database.SBDatabaseHelper
 import com.sb.backend.services.KotakSessionCoordinator
+import android.database.sqlite.SQLiteDatabase
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.net.ServerSocket
@@ -128,14 +131,14 @@ class EmbeddedApiServer(
 
                 val headers = (
                     "HTTP/1.1 $status\r\n" +
-                    "Content-Type: application/json; charset=utf-8\r\n" +
-                    "Content-Length: ${body.size}\r\n" +
-                    "Connection: close\r\n" +
-                    "Access-Control-Allow-Origin: *\r\n" +
-                    "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n" +
-                    "Access-Control-Allow-Headers: Content-Type, Authorization\r\n" +
-                    "\r\n"
-                )
+                        "Content-Type: application/json; charset=utf-8\r\n" +
+                        "Content-Length: ${body.size}\r\n" +
+                        "Connection: close\r\n" +
+                        "Access-Control-Allow-Origin: *\r\n" +
+                        "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n" +
+                        "Access-Control-Allow-Headers: Content-Type, Authorization\r\n" +
+                        "\r\n"
+                    )
 
                 output.write(headers.toByteArray(Charsets.UTF_8))
                 output.write(body)
@@ -143,6 +146,108 @@ class EmbeddedApiServer(
             }
         } catch (e: Exception) {
             e.printStackTrace()
+        }
+    }
+
+    /**
+     * Returns actual user tables from the currently opened database.
+     * SQLite internal tables are excluded.
+     */
+    private fun getDatabaseTableNames(
+        db: SQLiteDatabase
+    ): List<String> {
+        val names = mutableListOf<String>()
+
+        db.rawQuery(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name NOT LIKE 'sqlite_%'
+            ORDER BY name
+            """.trimIndent(),
+            null
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                names.add(cursor.getString(0))
+            }
+        }
+
+        return names
+    }
+
+    private fun hasTable(
+        db: SQLiteDatabase,
+        table: String
+    ): Boolean {
+        return db.rawQuery(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table' AND name = ?
+            LIMIT 1
+            """.trimIndent(),
+            arrayOf(table)
+        ).use { cursor ->
+            cursor.moveToFirst()
+        }
+    }
+
+    private fun getColumnNames(
+        db: SQLiteDatabase,
+        table: String
+    ): Set<String> {
+        if (!hasTable(db, table)) return emptySet()
+
+        val columns = mutableSetOf<String>()
+
+        db.rawQuery(
+            "PRAGMA table_info(${quoteIdentifier(table)})",
+            null
+        ).use { cursor ->
+            val nameIndex = cursor.getColumnIndex("name")
+
+            if (nameIndex >= 0) {
+                while (cursor.moveToNext()) {
+                    columns.add(cursor.getString(nameIndex))
+                }
+            }
+        }
+
+        return columns
+    }
+
+    private fun quoteIdentifier(value: String): String {
+        require(value.matches(Regex("[A-Za-z0-9_]+"))) {
+            "Invalid SQLite identifier"
+        }
+
+        return "`$value`"
+    }
+
+    private fun countRows(
+        db: SQLiteDatabase,
+        table: String
+    ): Long {
+        if (!hasTable(db, table)) return 0L
+
+        return db.rawQuery(
+            "SELECT COUNT(*) FROM ${quoteIdentifier(table)}",
+            null
+        ).use { cursor ->
+            if (cursor.moveToFirst()) cursor.getLong(0) else 0L
+        }
+    }
+
+    private fun columnExpression(
+        columns: Set<String>,
+        column: String,
+        fallback: String = "NULL"
+    ): String {
+        return if (column in columns) {
+            quoteIdentifier(column)
+        } else {
+            fallback
         }
     }
 
@@ -157,184 +262,229 @@ class EmbeddedApiServer(
         return try {
             val db = BackendManager.database().readableDatabase
 
-            val tableNames = listOf(
-                "instruments",
-                "quotes",
-                "candles",
-                "signals",
-                "paper_account",
-                "paper_orders",
-                "positions",
-                "device_identity",
-                "app_state"
-            )
-
-            // Actual row count of every main backend table.
+            val tableNames = getDatabaseTableNames(db)
             val tables = JSONArray()
 
             tableNames.forEach { table ->
-                val count = db.rawQuery(
-                    "SELECT COUNT(*) FROM `$table`",
-                    null
-                ).use { cursor ->
-                    if (cursor.moveToFirst()) cursor.getLong(0) else 0L
+                val columns = getColumnNames(db, table)
+                val columnArray = JSONArray()
+
+                columns.sorted().forEach { column ->
+                    columnArray.put(column)
                 }
 
                 tables.put(
                     JSONObject()
                         .put("table", table)
-                        .put("rows", count)
+                        .put("rows", countRows(db, table))
+                        .put("columns", columnArray)
                 )
             }
 
-            // Total quote rows.
-            val quoteCount = db.rawQuery(
-                "SELECT COUNT(*) FROM quotes",
-                null
-            ).use { cursor ->
-                if (cursor.moveToFirst()) cursor.getLong(0) else 0L
-            }
+            val quoteColumns = getColumnNames(db, "quotes")
+            val candleColumns = getColumnNames(db, "candles")
 
-            // Total candle rows.
-            val candleCount = db.rawQuery(
-                "SELECT COUNT(*) FROM candles",
-                null
-            ).use { cursor ->
-                if (cursor.moveToFirst()) cursor.getLong(0) else 0L
-            }
+            val quoteCount = countRows(db, "quotes")
+            val candleCount = countRows(db, "candles")
 
             // Candle counts grouped by timeframe.
             val timeframeCounts = JSONArray()
 
-            db.rawQuery(
-                """
-                SELECT timeframe, COUNT(*)
-                FROM candles
-                GROUP BY timeframe
-                ORDER BY timeframe
-                """.trimIndent(),
-                null
-            ).use { cursor ->
-                while (cursor.moveToNext()) {
-                    timeframeCounts.put(
-                        JSONObject()
-                            .put("timeframe", cursor.getString(0))
-                            .put("rows", cursor.getLong(1))
-                    )
+            if (
+                "timeframe" in candleColumns &&
+                hasTable(db, "candles")
+            ) {
+                db.rawQuery(
+                    """
+                    SELECT timeframe, COUNT(*)
+                    FROM candles
+                    GROUP BY timeframe
+                    ORDER BY timeframe
+                    """.trimIndent(),
+                    null
+                ).use { cursor ->
+                    while (cursor.moveToNext()) {
+                        timeframeCounts.put(
+                            JSONObject()
+                                .put("timeframe", cursor.getString(0))
+                                .put("rows", cursor.getLong(1))
+                        )
+                    }
                 }
             }
 
             // Candle counts grouped by exchange, symbol and timeframe.
             val instrumentCounts = JSONArray()
 
-            db.rawQuery(
-                """
-                SELECT exchange, symbol, timeframe, COUNT(*)
-                FROM candles
-                GROUP BY exchange, symbol, timeframe
-                ORDER BY COUNT(*) DESC
-                LIMIT 100
-                """.trimIndent(),
-                null
-            ).use { cursor ->
-                while (cursor.moveToNext()) {
-                    instrumentCounts.put(
-                        JSONObject()
-                            .put("exchange", cursor.getString(0))
-                            .put("symbol", cursor.getString(1))
-                            .put("timeframe", cursor.getString(2))
-                            .put("rows", cursor.getLong(3))
-                    )
+            if (
+                hasTable(db, "candles") &&
+                setOf("exchange", "symbol", "timeframe")
+                    .all { it in candleColumns }
+            ) {
+                db.rawQuery(
+                    """
+                    SELECT exchange, symbol, timeframe, COUNT(*)
+                    FROM candles
+                    GROUP BY exchange, symbol, timeframe
+                    ORDER BY COUNT(*) DESC
+                    LIMIT 100
+                    """.trimIndent(),
+                    null
+                ).use { cursor ->
+                    while (cursor.moveToNext()) {
+                        instrumentCounts.put(
+                            JSONObject()
+                                .put("exchange", cursor.getString(0))
+                                .put("symbol", cursor.getString(1))
+                                .put("timeframe", cursor.getString(2))
+                                .put("rows", cursor.getLong(3))
+                        )
+                    }
                 }
             }
 
             // Invalid OHLC rows.
-            val invalidOhlcCount = db.rawQuery(
-                """
-                SELECT COUNT(*)
-                FROM candles
-                WHERE high < low
-                   OR high < open
-                   OR high < close
-                   OR low > open
-                   OR low > close
-                """.trimIndent(),
-                null
-            ).use { cursor ->
-                if (cursor.moveToFirst()) cursor.getLong(0) else 0L
+            val invalidOhlcCount = if (
+                hasTable(db, "candles") &&
+                setOf("open", "high", "low", "close")
+                    .all { it in candleColumns }
+            ) {
+                db.rawQuery(
+                    """
+                    SELECT COUNT(*)
+                    FROM candles
+                    WHERE high <= 0
+                       OR low <= 0
+                       OR open <= 0
+                       OR close <= 0
+                       OR high < low
+                       OR high < open
+                       OR high < close
+                       OR low > open
+                       OR low > close
+                    """.trimIndent(),
+                    null
+                ).use { cursor ->
+                    if (cursor.moveToFirst()) cursor.getLong(0) else 0L
+                }
+            } else {
+                0L
             }
 
-            // Latest quote.
+            // Latest quote. Optional columns are schema-aware.
             val latestQuote = JSONObject()
 
-            db.rawQuery(
-                """
-                SELECT symbol, exchange, ltp, volume, timestamp,
-                       is_live, exchange_timestamp, received_at
-                FROM quotes
-                ORDER BY timestamp DESC
-                LIMIT 1
-                """.trimIndent(),
-                null
-            ).use { cursor ->
-                if (cursor.moveToFirst()) {
-                    latestQuote
-                        .put("symbol", cursor.getString(0))
-                        .put("exchange", cursor.getString(1))
-                        .put("ltp", cursor.getDouble(2))
-                        .put("volume", cursor.getLong(3))
-                        .put("timestamp", cursor.getLong(4))
-                        .put("is_live", cursor.getInt(5) == 1)
-                        .put(
-                            "exchange_timestamp",
-                            if (cursor.isNull(6)) JSONObject.NULL
-                            else cursor.getLong(6)
-                        )
-                        .put("received_at", cursor.getLong(7))
+            if (
+                hasTable(db, "quotes") &&
+                setOf("symbol", "exchange", "ltp", "timestamp")
+                    .all { it in quoteColumns }
+            ) {
+                val query = """
+                    SELECT
+                        ${columnExpression(quoteColumns, "symbol")},
+                        ${columnExpression(quoteColumns, "exchange")},
+                        ${columnExpression(quoteColumns, "ltp")},
+                        ${columnExpression(quoteColumns, "volume", "0")},
+                        ${columnExpression(quoteColumns, "timestamp")},
+                        ${columnExpression(quoteColumns, "is_live", "0")},
+                        ${columnExpression(quoteColumns, "exchange_timestamp")},
+                        ${columnExpression(quoteColumns, "received_at", "0")}
+                    FROM quotes
+                    ORDER BY timestamp DESC
+                    LIMIT 1
+                """.trimIndent()
+
+                db.rawQuery(query, null).use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        latestQuote
+                            .put(
+                                "symbol",
+                                if (cursor.isNull(0)) JSONObject.NULL
+                                else cursor.getString(0)
+                            )
+                            .put(
+                                "exchange",
+                                if (cursor.isNull(1)) JSONObject.NULL
+                                else cursor.getString(1)
+                            )
+                            .put("ltp", cursor.getDouble(2))
+                            .put("volume", cursor.getLong(3))
+                            .put("timestamp", cursor.getLong(4))
+                            .put("is_live", cursor.getInt(5) == 1)
+                            .put(
+                                "exchange_timestamp",
+                                if (cursor.isNull(6)) JSONObject.NULL
+                                else cursor.getLong(6)
+                            )
+                            .put("received_at", cursor.getLong(7))
+                    }
                 }
             }
 
             // Latest stored candle.
             val latestCandle = JSONObject()
 
-            db.rawQuery(
-                """
-                SELECT symbol, exchange, timeframe, timestamp,
-                       open, high, low, close, volume
-                FROM candles
-                ORDER BY timestamp DESC
-                LIMIT 1
-                """.trimIndent(),
-                null
-            ).use { cursor ->
-                if (cursor.moveToFirst()) {
-                    latestCandle
-                        .put("symbol", cursor.getString(0))
-                        .put("exchange", cursor.getString(1))
-                        .put("timeframe", cursor.getString(2))
-                        .put("timestamp", cursor.getLong(3))
-                        .put("open", cursor.getDouble(4))
-                        .put("high", cursor.getDouble(5))
-                        .put("low", cursor.getDouble(6))
-                        .put("close", cursor.getDouble(7))
-                        .put("volume", cursor.getLong(8))
+            if (
+                hasTable(db, "candles") &&
+                setOf(
+                    "symbol",
+                    "exchange",
+                    "timeframe",
+                    "timestamp",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume"
+                ).all { it in candleColumns }
+            ) {
+                db.rawQuery(
+                    """
+                    SELECT symbol, exchange, timeframe, timestamp,
+                           open, high, low, close, volume
+                    FROM candles
+                    ORDER BY timestamp DESC
+                    LIMIT 1
+                    """.trimIndent(),
+                    null
+                ).use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        latestCandle
+                            .put("symbol", cursor.getString(0))
+                            .put("exchange", cursor.getString(1))
+                            .put("timeframe", cursor.getString(2))
+                            .put("timestamp", cursor.getLong(3))
+                            .put("open", cursor.getDouble(4))
+                            .put("high", cursor.getDouble(5))
+                            .put("low", cursor.getDouble(6))
+                            .put("close", cursor.getDouble(7))
+                            .put("volume", cursor.getLong(8))
+                    }
                 }
             }
 
+            // Raw tick and retry queue summaries.
+            val rawTickCount = countRows(db, SBDatabaseHelper.TABLE_RAW_TICKS)
+            val tickAuditCount = countRows(db, SBDatabaseHelper.TABLE_TICK_AUDIT)
+            val quoteRetryCount =
+                countRows(db, SBDatabaseHelper.TABLE_QUOTE_PERSISTENCE_RETRY)
+
+            val summary = JSONObject()
+                .put("quote_rows", quoteCount)
+                .put("candle_rows", candleCount)
+                .put("raw_tick_rows", rawTickCount)
+                .put("tick_audit_rows", tickAuditCount)
+                .put("quote_retry_rows", quoteRetryCount)
+                .put("invalid_ohlc_rows", invalidOhlcCount)
+
             JSONObject()
                 .put("status", "ok")
-                .put("database", "sb_backend.db")
-                .put("database_version", 4)
+                .put("database", SBDatabaseHelper.DATABASE_NAME)
+                .put("database_version", db.version)
                 .put("read_only", true)
                 .put("table_count", tableNames.size)
                 .put("tables", tables)
-                .put(
-                    "summary",
-                    JSONObject()
-                        .put("quote_rows", quoteCount)
-                        .put("candle_rows", candleCount)
-                        .put("invalid_ohlc_rows", invalidOhlcCount)
-                )
+                .put("summary", summary)
                 .put("candle_timeframes", timeframeCounts)
                 .put("candle_instruments", instrumentCounts)
                 .put("latest_quote", latestQuote)
@@ -343,7 +493,10 @@ class EmbeddedApiServer(
         } catch (error: Exception) {
             JSONObject()
                 .put("status", "error")
-                .put("message", error.message ?: "Database diagnostics failed")
+                .put(
+                    "message",
+                    error.message ?: "Database diagnostics failed"
+                )
                 .toString()
         }
     }
