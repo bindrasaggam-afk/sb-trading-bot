@@ -326,13 +326,17 @@ class KotakNeoMarketDataService(
             "UTF-8"
         )
 
+        val timezone = TimeZone.getTimeZone("Asia/Kolkata")
         val lookback = if (range.lookbackDays >= THREE_YEARS_DAYS) {
-            365 * years.coerceIn(1, 5)
+            val end = Calendar.getInstance(timezone)
+            val start = (end.clone() as Calendar).apply {
+                add(Calendar.YEAR, -years.coerceIn(1, 5))
+            }
+            ((end.timeInMillis - start.timeInMillis) / 86_400_000L)
+                .toInt() + 1
         } else {
             range.lookbackDays
         }
-
-        val timezone = TimeZone.getTimeZone("Asia/Kolkata")
         val formatter = SimpleDateFormat("yyyy-MM-dd", Locale.US).apply {
             this.timeZone = timezone
         }
