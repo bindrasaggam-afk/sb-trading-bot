@@ -308,8 +308,10 @@ class KotakNeoMarketDataService(
         }
 
         val exchange = instrument.exchange.trim().uppercase(Locale.ROOT)
-        require(exchange == "NSE" || exchange == "BSE" || exchange == "MCX") {
-            "Historical candles are available for NSE/BSE/MCX only"
+        // Kotak Neo historical endpoint supports NSE/BSE, not MCX.
+        // MCX daily history must come from the MCX Bhav Copy source.
+        require(exchange == "NSE" || exchange == "BSE") {
+            "Kotak historical candles are supported for NSE/BSE only; MCX requires MCX Bhav Copy"
         }
 
         val token = instrument.token?.trim()
@@ -394,12 +396,24 @@ class KotakNeoMarketDataService(
             instrument.exchange
         )
 
-        marketRepository.saveCandles(
+        val saved = marketRepository.saveCandles(
             symbol = instrument.symbol,
             exchange = instrument.exchange,
             timeframe = timeframe.trim(),
             candles = candles
         )
+        require(saved > 0 || candles.isEmpty()) {
+            "Historical candles were fetched but none were saved for ${instrument.symbol}"
+        }
+
+        val persisted = marketRepository.countCandles(
+            symbol = instrument.symbol,
+            exchange = instrument.exchange,
+            timeframe = timeframe.trim()
+        )
+        require(persisted >= candles.size) {
+            "Historical candle read-back verification failed for ${instrument.symbol}: saved=$saved, persisted=$persisted, fetched=${candles.size}"
+        }
 
         return candles
     }
@@ -441,11 +455,15 @@ class KotakNeoMarketDataService(
                 !low.isFinite() || !close.isFinite()
             ) continue
 
-            if (open < 0.0 || high < 0.0 || low < 0.0 || close < 0.0) {
+            // Reject non-positive prices and malformed OHLCV rows.
+            if (open <= 0.0 || high <= 0.0 || low <= 0.0 || close <= 0.0) {
                 continue
             }
 
-            if (high < low) continue
+            if (high < maxOf(open, close, low) ||
+                low > minOf(open, close, high)
+            ) continue
+            if (!volume.isFinite() || volume < 0.0) continue
 
             val timestamp = try {
                 parseCandleTime(row.getString(0))
