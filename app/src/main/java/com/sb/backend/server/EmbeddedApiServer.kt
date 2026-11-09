@@ -812,7 +812,8 @@ class EmbeddedApiServer(
                 return JSONObject().put("status", "ok")
                     .put("source_uppercase_1M_rows", 0)
                     .put("recovered_into_1m_rows", 0)
-                    .put("deleted_remaining_1M_rows", 0)
+                    .put("deleted_verified_minute_rows", 0)
+                    .put("retained_uppercase_1M_rows", 0)
                     .toString()
             }
             if (!hasTable(db, "candles_1m_recovery_backup")) {
@@ -855,11 +856,7 @@ class EmbeddedApiServer(
                     val ratio = if (steps == 0) 0.0 else shortSteps.toDouble() / steps
                     if (groupRows >= 3 && validRows >= 3 && ratio >= 0.70) {
                         candidates.add(
-                            Candidate(
-                                exchange = groupExchange,
-                                symbol = groupSymbol,
-                                rows = validRows
-                            )
+                            Candidate(groupExchange, groupSymbol, validRows)
                         )
                     }
                 }
@@ -904,7 +901,7 @@ class EmbeddedApiServer(
 
             var recovered = 0L
             var verified = 0L
-            var deleted = 0
+            var deletedVerified = 0
             db.beginTransaction()
             try {
                 candidates.forEach { candidate ->
@@ -927,7 +924,7 @@ class EmbeddedApiServer(
                         """.trimIndent(),
                         arrayOf(candidate.exchange, candidate.symbol)
                     )
-                    recovered += db.rawQuery(
+                    val matched = db.rawQuery(
                         """
                         SELECT COUNT(*)
                         FROM candles source
@@ -944,32 +941,71 @@ class EmbeddedApiServer(
                                 AND target.exchange = source.exchange
                                 AND target.symbol = source.symbol
                                 AND target.timestamp = source.timestamp
+                                AND target.open = source.open
+                                AND target.high = source.high
+                                AND target.low = source.low
+                                AND target.close = source.close
+                                AND target.volume = source.volume
                           )
                         """.trimIndent(),
                         arrayOf(candidate.exchange, candidate.symbol)
                     ).use { if (it.moveToFirst()) it.getLong(0) else 0L }
-                }
-                val expected = candidates.sumOf { it.rows }
-                check(recovered == expected) {
-                    "Recovery verification failed: verified=$recovered expected=$expected"
-                }
-                verified = recovered
+                    check(matched == candidate.rows) {
+                        "Recovery verification failed for ${candidate.exchange}/${candidate.symbol}: matched=$matched expected=${candidate.rows}"
+                    }
+                    recovered += candidate.rows
+                    verified += matched
 
-                // User-requested cleanup: backup is complete and all minute
-                // candidates are verified in 1m before remaining 1M is cleared.
-                deleted = db.delete("candles", "timeframe = ?", arrayOf("1M"))
+                    // Delete only rows individually verified as identical 1m copies.
+                    // Monthly/review groups and invalid rows remain in uppercase 1M.
+                    deletedVerified += db.delete(
+                        "candles",
+                        """
+                        timeframe = '1M'
+                        AND exchange = ? AND symbol = ?
+                        AND timestamp > 0
+                        AND open > 0 AND high >= open
+                        AND high >= close AND high >= low
+                        AND low <= open AND low <= close
+                        AND close > 0 AND volume >= 0
+                        AND EXISTS (
+                            SELECT 1 FROM candles target
+                            WHERE target.timeframe = '1m'
+                              AND target.exchange = candles.exchange
+                              AND target.symbol = candles.symbol
+                              AND target.timestamp = candles.timestamp
+                              AND target.open = candles.open
+                              AND target.high = candles.high
+                              AND target.low = candles.low
+                              AND target.close = candles.close
+                              AND target.volume = candles.volume
+                        )
+                        """.trimIndent(),
+                        arrayOf(candidate.exchange, candidate.symbol)
+                    )
+                }
+                check(verified == recovered) {
+                    "Total recovery verification mismatch: verified=$verified recovered=$recovered"
+                }
                 db.setTransactionSuccessful()
             } finally {
                 db.endTransaction()
             }
+
+            val remaining = db.rawQuery(
+                "SELECT COUNT(*) FROM candles WHERE timeframe = '1M'",
+                null
+            ).use { if (it.moveToFirst()) it.getLong(0) else 0L }
             JSONObject()
                 .put("status", "ok")
-                .put("source_uppercase_1M_rows", sourceCount)
+                .put("source_uppercase_1M_rows_before", sourceCount)
                 .put("backup_rows", backupCount)
                 .put("minute_candidate_groups", candidates.size)
                 .put("recovered_into_1m_rows", recovered)
-                .put("verified_candidate_rows", verified)
-                .put("deleted_remaining_1M_rows", deleted)
+                .put("verified_identical_1m_rows", verified)
+                .put("deleted_verified_minute_rows", deletedVerified)
+                .put("retained_uppercase_1M_rows", remaining)
+                .put("monthly_and_unclassified_rows_preserved", true)
                 .put("backup_preserved", true)
                 .toString()
         } catch (error: Exception) {
@@ -979,7 +1015,6 @@ class EmbeddedApiServer(
                 .toString()
         }
     }
-
 
     /**
      * Read-only full-table candle quality report, optionally scoped by exchange
