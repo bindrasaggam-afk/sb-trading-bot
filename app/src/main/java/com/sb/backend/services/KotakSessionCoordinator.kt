@@ -326,6 +326,42 @@ object KotakSessionCoordinator {
     }
 
 
+    @Volatile
+    private var mcxBhavcopyService: McxBhavcopyHistoricalService? = null
+
+    @Volatile
+    private var mcxImportRunning = false
+
+    fun startMcxThreeMonthBackfill(): JSONObject {
+        synchronized(historicalImportLock) {
+            if (mcxImportRunning) {
+                return (mcxBhavcopyService?.snapshot()
+                    ?: JSONObject().put("status", "running"))
+                    .put("already_running", true)
+            }
+            val context = appContext
+                ?: return JSONObject().put("status", "blocked")
+                    .put("message", "Backend session is not initialized")
+            BackendManager.initialize(context)
+            val service = McxBhavcopyHistoricalService(BackendManager.market())
+            mcxBhavcopyService = service
+            mcxImportRunning = true
+            historicalExecutor.execute {
+                try {
+                    service.importThreeMonths()
+                } finally {
+                    mcxImportRunning = false
+                }
+            }
+            return service.snapshot().put("started", true)
+        }
+    }
+
+    fun mcxHistoricalBackfillSnapshot(): JSONObject =
+        mcxBhavcopyService?.snapshot()
+            ?: JSONObject().put("status", "not_started")
+                .put("source", "mtf.trading MCX bhavcopy archive")
+
     private val historicalImportLock = Any()
 
     @Volatile
