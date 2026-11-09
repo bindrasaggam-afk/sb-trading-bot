@@ -131,6 +131,9 @@ class EmbeddedApiServer(
                     method == "GET" && path == "/api/database/capital-month-audit" ->
                         databaseCapitalMonthAudit()
 
+                    method == "POST" && path == "/api/database/capital-month-backup" ->
+                        databaseCapitalMonthBackup()
+
                     method == "OPTIONS" ->
                         """{"status":"ok"}"""
 
@@ -145,6 +148,7 @@ class EmbeddedApiServer(
                     path == "/api/database/diagnostics" ||
                     path == "/api/database/candle-audit" ||
                     path == "/api/database/capital-month-audit" ||
+                    path == "/api/database/capital-month-backup" ||
                     method == "OPTIONS"
                 ) "200 OK" else "404 Not Found"
 
@@ -676,6 +680,82 @@ class EmbeddedApiServer(
         } catch (error: Exception) {
             JSONObject().put("status", "error")
                 .put("message", error.message ?: "Uppercase 1M audit failed")
+                .toString()
+        }
+    }
+
+
+    /**
+     * Creates a durable, idempotent backup of all uppercase 1M candle rows.
+     * The source table is never modified by this operation.
+     */
+    private fun databaseCapitalMonthBackup(): String {
+        if (!BackendManager.isInitialized()) {
+            return JSONObject().put("status", "not_ready").toString()
+        }
+        return try {
+            val db = BackendManager.database().writableDatabase
+            val required = setOf(
+                "symbol", "exchange", "timeframe", "timestamp",
+                "open", "high", "low", "close", "volume"
+            )
+            val columns = getColumnNames(db, SBDatabaseHelper.TABLE_CANDLES)
+            if (!required.all { it in columns }) {
+                return JSONObject().put("status", "error")
+                    .put("message", "Candles table schema is incomplete")
+                    .toString()
+            }
+            db.beginTransaction()
+            try {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS candles_1m_recovery_backup
+                    AS SELECT * FROM candles WHERE 0
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS
+                        idx_candles_1m_recovery_backup_key
+                    ON candles_1m_recovery_backup(
+                        symbol, exchange, timeframe, timestamp
+                    )
+                    """.trimIndent()
+                )
+                val before = db.rawQuery(
+                    "SELECT COUNT(*) FROM candles_1m_recovery_backup",
+                    null
+                ).use { if (it.moveToFirst()) it.getLong(0) else 0L }
+                db.execSQL(
+                    """
+                    INSERT OR IGNORE INTO candles_1m_recovery_backup
+                    SELECT * FROM candles WHERE timeframe = '1M'
+                    """.trimIndent()
+                )
+                val after = db.rawQuery(
+                    "SELECT COUNT(*) FROM candles_1m_recovery_backup",
+                    null
+                ).use { if (it.moveToFirst()) it.getLong(0) else 0L }
+                val source = db.rawQuery(
+                    "SELECT COUNT(*) FROM candles WHERE timeframe = '1M'",
+                    null
+                ).use { if (it.moveToFirst()) it.getLong(0) else 0L }
+                db.setTransactionSuccessful()
+                JSONObject()
+                    .put("status", "ok")
+                    .put("backup_table", "candles_1m_recovery_backup")
+                    .put("source_uppercase_1M_rows", source)
+                    .put("backup_rows", after)
+                    .put("newly_backed_up_rows", after - before)
+                    .put("source_rows_preserved", true)
+                    .put("source_deleted", false)
+                    .toString()
+            } finally {
+                db.endTransaction()
+            }
+        } catch (error: Exception) {
+            JSONObject().put("status", "error")
+                .put("message", error.message ?: "Uppercase 1M backup failed")
                 .toString()
         }
     }
