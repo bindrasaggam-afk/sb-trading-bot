@@ -137,6 +137,9 @@ class EmbeddedApiServer(
                             timeframe = queryParams["timeframe"] ?: ""
                         )
 
+                    method == "GET" && path == "/api/history/validation" ->
+                        databaseHistoryValidation()
+
                     method == "POST" && path == "/api/database/capital-month-backup" ->
                         databaseCapitalMonthBackup()
 
@@ -170,6 +173,7 @@ class EmbeddedApiServer(
                     path == "/api/database/candle-audit" ||
                     path == "/api/database/capital-month-audit" ||
                     path == "/api/database/integrity-audit" ||
+                    path == "/api/history/validation" ||
                     path == "/api/database/capital-month-backup" ||
                     path == "/api/database/capital-month-migrate" ||
                     path == "/api/history/equities/start" ||
@@ -1072,6 +1076,93 @@ class EmbeddedApiServer(
         } catch (error: Exception) {
             JSONObject().put("status", "error")
                 .put("message", error.message ?: "Database integrity audit failed")
+                .toString()
+        }
+    }
+
+
+    /**
+     * Read-only final data validation for the requested history ranges.
+     * Reports actual persisted rows; it does not assume that an importer ran.
+     */
+    private fun databaseHistoryValidation(): String {
+        if (!BackendManager.isInitialized()) {
+            return JSONObject().put("status", "not_ready").toString()
+        }
+        return try {
+            val db = BackendManager.database().readableDatabase
+            val groups = JSONArray()
+            db.rawQuery(
+                """
+                SELECT exchange, timeframe, COUNT(*) AS rows,
+                       COUNT(DISTINCT symbol) AS symbols,
+                       MIN(timestamp) AS first_timestamp,
+                       MAX(timestamp) AS last_timestamp,
+                       SUM(CASE WHEN timestamp <= 0 OR timestamp < 1000000000000
+                           OR open <= 0 OR close <= 0 OR high < open
+                           OR high < close OR high < low OR low > open
+                           OR low > close OR volume < 0 THEN 1 ELSE 0 END) AS invalid_rows
+                FROM candles
+                WHERE (exchange IN ('NSE', 'BSE') AND timeframe = '1D')
+                   OR (exchange = 'MCX' AND timeframe = '1D')
+                   OR timeframe = '1m'
+                   OR timeframe = '1M'
+                GROUP BY exchange, timeframe
+                ORDER BY exchange, timeframe
+                """.trimIndent(),
+                null
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    val exchange = cursor.getString(0) ?: ""
+                    val timeframe = cursor.getString(1) ?: ""
+                    val duplicateKeys = db.rawQuery(
+                        """
+                        SELECT COUNT(*) FROM (
+                            SELECT symbol, timestamp
+                            FROM candles
+                            WHERE exchange = ? AND timeframe = ?
+                            GROUP BY symbol, timestamp
+                            HAVING COUNT(*) > 1
+                        )
+                        """.trimIndent(),
+                        arrayOf(exchange, timeframe)
+                    ).use { if (it.moveToFirst()) it.getLong(0) else 0L }
+                    groups.put(
+                        JSONObject()
+                            .put("exchange", exchange)
+                            .put("timeframe", timeframe)
+                            .put("rows", cursor.getLong(2))
+                            .put("symbols", cursor.getLong(3))
+                            .put("first_timestamp", cursor.getLong(4))
+                            .put("last_timestamp", cursor.getLong(5))
+                            .put("invalid_rows", cursor.getLong(6))
+                            .put("duplicate_keys", duplicateKeys)
+                    )
+                }
+            }
+            val backupRows = if (hasTable(db, "candles_1m_recovery_backup")) {
+                db.rawQuery(
+                    "SELECT COUNT(*) FROM candles_1m_recovery_backup",
+                    null
+                ).use { if (it.moveToFirst()) it.getLong(0) else 0L }
+            } else 0L
+            val remainingCapitalMonth = db.rawQuery(
+                "SELECT COUNT(*) FROM candles WHERE timeframe = '1M'",
+                null
+            ).use { if (it.moveToFirst()) it.getLong(0) else 0L }
+            JSONObject()
+                .put("status", "ok")
+                .put("read_only", true)
+                .put("requested_equity_range", "2023-11-09 through 2026-11-09")
+                .put("requested_mcx_range", "2026-08-09 through 2026-11-09")
+                .put("groups", groups)
+                .put("recovery_backup_rows", backupRows)
+                .put("remaining_uppercase_1M_rows", remainingCapitalMonth)
+                .put("note", "Counts reflect only rows currently persisted in the local candles table. This endpoint does not download or modify data.")
+                .toString()
+        } catch (error: Exception) {
+            JSONObject().put("status", "error")
+                .put("message", error.message ?: "History validation failed")
                 .toString()
         }
     }
