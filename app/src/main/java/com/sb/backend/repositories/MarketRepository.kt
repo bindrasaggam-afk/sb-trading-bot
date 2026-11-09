@@ -11,6 +11,12 @@ import com.sb.backend.models.Candle
 import com.sb.backend.models.Quote
 import java.util.Locale
 
+/**
+ * Candle timeframe labels are case-sensitive: intraday "1m" and
+ * calendar "1M" are different intervals. Do not uppercase this key.
+ */
+internal fun normalizeCandleTimeframe(value: String): String = value.trim()
+
 class MarketRepository(
     private val databaseHelper: SBDatabaseHelper
 ) {
@@ -636,7 +642,7 @@ class MarketRepository(
     ): Int {
         val normalizedSymbol = normalize(symbol)
         val normalizedExchange = normalize(exchange)
-        val normalizedTimeframe = normalize(timeframe)
+        val normalizedTimeframe = normalizeCandleTimeframe(timeframe)
 
         if (normalizedSymbol.isBlank() ||
             normalizedExchange.isBlank() ||
@@ -710,7 +716,7 @@ class MarketRepository(
     ): List<Candle> {
         val normalizedSymbol = normalize(symbol)
         val normalizedExchange = normalize(exchange)
-        val normalizedTimeframe = normalize(timeframe)
+        val normalizedTimeframe = normalizeCandleTimeframe(timeframe)
 
         if (normalizedSymbol.isBlank() ||
             normalizedExchange.isBlank() ||
@@ -725,7 +731,7 @@ class MarketRepository(
                 candleProjection,
                 """
                 UPPER(symbol) = ? AND UPPER(exchange) = ?
-                AND UPPER(timeframe) = ?
+                AND timeframe = ?
                 """.trimIndent(),
                 arrayOf(
                     normalizedSymbol,
@@ -758,7 +764,7 @@ class MarketRepository(
     ): List<Candle> {
         val normalizedSymbol = normalize(symbol)
         val normalizedExchange = normalize(exchange)
-        val normalizedTimeframe = normalize(timeframe)
+        val normalizedTimeframe = normalizeCandleTimeframe(timeframe)
 
         if (normalizedSymbol.isBlank() ||
             normalizedExchange.isBlank() ||
@@ -775,7 +781,7 @@ class MarketRepository(
                 candleProjection,
                 """
                 UPPER(symbol) = ? AND UPPER(exchange) = ?
-                AND UPPER(timeframe) = ?
+                AND timeframe = ?
                 AND timestamp >= ? AND timestamp <= ?
                 """.trimIndent(),
                 arrayOf(
@@ -808,7 +814,7 @@ class MarketRepository(
     ): Candle? {
         val normalizedSymbol = normalize(symbol)
         val normalizedExchange = normalize(exchange)
-        val normalizedTimeframe = normalize(timeframe)
+        val normalizedTimeframe = normalizeCandleTimeframe(timeframe)
 
         if (normalizedSymbol.isBlank() ||
             normalizedExchange.isBlank() ||
@@ -821,7 +827,7 @@ class MarketRepository(
                 candleProjection,
                 """
                 UPPER(symbol) = ? AND UPPER(exchange) = ?
-                AND UPPER(timeframe) = ?
+                AND timeframe = ?
                 """.trimIndent(),
                 arrayOf(
                     normalizedSymbol,
@@ -848,7 +854,7 @@ class MarketRepository(
     ): Int {
         val normalizedSymbol = normalize(symbol)
         val normalizedExchange = normalize(exchange)
-        val normalizedTimeframe = normalize(timeframe)
+        val normalizedTimeframe = normalizeCandleTimeframe(timeframe)
 
         if (normalizedSymbol.isBlank() ||
             normalizedExchange.isBlank() ||
@@ -860,7 +866,7 @@ class MarketRepository(
                 """
                 SELECT COUNT(*) FROM `$candlesTable`
                 WHERE UPPER(symbol) = ? AND UPPER(exchange) = ?
-                AND UPPER(timeframe) = ?
+                AND timeframe = ?
                 """.trimIndent(),
                 arrayOf(
                     normalizedSymbol,
@@ -898,7 +904,7 @@ class MarketRepository(
     ): Int {
         val normalizedSymbol = normalize(symbol)
         val normalizedExchange = normalize(exchange)
-        val normalizedTimeframe = normalize(timeframe)
+        val normalizedTimeframe = normalizeCandleTimeframe(timeframe)
 
         if (normalizedSymbol.isBlank() ||
             normalizedExchange.isBlank() ||
@@ -910,7 +916,7 @@ class MarketRepository(
                 candlesTable,
                 """
                 UPPER(symbol) = ? AND UPPER(exchange) = ?
-                AND UPPER(timeframe) = ?
+                AND timeframe = ?
                 """.trimIndent(),
                 arrayOf(
                     normalizedSymbol,
