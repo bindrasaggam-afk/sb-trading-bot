@@ -1,6 +1,8 @@
 
 package com.sb.backend.market
 
+import com.sb.backend.market.engine.CandleEngine
+
 import com.sb.backend.market.model.InstrumentKey
 import com.sb.backend.market.model.MarketTick
 import kotlinx.coroutines.CoroutineScope
@@ -20,6 +22,9 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
 
 object MarketDataManager {
+
+    private val candleEngine = CandleEngine()
+
 
     const val MAX_HISTORY_PER_INSTRUMENT = 2400
 
@@ -115,6 +120,17 @@ object MarketDataManager {
         }
     }
 
+    fun getCandles(
+        key: InstrumentKey,
+        timeframe: com.sb.backend.market.model.MarketTimeframe
+    ): List<com.sb.backend.market.model.MarketCandle> =
+        candleEngine.candles(key, timeframe)
+
+    fun seedCandles(
+        key: InstrumentKey,
+        candles: List<com.sb.backend.market.model.MarketCandle>
+    ) = candleEngine.seedBase(key, candles)
+
     // ------------------------------------------------------------
     // CONNECTION
     // ------------------------------------------------------------
@@ -130,7 +146,7 @@ object MarketDataManager {
     // TICK PROCESSING
     // ------------------------------------------------------------
 
-    fun onNewTick(tick: MarketTick) {
+    fun onNewTick(tick: MarketTick): CandleEngine.TickResult {
 
         val key = tick.key.key()
 
@@ -160,6 +176,8 @@ object MarketDataManager {
 
         // Publish to the shared live stream.
         _tickStream.tryEmit(tick)
+
+        return candleEngine.addTick(tick)
     }
 
     private fun appendHistory(
@@ -310,6 +328,7 @@ object MarketDataManager {
     // ------------------------------------------------------------
 
     fun clear() {
+        candleEngine.clear()
 
         latestTicks.clear()
 
