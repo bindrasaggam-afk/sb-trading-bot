@@ -131,6 +131,12 @@ class EmbeddedApiServer(
                     method == "GET" && path == "/api/database/capital-month-audit" ->
                         databaseCapitalMonthAudit()
 
+                    method == "GET" && path == "/api/database/integrity-audit" ->
+                        databaseIntegrityAudit(
+                            exchange = queryParams["exchange"] ?: "",
+                            timeframe = queryParams["timeframe"] ?: ""
+                        )
+
                     method == "POST" && path == "/api/database/capital-month-backup" ->
                         databaseCapitalMonthBackup()
 
@@ -151,6 +157,7 @@ class EmbeddedApiServer(
                     path == "/api/database/diagnostics" ||
                     path == "/api/database/candle-audit" ||
                     path == "/api/database/capital-month-audit" ||
+                    path == "/api/database/integrity-audit" ||
                     path == "/api/database/capital-month-backup" ||
                     path == "/api/database/capital-month-migrate" ||
                     method == "OPTIONS"
@@ -949,6 +956,106 @@ class EmbeddedApiServer(
             JSONObject().put("status", "error")
                 .put("message", error.message ?: "Uppercase 1M recovery failed")
                 .put("source_preserved_on_failure", true)
+                .toString()
+        }
+    }
+
+
+    /**
+     * Read-only full-table candle quality report, optionally scoped by exchange
+     * and/or exact case-sensitive timeframe.
+     */
+    private fun databaseIntegrityAudit(exchange: String, timeframe: String): String {
+        if (!BackendManager.isInitialized()) {
+            return JSONObject().put("status", "not_ready").toString()
+        }
+        if (exchange.length > 32 || timeframe.length > 16) {
+            return JSONObject().put("status", "error")
+                .put("message", "Invalid exchange or timeframe filter").toString()
+        }
+        return try {
+            val db = BackendManager.database().readableDatabase
+            val required = setOf(
+                "symbol", "exchange", "timeframe", "timestamp",
+                "open", "high", "low", "close", "volume"
+            )
+            val columns = getColumnNames(db, SBDatabaseHelper.TABLE_CANDLES)
+            if (!required.all { it in columns }) {
+                return JSONObject().put("status", "error")
+                    .put("message", "Candles table schema is incomplete").toString()
+            }
+            val where = StringBuilder("1=1")
+            val args = ArrayList<String>()
+            if (exchange.isNotBlank()) {
+                where.append(" AND exchange = ?")
+                args.add(exchange.trim())
+            }
+            if (timeframe.isNotBlank()) {
+                where.append(" AND timeframe = ?")
+                args.add(timeframe.trim())
+            }
+            val groups = JSONArray()
+            db.rawQuery(
+                """
+                SELECT exchange, timeframe, COUNT(*) AS rows,
+                       SUM(CASE WHEN timestamp <= 0 OR timestamp < 1000000000000 THEN 1 ELSE 0 END) AS invalid_timestamps,
+                       SUM(CASE WHEN open <= 0 OR close <= 0 OR high < open
+                                  OR high < close OR high < low OR low > open
+                                  OR low > close OR volume < 0 THEN 1 ELSE 0 END) AS invalid_ohlcv,
+                       COUNT(DISTINCT symbol) AS symbols,
+                       MIN(timestamp) AS first_timestamp,
+                       MAX(timestamp) AS last_timestamp
+                FROM candles
+                WHERE $where
+                GROUP BY exchange, timeframe
+                ORDER BY exchange, timeframe
+                """.trimIndent(),
+                args.toTypedArray()
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    val ex = cursor.getString(0) ?: ""
+                    val tf = cursor.getString(1) ?: ""
+                    val duplicateGroups = db.rawQuery(
+                        """
+                        SELECT COUNT(*) FROM (
+                            SELECT timestamp
+                            FROM candles
+                            WHERE exchange = ? AND timeframe = ?
+                            GROUP BY symbol, timestamp
+                            HAVING COUNT(*) > 1
+                        )
+                        """.trimIndent(),
+                        arrayOf(ex, tf)
+                    ).use { if (it.moveToFirst()) it.getLong(0) else 0L }
+                    groups.put(
+                        JSONObject()
+                            .put("exchange", ex)
+                            .put("timeframe", tf)
+                            .put("rows", cursor.getLong(2))
+                            .put("invalid_timestamps", cursor.getLong(3))
+                            .put("invalid_ohlcv", cursor.getLong(4))
+                            .put("symbols", cursor.getLong(5))
+                            .put("first_timestamp", cursor.getLong(6))
+                            .put("last_timestamp", cursor.getLong(7))
+                            .put("duplicate_timestamp_groups", duplicateGroups)
+                    )
+                }
+            }
+            val total = db.rawQuery(
+                "SELECT COUNT(*) FROM candles WHERE $where",
+                args.toTypedArray()
+            ).use { if (it.moveToFirst()) it.getLong(0) else 0L }
+            JSONObject()
+                .put("status", "ok")
+                .put("read_only", true)
+                .put("total_rows", total)
+                .put("groups", groups)
+                .put("filters", JSONObject().put("exchange", exchange).put("timeframe", timeframe))
+                .put("note", "No records were modified.")
+                .toString()
+        } catch (error: Exception) {
+            JSONObject().put("status", "error")
+                .put("message", error.message ?: "Database integrity audit failed")
                 .toString()
         }
     }
