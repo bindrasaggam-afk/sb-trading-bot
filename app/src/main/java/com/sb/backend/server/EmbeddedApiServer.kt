@@ -143,6 +143,12 @@ class EmbeddedApiServer(
                     method == "POST" && path == "/api/database/capital-month-migrate" ->
                         databaseCapitalMonthMigrate()
 
+                    method == "POST" && path == "/api/history/equities/start" ->
+                        KotakSessionCoordinator.startEquityHistoricalBackfill().toString()
+
+                    method == "GET" && path == "/api/history/equities/status" ->
+                        KotakSessionCoordinator.historicalImportSnapshot().toString()
+
                     method == "OPTIONS" ->
                         """{"status":"ok"}"""
 
@@ -160,6 +166,8 @@ class EmbeddedApiServer(
                     path == "/api/database/integrity-audit" ||
                     path == "/api/database/capital-month-backup" ||
                     path == "/api/database/capital-month-migrate" ||
+                    path == "/api/history/equities/start" ||
+                    path == "/api/history/equities/status" ||
                     method == "OPTIONS"
                 ) "200 OK" else "404 Not Found"
 
