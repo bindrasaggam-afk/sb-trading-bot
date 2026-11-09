@@ -809,40 +809,70 @@ class EmbeddedApiServer(
             val candidates = ArrayList<Candidate>()
             db.rawQuery(
                 """
-                SELECT exchange, symbol, SUM(is_valid) AS rows,
-                       SUM(CASE WHEN delta_ms <= 600000 THEN 1 ELSE 0 END) AS short_steps,
-                       COUNT(delta_ms) AS steps
-                FROM (
-                    SELECT exchange, symbol, timestamp,
-                           CASE WHEN timestamp > 0
-                                  AND open > 0 AND high >= open
-                                  AND high >= close AND high >= low
-                                  AND low <= open AND low <= close
-                                  AND close > 0 AND volume >= 0
-                                THEN 1 ELSE 0 END AS is_valid,
-                           timestamp - LAG(timestamp) OVER (
-                               PARTITION BY exchange, symbol ORDER BY timestamp
-                           ) AS delta_ms
-                    FROM candles
-                    WHERE timeframe = '1M'
-                )
-                GROUP BY exchange, symbol
-                HAVING COUNT(*) >= 3
-                   AND SUM(is_valid) >= 3
-                   AND CAST(SUM(CASE WHEN delta_ms <= 600000 THEN 1 ELSE 0 END) AS REAL)
-                       / NULLIF(COUNT(delta_ms), 0) >= 0.70
+                SELECT exchange, symbol, timestamp, open, high, low, close, volume
+                FROM candles
+                WHERE timeframe = '1M'
+                ORDER BY exchange, symbol, timestamp
                 """.trimIndent(),
                 null
             ).use { cursor ->
-                while (cursor.moveToNext()) {
-                    candidates.add(
-                        Candidate(
-                            exchange = cursor.getString(0),
-                            symbol = cursor.getString(1),
-                            rows = cursor.getLong(2)
+                var groupKey = ""
+                var groupExchange = ""
+                var groupSymbol = ""
+                var groupRows = 0L
+                var validRows = 0L
+                var previousTimestamp = 0L
+                var shortSteps = 0
+                var steps = 0
+                fun flushCandidate() {
+                    val ratio = if (steps == 0) 0.0 else shortSteps.toDouble() / steps
+                    if (groupRows >= 3 && validRows >= 3 && ratio >= 0.70) {
+                        candidates.add(
+                            Candidate(
+                                exchange = groupExchange,
+                                symbol = groupSymbol,
+                                rows = validRows
+                            )
                         )
-                    )
+                    }
                 }
+                while (cursor.moveToNext()) {
+                    val exchange = cursor.getString(0) ?: ""
+                    val symbol = cursor.getString(1) ?: ""
+                    val key = "$exchange|$symbol"
+                    if (groupKey.isNotEmpty() && key != groupKey) {
+                        flushCandidate()
+                        groupRows = 0L
+                        validRows = 0L
+                        previousTimestamp = 0L
+                        shortSteps = 0
+                        steps = 0
+                    }
+                    if (key != groupKey) {
+                        groupKey = key
+                        groupExchange = exchange
+                        groupSymbol = symbol
+                    }
+                    val timestamp = cursor.getLong(2)
+                    val open = cursor.getDouble(3)
+                    val high = cursor.getDouble(4)
+                    val low = cursor.getDouble(5)
+                    val close = cursor.getDouble(6)
+                    val volume = cursor.getLong(7)
+                    val valid = timestamp > 0L &&
+                        open > 0.0 && close > 0.0 &&
+                        high >= maxOf(open, close, low) &&
+                        low <= minOf(open, close, high) &&
+                        volume >= 0L
+                    if (valid) validRows++
+                    if (previousTimestamp > 0L && timestamp > previousTimestamp) {
+                        steps++
+                        if (timestamp - previousTimestamp <= 600_000L) shortSteps++
+                    }
+                    previousTimestamp = timestamp
+                    groupRows++
+                }
+                flushCandidate()
             }
 
             var recovered = 0L
