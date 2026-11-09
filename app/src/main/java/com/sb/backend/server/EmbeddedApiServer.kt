@@ -809,11 +809,17 @@ class EmbeddedApiServer(
             val candidates = ArrayList<Candidate>()
             db.rawQuery(
                 """
-                SELECT exchange, symbol, COUNT(*) AS rows,
+                SELECT exchange, symbol, SUM(is_valid) AS rows,
                        SUM(CASE WHEN delta_ms <= 600000 THEN 1 ELSE 0 END) AS short_steps,
                        COUNT(delta_ms) AS steps
                 FROM (
                     SELECT exchange, symbol, timestamp,
+                           CASE WHEN timestamp > 0
+                                  AND open > 0 AND high >= open
+                                  AND high >= close AND high >= low
+                                  AND low <= open AND low <= close
+                                  AND close > 0 AND volume >= 0
+                                THEN 1 ELSE 0 END AS is_valid,
                            timestamp - LAG(timestamp) OVER (
                                PARTITION BY exchange, symbol ORDER BY timestamp
                            ) AS delta_ms
@@ -822,6 +828,7 @@ class EmbeddedApiServer(
                 )
                 GROUP BY exchange, symbol
                 HAVING COUNT(*) >= 3
+                   AND SUM(is_valid) > 0
                    AND CAST(SUM(CASE WHEN delta_ms <= 600000 THEN 1 ELSE 0 END) AS REAL)
                        / NULLIF(COUNT(delta_ms), 0) >= 0.70
                 """.trimIndent(),
@@ -855,6 +862,11 @@ class EmbeddedApiServer(
                         FROM candles
                         WHERE timeframe = '1M'
                           AND exchange = ? AND symbol = ?
+                          AND timestamp > 0
+                          AND open > 0 AND high >= open
+                          AND high >= close AND high >= low
+                          AND low <= open AND low <= close
+                          AND close > 0 AND volume >= 0
                         """.trimIndent(),
                         arrayOf(candidate.exchange, candidate.symbol)
                     )
@@ -864,6 +876,11 @@ class EmbeddedApiServer(
                         FROM candles source
                         WHERE source.timeframe = '1M'
                           AND source.exchange = ? AND source.symbol = ?
+                          AND source.timestamp > 0
+                          AND source.open > 0 AND source.high >= source.open
+                          AND source.high >= source.close AND source.high >= source.low
+                          AND source.low <= source.open AND source.low <= source.close
+                          AND source.close > 0 AND source.volume >= 0
                           AND EXISTS (
                               SELECT 1 FROM candles target
                               WHERE target.timeframe = '1m'
