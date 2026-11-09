@@ -236,7 +236,7 @@ enum class MarketTimeframe(
             val normalized = label.trim()
 
             return values().firstOrNull {
-                it.label.equals(normalized, ignoreCase = true)
+                it.label == normalized
             }
         }
     }
