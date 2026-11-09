@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.text.InputType
 import android.text.TextUtils
+import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
@@ -1245,6 +1246,9 @@ class HeikinAshiChartScreen(
     }
 
     private fun renderCandles(candles: List<MarketCandle>) {
+        val firstTs = candles.firstOrNull()?.timestamp ?: 0L
+        val lastTs = candles.lastOrNull()?.timestamp ?: 0L
+        Log.i("ChartCandleAudit", "symbol=" + selectedSymbol + " exchange=" + exchangeHint + " timeframe=" + selectedTimeframe + " count=" + candles.size + " first=" + firstTs + " last=" + lastTs)
         currentCandles = candles.map {
             ChartCandle(
                 timestamp = it.timestamp,
