@@ -134,6 +134,9 @@ class EmbeddedApiServer(
                     method == "POST" && path == "/api/database/capital-month-backup" ->
                         databaseCapitalMonthBackup()
 
+                    method == "POST" && path == "/api/database/capital-month-migrate" ->
+                        databaseCapitalMonthMigrate()
+
                     method == "OPTIONS" ->
                         """{"status":"ok"}"""
 
@@ -149,6 +152,7 @@ class EmbeddedApiServer(
                     path == "/api/database/candle-audit" ||
                     path == "/api/database/capital-month-audit" ||
                     path == "/api/database/capital-month-backup" ||
+                    path == "/api/database/capital-month-migrate" ||
                     method == "OPTIONS"
                 ) "200 OK" else "404 Not Found"
 
@@ -756,6 +760,148 @@ class EmbeddedApiServer(
         } catch (error: Exception) {
             JSONObject().put("status", "error")
                 .put("message", error.message ?: "Uppercase 1M backup failed")
+                .toString()
+        }
+    }
+
+
+    /**
+     * Recover minute-like records from uppercase 1M after a complete backup.
+     * Existing 1m rows win on timestamp conflicts. All remaining uppercase
+     * 1M rows are removed only after every candidate timestamp is present in
+     * 1m and the complete source set is confirmed in the backup table.
+     */
+    private fun databaseCapitalMonthMigrate(): String {
+        if (!BackendManager.isInitialized()) {
+            return JSONObject().put("status", "not_ready").toString()
+        }
+        return try {
+            val db = BackendManager.database().writableDatabase
+            val sourceCount = db.rawQuery(
+                "SELECT COUNT(*) FROM candles WHERE timeframe = '1M'",
+                null
+            ).use { if (it.moveToFirst()) it.getLong(0) else 0L }
+            if (sourceCount == 0L) {
+                return JSONObject().put("status", "ok")
+                    .put("source_uppercase_1M_rows", 0)
+                    .put("recovered_into_1m_rows", 0)
+                    .put("deleted_remaining_1M_rows", 0)
+                    .toString()
+            }
+            if (!hasTable(db, "candles_1m_recovery_backup")) {
+                return JSONObject().put("status", "blocked")
+                    .put("message", "Run the uppercase 1M backup endpoint first")
+                    .toString()
+            }
+            val backupCount = db.rawQuery(
+                "SELECT COUNT(*) FROM candles_1m_recovery_backup WHERE timeframe = '1M'",
+                null
+            ).use { if (it.moveToFirst()) it.getLong(0) else 0L }
+            if (backupCount < sourceCount) {
+                return JSONObject().put("status", "blocked")
+                    .put("message", "Backup is incomplete; no source rows were changed")
+                    .put("source_rows", sourceCount)
+                    .put("backup_rows", backupCount)
+                    .toString()
+            }
+
+            data class Candidate(val exchange: String, val symbol: String, val rows: Long)
+            val candidates = ArrayList<Candidate>()
+            db.rawQuery(
+                """
+                SELECT exchange, symbol, COUNT(*) AS rows,
+                       SUM(CASE WHEN delta_ms <= 600000 THEN 1 ELSE 0 END) AS short_steps,
+                       COUNT(delta_ms) AS steps
+                FROM (
+                    SELECT exchange, symbol, timestamp,
+                           timestamp - LAG(timestamp) OVER (
+                               PARTITION BY exchange, symbol ORDER BY timestamp
+                           ) AS delta_ms
+                    FROM candles
+                    WHERE timeframe = '1M'
+                )
+                GROUP BY exchange, symbol
+                HAVING COUNT(*) >= 3
+                   AND CAST(SUM(CASE WHEN delta_ms <= 600000 THEN 1 ELSE 0 END) AS REAL)
+                       / NULLIF(COUNT(delta_ms), 0) >= 0.70
+                """.trimIndent(),
+                null
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    candidates.add(
+                        Candidate(
+                            exchange = cursor.getString(0),
+                            symbol = cursor.getString(1),
+                            rows = cursor.getLong(2)
+                        )
+                    )
+                }
+            }
+
+            var recovered = 0L
+            var verified = 0L
+            var deleted = 0
+            db.beginTransaction()
+            try {
+                candidates.forEach { candidate ->
+                    db.execSQL(
+                        """
+                        INSERT OR IGNORE INTO candles(
+                            symbol, exchange, timeframe, timestamp,
+                            open, high, low, close, volume
+                        )
+                        SELECT symbol, exchange, '1m', timestamp,
+                               open, high, low, close, volume
+                        FROM candles
+                        WHERE timeframe = '1M'
+                          AND exchange = ? AND symbol = ?
+                        """.trimIndent(),
+                        arrayOf(candidate.exchange, candidate.symbol)
+                    )
+                    recovered += db.rawQuery(
+                        """
+                        SELECT COUNT(*)
+                        FROM candles source
+                        WHERE source.timeframe = '1M'
+                          AND source.exchange = ? AND source.symbol = ?
+                          AND EXISTS (
+                              SELECT 1 FROM candles target
+                              WHERE target.timeframe = '1m'
+                                AND target.exchange = source.exchange
+                                AND target.symbol = source.symbol
+                                AND target.timestamp = source.timestamp
+                          )
+                        """.trimIndent(),
+                        arrayOf(candidate.exchange, candidate.symbol)
+                    ).use { if (it.moveToFirst()) it.getLong(0) else 0L }
+                }
+                val expected = candidates.sumOf { it.rows }
+                check(recovered == expected) {
+                    "Recovery verification failed: verified=$recovered expected=$expected"
+                }
+                verified = recovered
+
+                // User-requested cleanup: backup is complete and all minute
+                // candidates are verified in 1m before remaining 1M is cleared.
+                deleted = db.delete("candles", "timeframe = ?", arrayOf("1M"))
+                db.setTransactionSuccessful()
+            } finally {
+                db.endTransaction()
+            }
+            JSONObject()
+                .put("status", "ok")
+                .put("source_uppercase_1M_rows", sourceCount)
+                .put("backup_rows", backupCount)
+                .put("minute_candidate_groups", candidates.size)
+                .put("recovered_into_1m_rows", recovered)
+                .put("verified_candidate_rows", verified)
+                .put("deleted_remaining_1M_rows", deleted)
+                .put("backup_preserved", true)
+                .toString()
+        } catch (error: Exception) {
+            JSONObject().put("status", "error")
+                .put("message", error.message ?: "Uppercase 1M recovery failed")
+                .put("source_preserved_on_failure", true)
                 .toString()
         }
     }
