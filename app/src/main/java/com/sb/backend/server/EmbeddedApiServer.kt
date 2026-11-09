@@ -124,7 +124,7 @@ class EmbeddedApiServer(
                         databaseCandleAudit(
                             symbol = queryParams["symbol"] ?: "",
                             exchange = queryParams["exchange"] ?: "MCX",
-                            timeframe = queryParams["timeframe"] ?: "1M",
+                            timeframe = queryParams["timeframe"] ?: "1m",
                             limit = queryParams["limit"]?.toIntOrNull() ?: 500
                         )
 
@@ -528,16 +528,20 @@ class EmbeddedApiServer(
             val required = setOf("symbol", "exchange", "timeframe", "timestamp", "open", "high", "low", "close", "volume")
             if (!required.all { it in columns }) return JSONObject().put("status", "error").put("message", "Candles table schema is incomplete").toString()
             val safeLimit = limit.coerceIn(1, 2000)
-            val interval = when (timeframe.uppercase(java.util.Locale.ROOT)) {
-                "1M", "MIN_1", "1MIN" -> 60_000L
-                "3M", "MIN_3", "3MIN" -> 180_000L
-                "5M", "MIN_5", "5MIN" -> 300_000L
-                "10M", "MIN_10", "10MIN" -> 600_000L
-                "15M", "MIN_15", "15MIN" -> 900_000L
-                "30M", "MIN_30", "30MIN" -> 1_800_000L
-                "1H", "HOUR_1" -> 3_600_000L
-                "1D", "DAY_1" -> 86_400_000L
-                else -> 0L
+            // Keep timeframe case-sensitive: "1m" is one minute; "1M" is one month.
+            val interval = when (timeframe.trim()) {
+                "1m" -> 60_000L
+                "2m" -> 120_000L
+                "3m" -> 180_000L
+                "5m" -> 300_000L
+                "10m" -> 600_000L
+                "15m" -> 900_000L
+                "30m" -> 1_800_000L
+                "1h" -> 3_600_000L
+                "2h" -> 7_200_000L
+                "4h" -> 14_400_000L
+                "1D" -> 86_400_000L
+                else -> 0L // Calendar periods are not fixed-duration intervals.
             }
             val rows = JSONArray()
             val stamps = ArrayList<Long>()
