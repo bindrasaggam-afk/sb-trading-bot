@@ -149,6 +149,12 @@ class EmbeddedApiServer(
                     method == "GET" && path == "/api/history/equities/status" ->
                         KotakSessionCoordinator.historicalImportSnapshot().toString()
 
+                    method == "POST" && path == "/api/history/mcx/start" ->
+                        KotakSessionCoordinator.startMcxThreeMonthBackfill().toString()
+
+                    method == "GET" && path == "/api/history/mcx/status" ->
+                        KotakSessionCoordinator.mcxHistoricalBackfillSnapshot().toString()
+
                     method == "OPTIONS" ->
                         """{"status":"ok"}"""
 
@@ -168,6 +174,8 @@ class EmbeddedApiServer(
                     path == "/api/database/capital-month-migrate" ||
                     path == "/api/history/equities/start" ||
                     path == "/api/history/equities/status" ||
+                    path == "/api/history/mcx/start" ||
+                    path == "/api/history/mcx/status" ||
                     method == "OPTIONS"
                 ) "200 OK" else "404 Not Found"
 
