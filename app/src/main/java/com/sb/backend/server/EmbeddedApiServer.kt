@@ -828,7 +828,7 @@ class EmbeddedApiServer(
                 )
                 GROUP BY exchange, symbol
                 HAVING COUNT(*) >= 3
-                   AND SUM(is_valid) > 0
+                   AND SUM(is_valid) >= 3
                    AND CAST(SUM(CASE WHEN delta_ms <= 600000 THEN 1 ELSE 0 END) AS REAL)
                        / NULLIF(COUNT(delta_ms), 0) >= 0.70
                 """.trimIndent(),
