@@ -402,8 +402,8 @@ class KotakNeoMarketDataService(
             timeframe = timeframe.trim(),
             candles = candles
         )
-        require(saved > 0 || candles.isEmpty()) {
-            "Historical candles were fetched but none were saved for ${instrument.symbol}"
+        require(saved == candles.size) {
+            "Historical candle save was incomplete for ${instrument.symbol}: saved=$saved, fetched=${candles.size}"
         }
 
         val persisted = marketRepository.countCandles(
