@@ -128,6 +128,9 @@ class EmbeddedApiServer(
                             limit = queryParams["limit"]?.toIntOrNull() ?: 500
                         )
 
+                    method == "GET" && path == "/api/database/capital-month-audit" ->
+                        databaseCapitalMonthAudit()
+
                     method == "OPTIONS" ->
                         """{"status":"ok"}"""
 
@@ -141,6 +144,7 @@ class EmbeddedApiServer(
                     path == "/api/system/status" ||
                     path == "/api/database/diagnostics" ||
                     path == "/api/database/candle-audit" ||
+                    path == "/api/database/capital-month-audit" ||
                     method == "OPTIONS"
                 ) "200 OK" else "404 Not Found"
 
@@ -571,6 +575,111 @@ class EmbeddedApiServer(
             JSONObject().put("status", "ok").put("read_only", true).put("symbol", symbol).put("exchange", exchange).put("timeframe", timeframe).put("returned_rows", rows.length()).put("total_rows", total).put("checks", JSONObject().put("invalid_ohlc_rows_in_sample", invalidOhlc).put("invalid_timestamp_rows_in_sample", invalidTimestamp).put("duplicate_timestamp_groups", duplicateGroups).put("non_increasing_timestamp_steps_in_sample", nonIncreasing).put("estimated_missing_intervals_in_sample", gaps).put("largest_timestamp_gap_ms", largestGap).put("expected_interval_ms", interval)).put("candles", rows).toString()
         } catch (error: Exception) { JSONObject().put("status", "error").put("message", error.message ?: "Candle audit failed").toString() }
     }
+
+    /**
+     * Read-only classification of uppercase 1M rows before any backup or move.
+     * A group is a minute-data candidate only when it has at least 3 rows and
+     * at least 70% of adjacent intervals are <= 10 minutes.
+     */
+    private fun databaseCapitalMonthAudit(): String {
+        if (!BackendManager.isInitialized()) {
+            return JSONObject().put("status", "not_ready").toString()
+        }
+        return try {
+            val db = BackendManager.database().readableDatabase
+            val groups = JSONArray()
+            var totalRows = 0L
+            var candidateRows = 0L
+            var trueMonthRows = 0L
+            db.rawQuery(
+                """
+                SELECT exchange, symbol, timestamp, open, high, low, close, volume
+                FROM candles
+                WHERE timeframe = '1M'
+                ORDER BY exchange, symbol, timestamp
+                """.trimIndent(),
+                null
+            ).use { cursor ->
+                var key = ""
+                var exchange = ""
+                var symbol = ""
+                var rows = 0L
+                var previous = 0L
+                var shortSteps = 0
+                var steps = 0
+                var first = 0L
+                var last = 0L
+                var invalid = 0
+                fun flush() {
+                    if (rows == 0L) return
+                    val ratio = if (steps == 0) 0.0 else shortSteps.toDouble() / steps
+                    val minuteCandidate = rows >= 3 && ratio >= 0.70
+                    if (minuteCandidate) candidateRows += rows else trueMonthRows += rows
+                    groups.put(
+                        JSONObject()
+                            .put("exchange", exchange)
+                            .put("symbol", symbol)
+                            .put("rows", rows)
+                            .put("first_timestamp", first)
+                            .put("last_timestamp", last)
+                            .put("short_interval_steps", shortSteps)
+                            .put("interval_steps", steps)
+                            .put("short_interval_ratio", ratio)
+                            .put("invalid_ohlc_rows", invalid)
+                            .put("classification", if (minuteCandidate) "minute_candidate" else "needs_manual_review_or_monthly")
+                    )
+                }
+                while (cursor.moveToNext()) {
+                    val nextExchange = cursor.getString(0) ?: ""
+                    val nextSymbol = cursor.getString(1) ?: ""
+                    val nextKey = "$nextExchange|$nextSymbol"
+                    if (key.isNotEmpty() && key != nextKey) {
+                        flush()
+                        rows = 0L; previous = 0L; shortSteps = 0; steps = 0; invalid = 0
+                    }
+                    if (key != nextKey) {
+                        key = nextKey
+                        exchange = nextExchange
+                        symbol = nextSymbol
+                    }
+                    val ts = cursor.getLong(2)
+                    val o = cursor.getDouble(3)
+                    val h = cursor.getDouble(4)
+                    val l = cursor.getDouble(5)
+                    val cl = cursor.getDouble(6)
+                    val volume = cursor.getLong(7)
+                    if (ts <= 0L || o <= 0.0 || h < maxOf(o, cl, l) ||
+                        l > minOf(o, cl, h) || cl <= 0.0 || volume < 0L
+                    ) invalid++
+                    if (rows == 0L) first = ts
+                    if (previous > 0L && ts > previous) {
+                        steps++
+                        if (ts - previous <= 600_000L) shortSteps++
+                    }
+                    previous = ts
+                    last = ts
+                    rows++
+                    totalRows++
+                }
+                flush()
+            }
+            JSONObject()
+                .put("status", "ok")
+                .put("read_only", true)
+                .put("timeframe", "1M")
+                .put("total_uppercase_1M_rows", totalRows)
+                .put("minute_candidate_rows", candidateRows)
+                .put("monthly_or_review_rows", trueMonthRows)
+                .put("groups", groups)
+                .put("note", "No records were changed or deleted. Candidate groups require backup and a separate migration step.")
+                .toString()
+        } catch (error: Exception) {
+            JSONObject().put("status", "error")
+                .put("message", error.message ?: "Uppercase 1M audit failed")
+                .toString()
+        }
+    }
+
     private fun jsonEscape(value: String): String {
         val builder = StringBuilder(value.length + 16)
 
