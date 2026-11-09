@@ -5,6 +5,7 @@ import com.sb.backend.market.MarketDataManager
 import com.sb.backend.market.model.DepthLevel
 import com.sb.backend.market.model.InstrumentKey
 import com.sb.backend.market.model.MarketTick
+import com.sb.backend.models.Candle
 import com.sb.backend.models.Instrument
 import com.sb.backend.models.Quote
 import com.sb.backend.repositories.MarketRepository
@@ -480,7 +481,37 @@ class KotakNeoLiveFeedService(
                     saveFailed = if (rawSaved) 0 else 1
                 )
 
-                MarketDataManager.onNewTick(mTick)
+                val candleResult = MarketDataManager.onNewTick(mTick)
+                if (candleResult.finalizedBase.isNotEmpty()) {
+                    val finalizedCandles = candleResult.finalizedBase.map { candle ->
+                        Candle(
+                            symbol = symbol,
+                            timeframe = "1m",
+                            timestamp = candle.timestamp,
+                            open = candle.open,
+                            high = candle.high,
+                            low = candle.low,
+                            close = candle.close,
+                            volume = candle.volume,
+                            isComplete = true
+                        )
+                    }
+                    try {
+                        quoteExecutor.execute {
+                            val saved = marketRepository.saveCandles(
+                                symbol = symbol,
+                                exchange = exchange,
+                                timeframe = "1m",
+                                candles = finalizedCandles
+                            )
+                            if (saved != finalizedCandles.size) {
+                                onStatus("Candle persistence incomplete: $symbol saved=$saved/${finalizedCandles.size}")
+                            }
+                        }
+                    } catch (e: Exception) {
+                        onStatus("Candle persistence scheduling failed: $symbol ${e.message}")
+                    }
+                }
 
                 if (MarketDataManager.currentConnection() !=
                     MarketDataManager.ConnectionState.AUTHENTICATED
