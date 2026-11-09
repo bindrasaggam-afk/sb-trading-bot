@@ -192,34 +192,61 @@ data class MarketCandle(
 }
 
 /**
- * Supported chart timeframes.
+ * Canonical chart timeframe definitions.
  *
- * Intraday seconds represent exact fixed durations.
- * Calendar timeframe seconds are nominal only.
- * Always use TimeframeBuckets for candle alignment.
+ * Intraday labels are deliberately lowercase:
+ *  - 1m  = One minute
+ *  - 2m  = Two minutes
+ *  - 3m  = Three minutes
+ *  - 5m  = Five minutes
+ *  - 10m = Ten minutes
+ *  - 15m = Fifteen minutes
+ *  - 30m = Thirty minutes
+ *  - 1h  = One hour
+ *  - 2h  = Two hours
+ *  - 4h  = Four hours
+ *
+ * Calendar labels are deliberately uppercase:
+ *  - 1D = One day
+ *  - 1W = One week
+ *  - 2W = Two weeks
+ *  - 4W = Four weeks
+ *  - 1M = One calendar month
+ *  - 3M = Three calendar months
+ *  - 1Y = One calendar year
+ *  - 5Y = Five calendar years
+ *
+ * IMPORTANT:
+ * Lowercase 'm' means minute; uppercase 'M' means month.
+ * Never compare timeframe labels ignoring case.
+ * Intraday seconds are exact fixed durations. Calendar seconds are nominal
+ * only; always use TimeframeBuckets for calendar candle alignment.
  */
 enum class MarketTimeframe(
     val label: String,
     val seconds: Long
 ) {
-    MIN_1("1m", 60L),
-    MIN_2("2m", 120L),
-    MIN_3("3m", 180L),
-    MIN_5("5m", 300L),
-    MIN_10("10m", 600L),
-    MIN_15("15m", 900L),
-    MIN_30("30m", 1_800L),
-    HOUR_1("1h", 3_600L),
-    HOUR_2("2h", 7_200L),
-    HOUR_4("4h", 14_400L),
-    DAY_1("1D", 86_400L),
-    WEEK_1("1W", 604_800L),
-    WEEK_2("2W", 1_209_600L),
-    WEEK_4("4W", 2_419_200L),
-    MONTH_1("1M", 2_592_000L),
-    MONTH_3("3M", 7_776_000L),
-    YEAR_1("1Y", 31_536_000L),
-    YEAR_5("5Y", 157_680_000L);
+    // Intraday: fixed-duration buckets.
+    MIN_1("1m", 60L),             // One minute
+    MIN_2("2m", 120L),            // Two minutes
+    MIN_3("3m", 180L),            // Three minutes
+    MIN_5("5m", 300L),            // Five minutes
+    MIN_10("10m", 600L),          // Ten minutes
+    MIN_15("15m", 900L),          // Fifteen minutes
+    MIN_30("30m", 1_800L),        // Thirty minutes
+    HOUR_1("1h", 3_600L),         // One hour
+    HOUR_2("2h", 7_200L),         // Two hours
+    HOUR_4("4h", 14_400L),        // Four hours
+
+    // Calendar: align using calendar boundaries, not fixed seconds.
+    DAY_1("1D", 86_400L),         // One day
+    WEEK_1("1W", 604_800L),       // One week
+    WEEK_2("2W", 1_209_600L),     // Two weeks
+    WEEK_4("4W", 2_419_200L),     // Four weeks
+    MONTH_1("1M", 2_592_000L),    // One calendar month
+    MONTH_3("3M", 7_776_000L),    // Three calendar months
+    YEAR_1("1Y", 31_536_000L),    // One calendar year
+    YEAR_5("5Y", 157_680_000L);   // Five calendar years
 
     val isIntraday: Boolean
         get() = when (this) {
@@ -232,11 +259,31 @@ enum class MarketTimeframe(
         get() = !isIntraday
 
     companion object {
+        /**
+         * Resolve only canonical labels. Matching is case-sensitive by design:
+         * '1m' is one minute, while '1M' is one calendar month.
+         */
         fun fromLabel(label: String): MarketTimeframe? {
-            val normalized = label.trim()
-
-            return values().firstOrNull {
-                it.label == normalized
+            return when (label.trim()) {
+                "1m" -> MIN_1
+                "2m" -> MIN_2
+                "3m" -> MIN_3
+                "5m" -> MIN_5
+                "10m" -> MIN_10
+                "15m" -> MIN_15
+                "30m" -> MIN_30
+                "1h" -> HOUR_1
+                "2h" -> HOUR_2
+                "4h" -> HOUR_4
+                "1D" -> DAY_1
+                "1W" -> WEEK_1
+                "2W" -> WEEK_2
+                "4W" -> WEEK_4
+                "1M" -> MONTH_1
+                "3M" -> MONTH_3
+                "1Y" -> YEAR_1
+                "5Y" -> YEAR_5
+                else -> null
             }
         }
     }
