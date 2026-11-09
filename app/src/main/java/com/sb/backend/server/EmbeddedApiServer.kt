@@ -10,6 +10,7 @@ import java.io.BufferedOutputStream
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.InetAddress
+import java.net.URLDecoder
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import org.json.JSONArray
@@ -68,7 +69,14 @@ class EmbeddedApiServer(
                 val parts = requestLine.split(" ")
 
                 val method = parts.getOrNull(0) ?: "GET"
-                val path = parts.getOrNull(1)?.substringBefore("?") ?: "/"
+                val requestTarget = parts.getOrNull(1) ?: "/"
+                val path = requestTarget.substringBefore("?")
+                val query = requestTarget.substringAfter("?", "")
+                val queryParams = query.split("&").filter { it.isNotBlank() }.associate {
+                    val pair = it.split("=", limit = 2)
+                    URLDecoder.decode(pair[0], "UTF-8") to
+                        URLDecoder.decode(pair.getOrElse(1) { "" }, "UTF-8")
+                }
 
                 while (true) {
                     val header = readLine(input) ?: break
@@ -112,6 +120,14 @@ class EmbeddedApiServer(
                     method == "GET" && path == "/api/database/diagnostics" ->
                         databaseDiagnostics()
 
+                    method == "GET" && path == "/api/database/candle-audit" ->
+                        databaseCandleAudit(
+                            symbol = queryParams["symbol"] ?: "",
+                            exchange = queryParams["exchange"] ?: "MCX",
+                            timeframe = queryParams["timeframe"] ?: "1M",
+                            limit = queryParams["limit"]?.toIntOrNull() ?: 500
+                        )
+
                     method == "OPTIONS" ->
                         """{"status":"ok"}"""
 
@@ -124,6 +140,7 @@ class EmbeddedApiServer(
                     path == "/api/broker/status" ||
                     path == "/api/system/status" ||
                     path == "/api/database/diagnostics" ||
+                    path == "/api/database/candle-audit" ||
                     method == "OPTIONS"
                 ) "200 OK" else "404 Not Found"
 
@@ -501,6 +518,55 @@ class EmbeddedApiServer(
         }
     }
 
+    /** Read-only candle integrity audit for one instrument and timeframe. */
+    private fun databaseCandleAudit(symbol: String, exchange: String, timeframe: String, limit: Int): String {
+        if (!BackendManager.isInitialized()) return JSONObject().put("status", "not_ready").toString()
+        if (symbol.isBlank() || symbol.length > 128 || exchange.isBlank() || exchange.length > 32 || timeframe.isBlank() || timeframe.length > 16) return JSONObject().put("status", "error").put("message", "Provide symbol, exchange and timeframe").toString()
+        return try {
+            val db = BackendManager.database().readableDatabase
+            val columns = getColumnNames(db, SBDatabaseHelper.TABLE_CANDLES)
+            val required = setOf("symbol", "exchange", "timeframe", "timestamp", "open", "high", "low", "close", "volume")
+            if (!required.all { it in columns }) return JSONObject().put("status", "error").put("message", "Candles table schema is incomplete").toString()
+            val safeLimit = limit.coerceIn(1, 2000)
+            val interval = when (timeframe.uppercase(java.util.Locale.ROOT)) {
+                "1M", "MIN_1", "1MIN" -> 60_000L
+                "3M", "MIN_3", "3MIN" -> 180_000L
+                "5M", "MIN_5", "5MIN" -> 300_000L
+                "10M", "MIN_10", "10MIN" -> 600_000L
+                "15M", "MIN_15", "15MIN" -> 900_000L
+                "30M", "MIN_30", "30MIN" -> 1_800_000L
+                "1H", "HOUR_1" -> 3_600_000L
+                "1D", "DAY_1" -> 86_400_000L
+                else -> 0L
+            }
+            val rows = JSONArray()
+            val stamps = ArrayList<Long>()
+            var invalidOhlc = 0
+            var invalidTimestamp = 0
+            db.rawQuery("SELECT timestamp, open, high, low, close, volume FROM `candles` WHERE symbol = ? AND exchange = ? AND timeframe = ? ORDER BY timestamp DESC LIMIT ?", arrayOf(symbol, exchange, timeframe, safeLimit.toString())).use { c ->
+                val batch = ArrayList<JSONObject>()
+                while (c.moveToNext()) {
+                    val ts = c.getLong(0); val o = c.getDouble(1); val h = c.getDouble(2); val l = c.getDouble(3); val cl = c.getDouble(4); val v = c.getLong(5)
+                    val valid = ts > 0L && o.isFinite() && h.isFinite() && l.isFinite() && cl.isFinite() && o > 0 && h >= maxOf(o, cl, l) && l <= minOf(o, cl, h) && v >= 0
+                    if (!valid) invalidOhlc++
+                    if (ts <= 0L || ts < 1_000_000_000_000L) invalidTimestamp++
+                    batch.add(JSONObject().put("timestamp", ts).put("open", o).put("high", h).put("low", l).put("close", cl).put("volume", v).put("ohlc_valid", valid))
+                    stamps.add(ts)
+                }
+                batch.reverse(); stamps.reverse(); batch.forEach { rows.put(it) }
+            }
+            var gaps = 0L; var largestGap = 0L; var nonIncreasing = 0
+            for (i in 1 until stamps.size) {
+                val delta = stamps[i] - stamps[i - 1]
+                if (delta <= 0L) nonIncreasing++
+                if (delta > largestGap) largestGap = delta
+                if (interval > 0L && delta > interval * 3 / 2) gaps += ((delta / interval) - 1L).coerceAtLeast(1L)
+            }
+            val total = db.rawQuery("SELECT COUNT(*) FROM `candles` WHERE symbol = ? AND exchange = ? AND timeframe = ?", arrayOf(symbol, exchange, timeframe)).use { if (it.moveToFirst()) it.getLong(0) else 0L }
+            val duplicateGroups = db.rawQuery("SELECT COUNT(*) FROM (SELECT timestamp FROM `candles` WHERE symbol = ? AND exchange = ? AND timeframe = ? GROUP BY timestamp HAVING COUNT(*) > 1)", arrayOf(symbol, exchange, timeframe)).use { if (it.moveToFirst()) it.getLong(0) else 0L }
+            JSONObject().put("status", "ok").put("read_only", true).put("symbol", symbol).put("exchange", exchange).put("timeframe", timeframe).put("returned_rows", rows.length()).put("total_rows", total).put("checks", JSONObject().put("invalid_ohlc_rows_in_sample", invalidOhlc).put("invalid_timestamp_rows_in_sample", invalidTimestamp).put("duplicate_timestamp_groups", duplicateGroups).put("non_increasing_timestamp_steps_in_sample", nonIncreasing).put("estimated_missing_intervals_in_sample", gaps).put("largest_timestamp_gap_ms", largestGap).put("expected_interval_ms", interval)).put("candles", rows).toString()
+        } catch (error: Exception) { JSONObject().put("status", "error").put("message", error.message ?: "Candle audit failed").toString() }
+    }
     private fun jsonEscape(value: String): String {
         val builder = StringBuilder(value.length + 16)
 
