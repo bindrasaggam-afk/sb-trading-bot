@@ -323,6 +323,125 @@ object KotakSessionCoordinator {
         }
     }
 
+
+    private val historicalImportLock = Any()
+
+    @Volatile
+    private var historicalImportRunning = false
+
+    @Volatile
+    private var historicalImportStatus = "not_started"
+
+    @Volatile
+    private var historicalImportTotal = 0
+
+    @Volatile
+    private var historicalImportCompleted = 0
+
+    @Volatile
+    private var historicalImportCandlesSaved = 0L
+
+    @Volatile
+    private var historicalImportSkipped = 0
+
+    @Volatile
+    private var historicalImportErrors = 0
+
+    @Volatile
+    private var historicalImportLastError = ""
+
+    /**
+     * Starts a sequential 3-year daily backfill for token-verified NSE/BSE
+     * cash equities and ETFs. Progress is exposed through status snapshot.
+     */
+    fun startEquityHistoricalBackfill(): JSONObject {
+        synchronized(historicalImportLock) {
+            if (historicalImportRunning) {
+                return historicalImportSnapshot().put("already_running", true)
+            }
+            val context = appContext
+                ?: return JSONObject().put("status", "blocked")
+                    .put("message", "Kotak session is not initialized")
+            val store = secureStore
+                ?: return JSONObject().put("status", "blocked")
+                    .put("message", "Kotak secure store is unavailable")
+
+            BackendManager.initialize(context)
+            val candidates = BackendManager.instruments()
+                .getActiveWithTokens(5000)
+                .filter { instrument ->
+                    val exchange = instrument.exchange.uppercase()
+                    val segment = instrument.segment.uppercase()
+                    val type = instrument.instrumentType.uppercase()
+                    (exchange == "NSE" || exchange == "BSE") &&
+                        (segment in setOf("EQ", "ETF", "EQUITY")) &&
+                        (type in setOf("EQ", "ETF"))
+                }
+                .distinctBy { "${it.exchange}:${it.symbol}" }
+
+            if (candidates.isEmpty()) {
+                return JSONObject().put("status", "blocked")
+                    .put("message", "No active NSE/BSE equity or ETF instruments with verified Kotak tokens")
+            }
+            if (store.getAccessToken().isBlank() || store.getTradeBaseUrl().isBlank()) {
+                return JSONObject().put("status", "blocked")
+                    .put("message", "Kotak Neo historical session is not authenticated")
+            }
+
+            historicalImportRunning = true
+            historicalImportStatus = "running"
+            historicalImportTotal = candidates.size
+            historicalImportCompleted = 0
+            historicalImportCandlesSaved = 0L
+            historicalImportSkipped = 0
+            historicalImportErrors = 0
+            historicalImportLastError = ""
+
+            historicalExecutor.execute {
+                val service = KotakNeoMarketDataService(
+                    secureStore = store,
+                    marketRepository = BackendManager.market()
+                )
+                candidates.forEach { instrument ->
+                    try {
+                        val saved = service.fetchHistoricalCandles(
+                            instrument = instrument,
+                            timeframe = "1D",
+                            years = 3
+                        )
+                        historicalImportCandlesSaved += saved.size
+                        if (saved.isEmpty()) historicalImportSkipped++
+                    } catch (error: Exception) {
+                        historicalImportErrors++
+                        historicalImportLastError =
+                            "${instrument.exchange}:${instrument.symbol}: ${error.message ?: "unknown error"}".take(500)
+                    } finally {
+                        historicalImportCompleted++
+                    }
+                }
+                historicalImportRunning = false
+                historicalImportStatus = if (historicalImportErrors == 0) "completed" else "completed_with_errors"
+            }
+            return historicalImportSnapshot().put("started", true)
+        }
+    }
+
+    fun historicalImportSnapshot(): JSONObject = JSONObject()
+        .put("status", historicalImportStatus)
+        .put("running", historicalImportRunning)
+        .put("exchange_scope", JSONArray().put("NSE").put("BSE"))
+        .put("instrument_scope", "active cash equities and ETFs with verified Kotak tokens")
+        .put("timeframe", "1D")
+        .put("from_date", "2023-11-09")
+        .put("to_date", "2026-11-09")
+        .put("total_instruments", historicalImportTotal)
+        .put("completed_instruments", historicalImportCompleted)
+        .put("remaining_instruments", (historicalImportTotal - historicalImportCompleted).coerceAtLeast(0))
+        .put("saved_candles_reported", historicalImportCandlesSaved)
+        .put("skipped_instruments", historicalImportSkipped)
+        .put("instrument_errors", historicalImportErrors)
+        .put("last_error", historicalImportLastError)
+
     fun disconnectFeed() {
         if (connecting.get()) {
             updateStatus("Live feed connection is still starting")
