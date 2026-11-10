@@ -190,7 +190,29 @@ class HeikinAshiChartScreen(
         header.addView(
             timeframeButton,
             LinearLayout.LayoutParams(dp(62), dp(32)).apply {
-                setMargins(0, 0, dp(6), 0)
+                setMargins(0, 0, dp(4), 0)
+            }
+        )
+
+        val latestButton = AppDesign.text(
+            context,
+            "LATEST",
+            9f,
+            accentColor,
+            bold = true
+        ).apply {
+            gravity = Gravity.CENTER
+            background = AppDesign.fieldBackground(context, 8)
+            isClickable = true
+            contentDescription = "Scroll chart to latest candles"
+            setOnClickListener {
+                if (::chartView.isInitialized) chartView.scrollToLatest()
+            }
+        }
+        header.addView(
+            latestButton,
+            LinearLayout.LayoutParams(dp(48), dp(32)).apply {
+                setMargins(0, 0, dp(4), 0)
             }
         )
 
