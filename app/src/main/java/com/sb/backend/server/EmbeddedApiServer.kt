@@ -149,6 +149,12 @@ class EmbeddedApiServer(
                     method == "POST" && path == "/api/history/equities/start" ->
                         KotakSessionCoordinator.startEquityHistoricalBackfill().toString()
 
+                    method == "POST" && path == "/api/history/equities/rebuild-monthly" ->
+                        KotakSessionCoordinator.startMonthlyCandleRebuild().toString()
+
+                    method == "GET" && path == "/api/history/equities/rebuild-monthly/status" ->
+                        KotakSessionCoordinator.monthlyCandleRebuildSnapshot().toString()
+
                     method == "GET" && path == "/api/history/equities/status" ->
                         KotakSessionCoordinator.historicalImportSnapshot().toString()
 
@@ -178,6 +184,8 @@ class EmbeddedApiServer(
                     path == "/api/database/capital-month-migrate" ||
                     path == "/api/history/equities/start" ||
                     path == "/api/history/equities/status" ||
+                    path == "/api/history/equities/rebuild-monthly" ||
+                    path == "/api/history/equities/rebuild-monthly/status" ||
                     path == "/api/history/mcx/start" ||
                     path == "/api/history/mcx/status" ||
                     method == "OPTIONS"
