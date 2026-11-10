@@ -12,14 +12,21 @@ import java.util.concurrent.locks.ReentrantLock
 class DatabaseMaintenanceGate {
     companion object {
         const val DEFAULT_TIMEOUT_SECONDS = 10L
+        val shared: DatabaseMaintenanceGate by lazy { DatabaseMaintenanceGate() }
     }
 
     private val lock = ReentrantLock(true)
     private val changed = lock.newCondition()
     private var maintenanceRequested = false
     private var activeOperations = 0
+    private val operationDepth = ThreadLocal.withInitial { 0 }
 
     fun acquireOperation(timeout: Long, unit: TimeUnit): OperationLease? {
+        val depth = operationDepth.get()
+        if (depth > 0) {
+            operationDepth.set(depth + 1)
+            return OperationLease(this)
+        }
         var remaining = unit.toNanos(timeout)
         lock.lockInterruptibly()
         try {
@@ -28,6 +35,7 @@ class DatabaseMaintenanceGate {
                 remaining = changed.awaitNanos(remaining)
             }
             activeOperations++
+            operationDepth.set(1)
             return OperationLease(this)
         } finally {
             lock.unlock()
@@ -96,6 +104,12 @@ class DatabaseMaintenanceGate {
         return lease.use { maintenance() }
     }
     private fun releaseOperation() {
+        val depth = operationDepth.get()
+        if (depth > 1) {
+            operationDepth.set(depth - 1)
+            return
+        }
+        operationDepth.remove()
         lock.lock()
         try {
             check(activeOperations > 0) { "No active database operation to release" }
