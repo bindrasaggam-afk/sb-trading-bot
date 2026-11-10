@@ -257,6 +257,15 @@ class ProfessionalChartView @JvmOverloads constructor(
         invalidate()
     }
 
+    /** Move the viewport to the newest available candles without clearing drawings. */
+    fun scrollToLatest() {
+        followLatest = true
+        scrollOffset = max(0f, candles.size - visibleCount)
+        crosshairVisible = false
+        crosshairIndex = -1
+        invalidate()
+    }
+
     fun addTextDrawing(index: Int, price: Double, text: String) {
         drawings.add(
             ChartDrawing(
