@@ -24,7 +24,7 @@ class DatabaseMaintenanceGate {
     }
 
     fun acquireOperation(timeout: Long, unit: TimeUnit): OperationLease? {
-        val depth = operationDepth.get() ?: 0
+        val depth = operationDepth.get() ?: 0 ?: 0
         if (depth > 0) {
             operationDepth.set(depth + 1)
             return OperationLease(this)
@@ -106,7 +106,7 @@ class DatabaseMaintenanceGate {
         return lease.use { maintenance() }
     }
     private fun releaseOperation() {
-        val depth = operationDepth.get()
+        val depth = operationDepth.get() ?: 0
         if (depth > 1) {
             operationDepth.set(depth - 1)
             return
