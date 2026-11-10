@@ -49,6 +49,14 @@ jobs:
           path: app/build/reports/tests/testDebugUnitTest/
           if-no-files-found: ignore
 
+      # The emulator action runs sdkmanager before its script, so keep Java 17
+      # active for the action and switch Gradle back to Java 11 inside the script.
+      - name: Set up Java 17 for emulator SDK tools
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
       - name: Run Android instrumentation tests
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -56,7 +64,16 @@ jobs:
           target: default
           arch: x86_64
           profile: Pixel_2
-          script: ./gradlew :app:connectedDebugAndroidTest --stacktrace
+          script: |
+            export JAVA_HOME="$JAVA_HOME_11_X64"
+            export PATH="$JAVA_HOME/bin:$PATH"
+            ./gradlew :app:connectedDebugAndroidTest --stacktrace
+
+      - name: Set up Java 11 for APK build
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
 
       - name: Build debug APK
         run: ./gradlew :app:assembleDebug --stacktrace
