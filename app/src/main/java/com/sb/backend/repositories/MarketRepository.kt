@@ -652,11 +652,15 @@ class MarketRepository(
 
         val db = databaseHelper.writableDatabase
         var saved = 0
+        var complete = true
 
         db.beginTransaction()
         try {
             candles.forEach { candle ->
-                if (!isValidCandle(candle)) return@forEach
+                if (!isValidCandle(candle)) {
+                    complete = false
+                    return@forEach
+                }
 
                 try {
                     val values = ContentValues().apply {
@@ -686,8 +690,13 @@ class MarketRepository(
                         SQLiteDatabase.CONFLICT_REPLACE
                     )
 
-                    if (result != -1L) saved++
+                    if (result == -1L) {
+                        complete = false
+                    } else {
+                        saved++
+                    }
                 } catch (e: Exception) {
+                    complete = false
                     Log.e(
                         "MarketRepository",
                         "Candle save failed: $normalizedSymbol",
@@ -696,12 +705,16 @@ class MarketRepository(
                 }
             }
 
-            db.setTransactionSuccessful()
+            // Never commit a partial candle batch. Returning zero also makes
+            // the caller treat the whole save as failed after this rollback.
+            if (complete && saved == candles.size) {
+                db.setTransactionSuccessful()
+            }
         } finally {
             db.endTransaction()
         }
 
-        return saved
+        return if (complete && saved == candles.size) saved else 0
     }
 
     // ---------------------------------------------------------

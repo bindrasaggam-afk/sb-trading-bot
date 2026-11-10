@@ -348,10 +348,8 @@ class KotakNeoMarketDataService(
             set(Calendar.MILLISECOND, 0)
         }
 
-        val collected = ArrayList<Candle>()
+        val chunkCollector = HistoricalChunkCollector()
         var remainingDays = lookback
-        var lastError: Exception? = null
-
         while (remainingDays > 0) {
             val chunkDays = minOf(range.maxDays, remainingDays)
             val chunkEnd = anchor.time
@@ -369,24 +367,28 @@ class KotakNeoMarketDataService(
                     "&interval=${range.interval}"
 
             try {
-                collected.addAll(
-                    parseHistoricalRows(
-                        request(endpoint),
-                        instrument,
-                        timeframe
-                    )
+                val chunkCandles = parseHistoricalRows(
+                    request(endpoint),
+                    instrument,
+                    timeframe
                 )
+                chunkCollector.addChunk(chunkCandles)
             } catch (e: Exception) {
-                lastError = e
+                throw Exception(
+                    "Historical chunk failed for ${instrument.exchange}:${instrument.symbol} " +
+                        "[$fromDate to $toDate]: ${e.message ?: e.javaClass.simpleName}",
+                    e
+                )
             }
 
             remainingDays -= chunkDays
             anchor.add(Calendar.DAY_OF_YEAR, -1)
         }
 
+        val collected = chunkCollector.candles()
         if (collected.isEmpty()) {
-            throw lastError ?: Exception(
-                "No historical candles returned for ${instrument.symbol}"
+            throw Exception(
+                "No historical candles returned for ${instrument.exchange}:${instrument.symbol}; nothing was saved"
             )
         }
 
@@ -446,33 +448,42 @@ class KotakNeoMarketDataService(
         val result = ArrayList<Candle>(rows.length())
 
         for (i in 0 until rows.length()) {
-            val row = rows.optJSONArray(i) ?: continue
-            if (row.length() < 6) continue
+            val row = rows.optJSONArray(i)
+                ?: throw Exception("Malformed historical candle row at index $i")
+            if (row.length() < 6) {
+                throw Exception("Incomplete historical candle row at index $i")
+            }
 
             val open = row.optDouble(1, Double.NaN)
             val high = row.optDouble(2, Double.NaN)
             val low = row.optDouble(3, Double.NaN)
             val close = row.optDouble(4, Double.NaN)
-            val volume = row.optDouble(5, 0.0)
+            val volume = row.optDouble(5, Double.NaN)
 
             if (!open.isFinite() || !high.isFinite() ||
                 !low.isFinite() || !close.isFinite()
-            ) continue
+            ) {
+                throw Exception("Non-numeric OHLC in historical candle row $i")
+            }
 
-            // Reject non-positive prices and malformed OHLCV rows.
+            // Reject malformed rows instead of silently accepting a partial range.
             if (open <= 0.0 || high <= 0.0 || low <= 0.0 || close <= 0.0) {
-                continue
+                throw Exception("Non-positive OHLC in historical candle row $i")
             }
 
             if (high < maxOf(open, close, low) ||
                 low > minOf(open, close, high)
-            ) continue
-            if (!volume.isFinite() || volume < 0.0) continue
+            ) {
+                throw Exception("Invalid OHLC relationship in historical candle row $i")
+            }
+            if (!volume.isFinite() || volume < 0.0) {
+                throw Exception("Invalid volume in historical candle row $i")
+            }
 
             val timestamp = try {
                 parseCandleTime(row.getString(0))
-            } catch (_: Exception) {
-                continue
+            } catch (error: Exception) {
+                throw Exception("Invalid timestamp in historical candle row $i", error)
             }
 
             result.add(
