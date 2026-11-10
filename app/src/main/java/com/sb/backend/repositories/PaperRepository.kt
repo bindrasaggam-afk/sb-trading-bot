@@ -353,6 +353,7 @@ class PaperRepository(
     }
 
     fun getOrders(status: String? = null): List<PaperOrder> {
+        return maintenanceGate.withOperation {
         val selection: String?
         val args: Array<String>?
         if (status == null) {
@@ -379,6 +380,8 @@ class PaperRepository(
             }
         }
         return result
+    
+        }
     }
 
     fun getOpenOrders(): List<PaperOrder> {
@@ -389,6 +392,7 @@ class PaperRepository(
     }
 
     fun getPositions(openOnly: Boolean = true): List<Position> {
+        return maintenanceGate.withOperation {
         val selection = if (openOnly) "status = ?" else null
         val args = if (openOnly) {
             arrayOf(OrderStatus.OPEN.name)
@@ -411,6 +415,8 @@ class PaperRepository(
             }
         }
         return result
+    
+        }
     }
 
     fun updatePositionPrices(prices: Map<String, Double>): Int {
