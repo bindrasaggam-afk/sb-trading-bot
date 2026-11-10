@@ -124,3 +124,24 @@ The following call paths were confirmed by reading the current branch source:
 ### Current safe boundary
 
 No database maintenance lock, shared admission gate, or synchronous drain protocol exists across these components. Do not implement file replacement yet. The next code change should introduce a narrowly scoped maintenance coordinator and explicit stop/drain contracts, with tests, rather than simply calling `close()` or shutting down executors. Before implementing it, finish repository-wide call-site search for the second manager and inspect the full API server stop path and all historical import entry points.
+
+
+### API server shutdown and secondary manager call-site check (2026-11-10)
+
+- `EmbeddedApiServer.stop()` sets its running flag false and closes the listening `ServerSocket`, but it does not close accepted client sockets, wait for active `handleClient` calls, or shut down its cached thread pool. Active API handlers can therefore continue executing database reads/writes after the listener is closed.
+- The server executor is currently a `val` created once per server instance. A future stop/drain implementation must account for restart semantics; shutting this executor down permanently and then reusing the same server instance would break restart.
+- `MarketForegroundService.onDestroy()` calls only `stopApiServer()` and resets its runtime flag. It does not synchronously stop/drain `KotakSessionCoordinator` or the primary backend. The service is therefore not yet a complete maintenance boundary.
+- The secondary `com.sb.backend.services.BackendManager` is a separate class whose constructor creates its own `BackendDatabase`; its `close()` closes that database. The inspected app entry point and Settings screen use `com.sb.backend.core.BackendManager`. GitHub code search did not return reliable repository-wide reference results, so the secondary manager is **not declared unused** until a full local-reference scan or complete source scan confirms it.
+- No source files were modified in this pass; this update records verified lifecycle findings only.
+
+### Required implementation design before touching restore
+
+1. Make the foreground service expose a serialized maintenance operation (single owner) rather than letting UI call file restore directly.
+2. Add a database-operation admission gate shared by API handlers, repository work, and historical/feed writers. A maintenance request first closes admission and waits for active operations to reach zero.
+3. Give each long-running producer an explicit suspend/stop-and-await contract. A fire-and-forget disconnect method is not sufficient.
+4. For the API server, track accepted sockets/active handlers, stop accepting, close or finish active clients, and await handler completion. Recreate its executor on each start if restart is supported.
+5. Stop and await historical imports and live feed, then stop and await backend/market executors. Only after all gates report quiescent may every DB helper be closed.
+6. Reopen and validate the database before restarting the service producers. On any restore failure, reinstate the pre-restore snapshot before reopening.
+7. Add deterministic tests for admission rejection, in-flight request draining, executor timeout/failure, service restart, and no DB access after maintenance begins.
+
+**Gate remains closed:** do not add a superficial restore patch or expose a restore UI until the above contracts and isolated tests exist.
