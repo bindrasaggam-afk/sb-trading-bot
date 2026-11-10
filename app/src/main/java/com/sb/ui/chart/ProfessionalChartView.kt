@@ -86,8 +86,8 @@ class ProfessionalChartView @JvmOverloads constructor(
     private var supertrendResult: IndicatorMath.SupertrendResult? = null
 
     private val density = context.resources.displayMetrics.density
-    private val timeFormat = SimpleDateFormat("dd MMM HH:mm", Locale.US)
-    private val axisTimeFormat = SimpleDateFormat("dd MMM", Locale.US)
+    private val timeFormat = SimpleDateFormat("dd MMM yyyy HH:mm", Locale.US)
+    private val axisTimeFormat = SimpleDateFormat("dd MMM yyyy", Locale.US)
     private val axisIntradayFormat = SimpleDateFormat("HH:mm", Locale.US)
 
     private val bullishColor = AppDesign.positive
@@ -1158,14 +1158,8 @@ class ProfessionalChartView @JvmOverloads constructor(
                 if (activeTool == ChartTool.CROSSHAIR) {
                     val geometry = computeGeometry()
                     if (geometry != null) {
-                        val delta = event.x - lastTouchX
-                        lastTouchX = event.x
-                        if (abs(delta) > 0f) {
-                            scrollOffset -= delta / max(dp(4f), geometry.slot)
-                            followLatest = false
-                            val maxStart = max(0, candles.size - geometry.visible).toFloat()
-                            scrollOffset = scrollOffset.coerceIn(0f, maxStart)
-                        }
+                        // Crosshair drag only selects another candle.
+                        // Keep the candle viewport fixed while inspecting data.
                         crosshairX = event.x
                         crosshairY = event.y
                         crosshairIndex = indexAt(event.x, geometry)
