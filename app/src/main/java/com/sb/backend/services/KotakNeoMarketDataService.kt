@@ -372,9 +372,9 @@ class KotakNeoMarketDataService(
                     instrument,
                     timeframe
                 )
-                if (chunkCandles.isEmpty()) {
-                    throw Exception("Kotak returned zero valid candles")
-                }
+                // A structurally valid empty response is allowed for date ranges
+                // before an instrument was listed. Request/response errors and malformed
+                // rows still fail in request() / parseHistoricalRows().
                 collected.addAll(chunkCandles)
             } catch (e: Exception) {
                 throw Exception(
