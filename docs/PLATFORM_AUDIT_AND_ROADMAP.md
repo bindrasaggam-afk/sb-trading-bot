@@ -19,7 +19,7 @@ This is a source-code audit, not a production security certification or a succes
 - SQLite database with schema creation, versioned upgrade logic, indexes and candle validation triggers.
 - Local database backup/restore helpers and diagnostic/repair endpoints.
 - A small set of JVM unit tests for candle aggregation, market models, repository timeframe handling, Kotak binary parsing and indicator calculations.
-- GitHub Actions workflow for JVM unit tests, Android instrumentation tests and debug APK build (latest run still in progress at time of this update).
+- GitHub Actions workflow for JVM unit tests, Android instrumentation tests and debug APK build. Run #15 completed successfully: all three test/build stages passed and the `sb-debug-apk` artifact was uploaded.
 
 ## Prioritized problem list
 
@@ -28,7 +28,7 @@ This is a source-code audit, not a production security certification or a succes
 1. **Database migration verification is incomplete.** Existing migration code is present, but current tests do not demonstrate upgrade from every supported historical schema, preservation of representative user/trading data, rollback on failure, or backup/restore integrity.
 2. **Two backend schema/version concepts need one source of truth.** `SBDatabaseHelper` and `BackendMigration` both expose version 5 while `BackendSchema` has a separate version 1. Define one documented migration path and eliminate drift.
 3. **Backup/restore needs safety guarantees.** Verify WAL checkpointing, atomic restore, integrity checks, recovery after interrupted copy, and preservation of the previous database before replacing it. Never run destructive repair automatically.
-4. **Test automation must be proven green.** A new CI workflow now runs JVM unit tests, Android instrumentation tests and a debug APK build. JVM tests have passed in the latest observed run; instrumentation tests and APK build are not yet confirmed.
+4. **Test automation is now green for the current PR head.** Run #15 passed JVM unit tests, Android instrumentation tests and the debug APK build; the `sb-debug-apk` artifact was uploaded. This proves the CI path for this commit, not production readiness.
 
 ### P1 — Security and reliability
 
@@ -62,7 +62,7 @@ This is a source-code audit, not a production security certification or a succes
 
 ## Immediate next implementation task
 
-Start with P0 items 1–4: migration/data-preservation tests and CI test gates. Keep Shizuku optional and out of the critical trading-platform path. Do not add another broker or expose the embedded server to the network during this phase.
+Continue P0 work with database maintenance lifecycle and backup/restore safety. The current CI gate is green for PR #4. Keep Shizuku optional and out of the critical trading-platform path. Do not add another broker or expose the embedded server to the network during this phase.
 
 
 ## Follow-up audit: database backup/restore lifecycle (2026-11-10)
@@ -88,3 +88,19 @@ The backup/restore call path was traced through `DatabaseBackup`, the primary si
 6. Add instrumented tests for a valid round-trip, corrupt/empty/incompatible backup rejection, failed replacement rollback, and existing-data preservation. Tests must use isolated test databases and must never touch a user's installed-app database.
 
 **Current decision:** do not patch the live restore path until the service/database maintenance lifecycle and connection ownership are implemented and tested. A superficial `close()` plus file copy would leave a data-loss race.
+
+
+### Additional lifecycle findings (verified after the CI #15 success)
+
+- The repository contains a second, instance-based `com.sb.backend.services.BackendManager` in addition to the primary singleton `com.sb.backend.core.BackendManager`. The second manager owns another `BackendDatabase`/helper and its own repositories; ownership and active call sites must be resolved before a maintenance coordinator can claim all connections are closed.
+- `KotakSessionCoordinator` has asynchronous feed disconnect and historical-import executors. Its current `disconnectFeed()` schedules closure asynchronously; it is not a synchronous drain/stop barrier. The coordinator also has long-running historical import work that can write to the same database.
+- `MarketForegroundService.onDestroy()` stops the embedded API server and resets its runtime flag, but does not stop the singleton backend or Kotak coordinator. Service destruction therefore cannot currently be treated as proof that all database writers have stopped.
+- The main Settings screen currently has no user-facing database restore workflow. The restore method exists in the core manager, but the UI call path must be traced before enabling it for users.
+
+### Next implementation sequence
+
+1. Map all constructors and call sites for both backend managers, all database helpers, and every long-running database writer.
+2. Add a single maintenance state/gate that prevents new DB tasks from being scheduled while maintenance is active.
+3. Add synchronous stop/drain operations for market feed, historical imports, API server and backend workers; await worker termination before closing helpers.
+4. Only then implement staged backup/restore with SQLite integrity/schema validation and rollback protection.
+5. Add isolated instrumentation tests for backup/restore and service quiescence. Do not test against or overwrite an installed user's database.
