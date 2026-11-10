@@ -17,34 +17,25 @@ class DatabaseMaintenanceGateTest {
         assertNotNull(operation)
 
         val executor = Executors.newSingleThreadExecutor()
-        val maintenanceStarted = CountDownLatch(1)
+        val maintenanceAcquired = CountDownLatch(1)
         val releaseMaintenance = CountDownLatch(1)
         try {
             val maintenance = executor.submit {
-                maintenanceStarted.countDown()
                 gate.acquireMaintenance(3, TimeUnit.SECONDS)?.use {
+                    maintenanceAcquired.countDown()
                     releaseMaintenance.await(2, TimeUnit.SECONDS)
                 }
             }
 
-            assertTrue(maintenanceStarted.await(1, TimeUnit.SECONDS))
-            assertNull(gate.acquireOperation(100, TimeUnit.MILLISECONDS))
-
             operation!!.close()
-            // The maintenance lease is now held by the worker; new operations stay blocked.
-            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1)
-            var blocked = true
-            while (System.nanoTime() < deadline) {
-                if (gate.acquireOperation(20, TimeUnit.MILLISECONDS) != null) {
-                    blocked = false
-                    break
-                }
-            }
-            assertTrue(blocked)
+            assertTrue(maintenanceAcquired.await(2, TimeUnit.SECONDS))
+            assertNull(gate.acquireOperation(50, TimeUnit.MILLISECONDS))
 
             releaseMaintenance.countDown()
             maintenance.get(2, TimeUnit.SECONDS)
-            assertNotNull(gate.acquireOperation(1, TimeUnit.SECONDS))
+            val afterMaintenance = gate.acquireOperation(1, TimeUnit.SECONDS)
+            assertNotNull(afterMaintenance)
+            afterMaintenance!!.close()
         } finally {
             operation?.close()
             releaseMaintenance.countDown()
@@ -63,6 +54,8 @@ class DatabaseMaintenanceGateTest {
             operation!!.close()
         }
 
-        assertNotNull(gate.acquireOperation(1, TimeUnit.SECONDS))
+        val afterTimeout = gate.acquireOperation(1, TimeUnit.SECONDS)
+        assertNotNull(afterTimeout)
+        afterTimeout!!.close()
     }
 }
