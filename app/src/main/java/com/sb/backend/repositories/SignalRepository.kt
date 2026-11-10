@@ -67,6 +67,7 @@ class SignalRepository(
     }
 
     fun getActive(limit: Int = 100): List<TradingSignal> {
+        return maintenanceGate.withOperation {
         val now = System.currentTimeMillis()
 
         return query(
@@ -78,10 +79,15 @@ class SignalRepository(
             ),
             limit
         )
+    
+        }
     }
 
     fun getAll(limit: Int = 200): List<TradingSignal> {
+        return maintenanceGate.withOperation {
         return query(null, null, limit)
+    
+        }
     }
 
     fun getByStatus(
