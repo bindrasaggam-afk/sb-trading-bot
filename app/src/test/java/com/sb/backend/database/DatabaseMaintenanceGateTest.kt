@@ -44,6 +44,34 @@ class DatabaseMaintenanceGateTest {
     }
 
     @Test
+    fun scopedOperationAndMaintenanceHelpersRunTheirBlocks() {
+        val gate = DatabaseMaintenanceGate()
+        var operationRan = false
+        var maintenanceRan = false
+
+        gate.withOperation { operationRan = true }
+        gate.withMaintenance { maintenanceRan = true }
+
+        assertTrue(operationRan)
+        assertTrue(maintenanceRan)
+    }
+
+    @Test
+    fun operationFailsFastWhenMaintenanceIsHeld() {
+        val gate = DatabaseMaintenanceGate()
+        gate.withMaintenance {
+            try {
+                gate.withOperation(timeout = 1, unit = TimeUnit.MILLISECONDS) {
+                    throw AssertionError("Operation must not enter during maintenance")
+                }
+            } catch (expected: DatabaseMaintenanceTimeoutException) {
+                assertTrue(expected.message!!.contains("maintenance"))
+                return@withMaintenance
+            }
+            throw AssertionError("Expected maintenance timeout")
+        }
+    }
+    @Test
     fun maintenanceTimeoutReopensAdmission() {
         val gate = DatabaseMaintenanceGate()
         val operation = gate.acquireOperation(1, TimeUnit.SECONDS)
