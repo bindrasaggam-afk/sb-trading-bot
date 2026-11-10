@@ -10,6 +10,10 @@ import java.util.concurrent.locks.ReentrantLock
  * Maintenance is safe only after all relevant call sites have adopted this gate.
  */
 class DatabaseMaintenanceGate {
+    companion object {
+        const val DEFAULT_TIMEOUT_SECONDS = 10L
+    }
+
     private val lock = ReentrantLock(true)
     private val changed = lock.newCondition()
     private var maintenanceRequested = false
@@ -66,6 +70,31 @@ class DatabaseMaintenanceGate {
         }
     }
 
+    /** Runs a complete database operation while holding an operation lease. */
+    fun <T> withOperation(
+        timeout: Long = DEFAULT_TIMEOUT_SECONDS,
+        unit: TimeUnit = TimeUnit.SECONDS,
+        operation: () -> T
+    ): T {
+        val lease = acquireOperation(timeout, unit)
+            ?: throw DatabaseMaintenanceTimeoutException(
+                "Database is temporarily unavailable for maintenance."
+            )
+        return lease.use { operation() }
+    }
+
+    /** Runs exclusive maintenance after all admitted operations have drained. */
+    fun <T> withMaintenance(
+        timeout: Long = DEFAULT_TIMEOUT_SECONDS,
+        unit: TimeUnit = TimeUnit.SECONDS,
+        maintenance: () -> T
+    ): T {
+        val lease = acquireMaintenance(timeout, unit)
+            ?: throw DatabaseMaintenanceTimeoutException(
+                "Timed out waiting for active database operations to finish."
+            )
+        return lease.use { maintenance() }
+    }
     private fun releaseOperation() {
         lock.lock()
         try {
@@ -108,3 +137,7 @@ class DatabaseMaintenanceGate {
         }
     }
 }
+
+/** Raised when an operation cannot enter the database maintenance gate in time. */
+class DatabaseMaintenanceTimeoutException(message: String) :
+    IllegalStateException(message)
