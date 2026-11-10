@@ -9,13 +9,15 @@ import com.sb.EquityStockMaster
 import com.sb.MCXStockMaster
 import com.sb.NseEtfStockMaster
 import com.sb.backend.database.SBDatabaseHelper
+import com.sb.backend.database.DatabaseMaintenanceGate
 import com.sb.backend.models.Instrument
 import com.sb.backend.services.KotakKnownTokenMaster
 import com.sb.backend.services.KotakScripToken
 import java.util.Locale
 
 class InstrumentRepository(
-    private val databaseHelper: SBDatabaseHelper
+    private val databaseHelper: SBDatabaseHelper,
+    private val maintenanceGate: DatabaseMaintenanceGate = DatabaseMaintenanceGate.shared
 ) {
 
     // ------------------------------------------------------------
@@ -23,15 +25,19 @@ class InstrumentRepository(
     // ------------------------------------------------------------
 
     fun save(instrument: Instrument): Long {
+        return maintenanceGate.withOperation {
         if (!isValid(instrument)) return -1L
 
         return upsertPreservingId(
             databaseHelper.writableDatabase,
             instrument
         )
+    
+        }
     }
 
     fun saveAll(instruments: List<Instrument>): Int {
+        return maintenanceGate.withOperation {
         if (instruments.isEmpty()) return 0
 
         val db = databaseHelper.writableDatabase
@@ -53,6 +59,8 @@ class InstrumentRepository(
         }
 
         return saved
+    
+        }
     }
 
     /**
@@ -134,6 +142,7 @@ class InstrumentRepository(
      * Existing row IDs are preserved during updates.
      */
     fun upsertMcxContracts(contracts: List<Instrument>): Int {
+        return maintenanceGate.withOperation {
         if (contracts.isEmpty()) return 0
 
         val db = databaseHelper.writableDatabase
@@ -189,6 +198,8 @@ class InstrumentRepository(
         }
 
         return saved
+    
+        }
     }
 
     // ------------------------------------------------------------
@@ -198,6 +209,7 @@ class InstrumentRepository(
     fun getActiveMcxFutures(
         now: Long = System.currentTimeMillis()
     ): List<Instrument> {
+        return maintenanceGate.withOperation {
         val result = ArrayList<Instrument>()
 
         databaseHelper.readableDatabase.query(
@@ -218,11 +230,14 @@ class InstrumentRepository(
         }
 
         return result
+    
+        }
     }
 
     fun countActiveMcxFutures(
         now: Long = System.currentTimeMillis()
     ): Int {
+        return maintenanceGate.withOperation {
         databaseHelper.readableDatabase.rawQuery(
             "SELECT COUNT(*) FROM ${SBDatabaseHelper.TABLE_INSTRUMENTS} " +
                 "WHERE exchange = 'MCX' AND segment = 'COMMODITY' " +
@@ -233,11 +248,14 @@ class InstrumentRepository(
         ).use { cursor ->
             return if (cursor.moveToFirst()) cursor.getInt(0) else 0
         }
+    
+        }
     }
 
     fun deactivateExpiredMcxContracts(
         now: Long = System.currentTimeMillis()
     ): Int {
+        return maintenanceGate.withOperation {
         val values = ContentValues().apply {
             put("is_active", 0)
         }
@@ -250,6 +268,8 @@ class InstrumentRepository(
                 "AND expiry_millis IS NOT NULL AND expiry_millis <= ?",
             arrayOf(now.toString())
         )
+    
+        }
     }
 
     /**
@@ -261,6 +281,7 @@ class InstrumentRepository(
     fun deactivateMcxFuturesNotIn(
         symbols: Collection<String>
     ): Int {
+        return maintenanceGate.withOperation {
         val activeSymbols = symbols
             .map { normalize(it) }
             .filter { it.isNotBlank() }
@@ -283,6 +304,8 @@ class InstrumentRepository(
                 "AND UPPER(symbol) NOT IN ($placeholders)",
             activeSymbols.toTypedArray()
         )
+    
+        }
     }
 
     // ------------------------------------------------------------
@@ -293,6 +316,7 @@ class InstrumentRepository(
         symbol: String,
         exchange: String? = null
     ): Instrument? {
+        return maintenanceGate.withOperation {
         val normalized = normalize(symbol)
         if (normalized.isBlank()) return null
 
@@ -326,6 +350,8 @@ class InstrumentRepository(
                 null
             }
         }
+    
+        }
     }
 
     // ------------------------------------------------------------
@@ -338,6 +364,7 @@ class InstrumentRepository(
         segment: String? = null,
         limit: Int = 100
     ): List<Instrument> {
+        return maintenanceGate.withOperation {
         val text = query.trim()
         val safeLimit = limit.coerceIn(1, 500)
 
@@ -405,6 +432,8 @@ class InstrumentRepository(
         }
 
         return result
+    
+        }
     }
 
     // ------------------------------------------------------------
@@ -416,6 +445,7 @@ class InstrumentRepository(
         exchange: String? = null,
         limit: Int = 500
     ): List<Instrument> {
+        return maintenanceGate.withOperation {
         val normalizedSegment = normalize(segment)
         if (normalizedSegment.isBlank()) return emptyList()
 
@@ -450,6 +480,8 @@ class InstrumentRepository(
         }
 
         return result
+    
+        }
     }
 
     // ------------------------------------------------------------
@@ -505,11 +537,14 @@ class InstrumentRepository(
     }
 
     fun count(): Int {
+        return maintenanceGate.withOperation {
         databaseHelper.readableDatabase.rawQuery(
             "SELECT COUNT(*) FROM ${SBDatabaseHelper.TABLE_INSTRUMENTS}",
             null
         ).use { cursor ->
             return if (cursor.moveToFirst()) cursor.getInt(0) else 0
+        }
+    
         }
     }
 
@@ -518,6 +553,7 @@ class InstrumentRepository(
     // ------------------------------------------------------------
 
     fun backfillKnownTokens(): Int {
+        return maintenanceGate.withOperation {
         val db = databaseHelper.writableDatabase
         var updated = 0
 
@@ -560,6 +596,8 @@ class InstrumentRepository(
         }
 
         return updated
+    
+        }
     }
 
     // ------------------------------------------------------------
@@ -569,6 +607,7 @@ class InstrumentRepository(
     fun applyKotakScripTokens(
         tokens: List<KotakScripToken>
     ): Int {
+        return maintenanceGate.withOperation {
         if (tokens.isEmpty()) return 0
 
         val db = databaseHelper.writableDatabase
@@ -626,6 +665,8 @@ class InstrumentRepository(
         }
 
         return updated
+    
+        }
     }
 
     // ------------------------------------------------------------
@@ -633,11 +674,14 @@ class InstrumentRepository(
     // ------------------------------------------------------------
 
     fun deleteAll(): Int {
+        return maintenanceGate.withOperation {
         return databaseHelper.writableDatabase.delete(
             SBDatabaseHelper.TABLE_INSTRUMENTS,
             null,
             null
         )
+    
+        }
     }
 
     // ------------------------------------------------------------
@@ -645,6 +689,7 @@ class InstrumentRepository(
     // ------------------------------------------------------------
 
     fun seedBuiltInMasters(): Int {
+        return maintenanceGate.withOperation {
         val db = databaseHelper.writableDatabase
         var inserted = 0
 
@@ -668,6 +713,8 @@ class InstrumentRepository(
         }
 
         return inserted
+    
+        }
     }
 
     private fun insertEquities(
