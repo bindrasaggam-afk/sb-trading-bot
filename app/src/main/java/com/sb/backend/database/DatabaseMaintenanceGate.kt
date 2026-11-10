@@ -19,7 +19,9 @@ class DatabaseMaintenanceGate {
     private val changed = lock.newCondition()
     private var maintenanceRequested = false
     private var activeOperations = 0
-    private val operationDepth = ThreadLocal.withInitial { 0 }
+    private val operationDepth = object : ThreadLocal<Int>() {
+        override fun initialValue(): Int = 0
+    }
 
     fun acquireOperation(timeout: Long, unit: TimeUnit): OperationLease? {
         val depth = operationDepth.get()
