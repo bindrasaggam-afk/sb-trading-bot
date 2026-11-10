@@ -1,7 +1,7 @@
 # SB Platform Audit and Hardening Roadmap
 
 Audit date: 2026-11-10
-Audited branch: `feature/shizuku-integration`
+Audited branch: `feature/platform-hardening`
 Repository: `bindrasaggam-afk/sb-trading-bot`
 
 ## Executive summary
@@ -19,7 +19,7 @@ This is a source-code audit, not a production security certification or a succes
 - SQLite database with schema creation, versioned upgrade logic, indexes and candle validation triggers.
 - Local database backup/restore helpers and diagnostic/repair endpoints.
 - A small set of JVM unit tests for candle aggregation, market models, repository timeframe handling, Kotak binary parsing and indicator calculations.
-- GitHub Actions workflow that currently builds a debug APK.
+- GitHub Actions workflow for JVM unit tests, Android instrumentation tests and debug APK build (latest run still in progress at time of this update).
 
 ## Prioritized problem list
 
@@ -28,7 +28,7 @@ This is a source-code audit, not a production security certification or a succes
 1. **Database migration verification is incomplete.** Existing migration code is present, but current tests do not demonstrate upgrade from every supported historical schema, preservation of representative user/trading data, rollback on failure, or backup/restore integrity.
 2. **Two backend schema/version concepts need one source of truth.** `SBDatabaseHelper` and `BackendMigration` both expose version 5 while `BackendSchema` has a separate version 1. Define one documented migration path and eliminate drift.
 3. **Backup/restore needs safety guarantees.** Verify WAL checkpointing, atomic restore, integrity checks, recovery after interrupted copy, and preservation of the previous database before replacing it. Never run destructive repair automatically.
-4. **Test automation is incomplete.** Current CI runs `:app:assembleDebug` and uploads an APK; it does not run JVM unit tests or Android instrumentation tests.
+4. **Test automation must be proven green.** A new CI workflow now runs JVM unit tests, Android instrumentation tests and a debug APK build. JVM tests have passed in the latest observed run; instrumentation tests and APK build are not yet confirmed.
 
 ### P1 — Security and reliability
 
@@ -63,3 +63,28 @@ This is a source-code audit, not a production security certification or a succes
 ## Immediate next implementation task
 
 Start with P0 items 1–4: migration/data-preservation tests and CI test gates. Keep Shizuku optional and out of the critical trading-platform path. Do not add another broker or expose the embedded server to the network during this phase.
+
+
+## Follow-up audit: database backup/restore lifecycle (2026-11-10)
+
+The backup/restore call path was traced through `DatabaseBackup`, the primary singleton `com.sb.backend.core.BackendManager`, `MarketForegroundService`, and the database helper.
+
+### Confirmed implementation risks
+
+- `DatabaseBackup.backup()` issues `PRAGMA wal_checkpoint(FULL)` but reads only the first result column and ignores the busy/log/checkpointed counts. It then copies the main database file without coordinating all writers.
+- `DatabaseBackup.restore()` copies the supplied file directly over the live database path, then deletes WAL/SHM/journal sidecars. It does not validate SQLite integrity or schema compatibility, stage a temporary file, atomically replace the live file, or retain a rollback snapshot.
+- The primary `BackendManager.restore()` closes its helper and then calls `DatabaseBackup(context)`; this is not a complete quiescence protocol. The backend executor, foreground market service, local API server, and Kotak session/feed have separate lifecycles.
+- `BackendManager.stop()` shuts down its executor but does not await termination and does not itself stop the foreground service/API server or Kotak session/feed. Therefore it is not currently a proven safe precondition for replacing the database file.
+- The application exposes the singleton helper to repositories. There is no single database maintenance gate that blocks new reads/writes while backup/restore is in progress.
+- No backup/restore instrumented tests currently prove valid restore, corrupt-file rejection, rollback, WAL consistency, or preservation of the current database on failure.
+
+### Safe implementation gate (do not bypass)
+
+1. Introduce an explicit maintenance lifecycle owned by the foreground service: reject new database work, stop feed/API writers, drain/await worker tasks, then close every database connection.
+2. Create backup only after a successful WAL checkpoint with a non-busy result; validate the copied candidate with SQLite integrity and expected schema/version checks.
+3. Restore only from an app-controlled candidate file: validate before touching the live database, copy to a same-filesystem temporary file, flush it, and verify integrity/schema again.
+4. Preserve the current database as a rollback snapshot; perform replacement only while all connections are closed. On any failure, restore the previous file before reopening services.
+5. Reopen the database, verify core tables and representative data, then restart services/feed only after validation succeeds.
+6. Add instrumented tests for a valid round-trip, corrupt/empty/incompatible backup rejection, failed replacement rollback, and existing-data preservation. Tests must use isolated test databases and must never touch a user's installed-app database.
+
+**Current decision:** do not patch the live restore path until the service/database maintenance lifecycle and connection ownership are implemented and tested. A superficial `close()` plus file copy would leave a data-loss race.
