@@ -511,6 +511,135 @@ object KotakSessionCoordinator {
         }
     }
 
+    private val monthlyRebuildLock = Any()
+
+    @Volatile
+    private var monthlyRebuildRunning = false
+
+    @Volatile
+    private var monthlyRebuildTotal = 0
+
+    @Volatile
+    private var monthlyRebuildCompleted = 0
+
+    @Volatile
+    private var monthlyRebuildCandlesSaved = 0L
+
+    @Volatile
+    private var monthlyRebuildErrors = 0
+
+    @Volatile
+    private var monthlyRebuildLastError = ""
+
+    /**
+     * Rebuilds 1M candles only from already persisted 1D candles.
+     * This operation never calls Kotak APIs and never deletes existing rows.
+     */
+    fun startMonthlyCandleRebuild(): JSONObject {
+        synchronized(monthlyRebuildLock) {
+            if (monthlyRebuildRunning) {
+                return monthlyCandleRebuildSnapshot().put("already_running", true)
+            }
+
+            val context = appContext
+                ?: return JSONObject().put("status", "blocked")
+                    .put("message", "Backend session is not initialized")
+
+            BackendManager.initialize(context)
+            val candidates = BackendManager.instruments()
+                .getActiveWithTokens(5000)
+                .filter { instrument ->
+                    val exchange = instrument.exchange.uppercase()
+                    val segment = instrument.segment.uppercase()
+                    val type = instrument.instrumentType.uppercase()
+                    (exchange == "NSE" || exchange == "BSE") &&
+                        (segment in setOf("EQ", "ETF", "EQUITY")) &&
+                        (type in setOf("EQ", "ETF"))
+                }
+                .distinctBy { "${it.exchange}:${it.symbol}" }
+
+            monthlyRebuildRunning = true
+            monthlyRebuildTotal = candidates.size
+            monthlyRebuildCompleted = 0
+            monthlyRebuildCandlesSaved = 0L
+            monthlyRebuildErrors = 0
+            monthlyRebuildLastError = ""
+
+            historicalExecutor.execute {
+                val market = BackendManager.market()
+                candidates.forEach { instrument ->
+                    try {
+                        val dailyCandles = market.getCandles(
+                            symbol = instrument.symbol,
+                            timeframe = "1D",
+                            exchange = instrument.exchange,
+                            limit = 5000
+                        )
+
+                        if (dailyCandles.isNotEmpty()) {
+                            val monthlyCandles = dailyCandles
+                                .groupBy { candle ->
+                                    TimeframeBuckets.bucketStart(
+                                        candle.timestamp,
+                                        "1M",
+                                        instrument.exchange
+                                    )
+                                }
+                                .toSortedMap()
+                                .map { (monthStart, rows) ->
+                                    val ordered = rows.sortedBy { it.timestamp }
+                                    Candle(
+                                        symbol = instrument.symbol,
+                                        timeframe = "1M",
+                                        timestamp = monthStart,
+                                        open = ordered.first().open,
+                                        high = ordered.maxOf { it.high },
+                                        low = ordered.minOf { it.low },
+                                        close = ordered.last().close,
+                                        volume = ordered.sumOf { it.volume }
+                                    )
+                                }
+
+                            monthlyRebuildCandlesSaved += market.saveCandles(
+                                symbol = instrument.symbol,
+                                exchange = instrument.exchange,
+                                timeframe = "1M",
+                                candles = monthlyCandles
+                            )
+                        }
+                    } catch (error: Exception) {
+                        monthlyRebuildErrors++
+                        monthlyRebuildLastError =
+                            "${instrument.exchange}:${instrument.symbol}: ${error.message ?: "unknown error"}".take(500)
+                    } finally {
+                        monthlyRebuildCompleted++
+                    }
+                }
+                monthlyRebuildRunning = false
+            }
+
+            return monthlyCandleRebuildSnapshot().put("started", true)
+        }
+    }
+
+    fun monthlyCandleRebuildSnapshot(): JSONObject = JSONObject()
+        .put("status", when {
+            monthlyRebuildRunning -> "running"
+            monthlyRebuildTotal == 0 -> "not_started"
+            monthlyRebuildErrors > 0 -> "completed_with_errors"
+            else -> "completed"
+        })
+        .put("running", monthlyRebuildRunning)
+        .put("source_timeframe", "1D")
+        .put("target_timeframe", "1M")
+        .put("source", "local database only; no Kotak API calls")
+        .put("total_instruments", monthlyRebuildTotal)
+        .put("completed_instruments", monthlyRebuildCompleted)
+        .put("remaining_instruments", (monthlyRebuildTotal - monthlyRebuildCompleted).coerceAtLeast(0))
+        .put("monthly_candles_saved", monthlyRebuildCandlesSaved)
+        .put("instrument_errors", monthlyRebuildErrors)
+        .put("last_error", monthlyRebuildLastError)
+
     fun historicalImportSnapshot(): JSONObject = JSONObject()
         .put("status", historicalImportStatus)
         .put("running", historicalImportRunning)
