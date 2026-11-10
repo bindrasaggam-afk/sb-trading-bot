@@ -348,11 +348,7 @@ class KotakNeoMarketDataService(
             set(Calendar.MILLISECOND, 0)
         }
 
-        val collected = ArrayList<Candle>()
-        // The API is queried newest-to-oldest. Empty chunks are only valid
-        // at the oldest end of history (before listing). Once an empty chunk
-        // is seen, any candles in an older chunk prove there was a data gap.
-        var emptyOlderChunkSeen = false
+        val chunkCollector = HistoricalChunkCollector()
         var remainingDays = lookback
         while (remainingDays > 0) {
             val chunkDays = minOf(range.maxDays, remainingDays)
@@ -376,16 +372,7 @@ class KotakNeoMarketDataService(
                     instrument,
                     timeframe
                 )
-                if (chunkCandles.isEmpty()) {
-                    emptyOlderChunkSeen = true
-                } else {
-                    if (emptyOlderChunkSeen) {
-                        throw Exception(
-                            "Historical data gap: candles returned in an older chunk after an empty newer chunk"
-                        )
-                    }
-                    collected.addAll(chunkCandles)
-                }
+                chunkCollector.addChunk(chunkCandles)
             } catch (e: Exception) {
                 throw Exception(
                     "Historical chunk failed for ${instrument.exchange}:${instrument.symbol} " +
@@ -398,6 +385,7 @@ class KotakNeoMarketDataService(
             anchor.add(Calendar.DAY_OF_YEAR, -1)
         }
 
+        val collected = chunkCollector.candles()
         if (collected.isEmpty()) {
             throw Exception(
                 "No historical candles returned for ${instrument.exchange}:${instrument.symbol}; nothing was saved"
