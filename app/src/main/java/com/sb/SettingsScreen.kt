@@ -92,6 +92,36 @@ class SettingsScreen(private val context: Context) {
         label(body, "Settings", 19f, white, true)
         label(body, "Kotak Neo Broker Configuration", 11f, grey)
 
+        label(body, "Android Shell (Shizuku)", 16f, yellow, true)
+        val shizukuStatus = TextView(context).apply {
+            text = "Not connected"
+            textSize = 12f
+            setTextColor(grey)
+            setPadding(0, dp(4), 0, dp(8))
+        }
+        body.addView(shizukuStatus)
+
+        body.addView(actionButton("Connect Shizuku") {
+            val activity = context as? android.app.Activity
+            if (activity == null) {
+                shizukuStatus.text = "Open Settings from the SB app"
+            } else {
+                com.sb.ShizukuShellBridge.connect(activity) { message ->
+                    android.os.Handler(context.mainLooper).post {
+                        shizukuStatus.text = message
+                    }
+                }
+            }
+        })
+
+        body.addView(actionButton("Test Shell (id)") {
+            com.sb.ShizukuShellBridge.execute("id") { result ->
+                android.os.Handler(context.mainLooper).post {
+                    shizukuStatus.text = result
+                }
+            }
+        })
+
         label(body, "API Access Token", 12f, yellow, true)
         val tokenInput = input(
             "Kotak Neo API Access Token",
