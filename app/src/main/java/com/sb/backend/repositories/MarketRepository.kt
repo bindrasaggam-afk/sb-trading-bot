@@ -230,6 +230,7 @@ class MarketRepository(
     }
 
     fun retryPendingQuotes(limit: Int = 100): Int {
+        return maintenanceGate.withOperation {
         val db = databaseHelper.writableDatabase
         val safeLimit = limit.coerceIn(1, 500)
 
@@ -366,6 +367,8 @@ class MarketRepository(
         }
 
         return recovered
+    
+        }
     }
 
     private fun updateRetryFailure(
