@@ -20,6 +20,8 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        env:
+          SKIP_JDK_VERSION_CHECK: 'true'
 
       - name: Install Android SDK packages
         run: sdkmanager "platforms;android-29" "build-tools;29.0.3"
