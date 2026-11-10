@@ -3,8 +3,10 @@
 buildscript {
     ext.kotlin_version = "1.5.31"
     repositories {
-        //google()
-        //jcenter()
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+        // Mirrors are fallback-only; the primary repositories above are authoritative.
         maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
         maven { url 'https://maven.aliyun.com/repository/public/' }
         maven { url 'https://maven.aliyun.com/repository/google' }
@@ -20,11 +22,12 @@ buildscript {
 
 allprojects {
     repositories {
-        //google()
-        //jcenter()
-         maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
-         maven { url 'https://maven.aliyun.com/repository/public/' }
-         maven { url 'https://maven.aliyun.com/repository/google' }
+        google()
+        mavenCentral()
+        // Mirrors are fallback-only.
+        maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
+        maven { url 'https://maven.aliyun.com/repository/public/' }
+        maven { url 'https://maven.aliyun.com/repository/google' }
     }
 }
 
