@@ -6,6 +6,7 @@ import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.util.Log
 import com.sb.backend.database.SBDatabaseHelper
+import com.sb.backend.database.DatabaseMaintenanceGate
 import com.sb.backend.market.model.MarketTick
 import com.sb.backend.models.Candle
 import com.sb.backend.models.Quote
@@ -18,7 +19,8 @@ import java.util.Locale
 internal fun normalizeCandleTimeframe(value: String): String = value.trim()
 
 class MarketRepository(
-    private val databaseHelper: SBDatabaseHelper
+    private val databaseHelper: SBDatabaseHelper,
+    private val maintenanceGate: DatabaseMaintenanceGate = DatabaseMaintenanceGate.shared
 ) {
 
     data class QuoteBatchSaveResult(
@@ -43,6 +45,7 @@ class MarketRepository(
     // ---------------------------------------------------------
 
     fun saveQuote(quote: Quote): Boolean {
+        return maintenanceGate.withOperation {
         if (!isValidQuote(quote)) return false
 
         return try {
@@ -56,9 +59,12 @@ class MarketRepository(
             Log.e("MarketRepository", "Quote save failed", e)
             false
         }
+    
+        }
     }
 
     fun saveQuotes(quotes: List<Quote>): Int {
+        return maintenanceGate.withOperation {
         if (quotes.isEmpty()) return 0
 
         val db = databaseHelper.writableDatabase
@@ -92,11 +98,14 @@ class MarketRepository(
         }
 
         return saved
+    
+        }
     }
 
     fun saveQuotesDetailed(
         quotes: List<Quote>
     ): QuoteBatchSaveResult {
+        return maintenanceGate.withOperation {
         if (quotes.isEmpty()) {
             return QuoteBatchSaveResult(0, 0, 0, 0)
         }
@@ -144,6 +153,8 @@ class MarketRepository(
             rejected = rejected,
             failed = failed
         )
+    
+        }
     }
 
     // ---------------------------------------------------------
@@ -154,6 +165,7 @@ class MarketRepository(
         quote: Quote,
         error: String
     ): Boolean {
+        return maintenanceGate.withOperation {
         if (!isValidQuote(quote)) return false
 
         val db = databaseHelper.writableDatabase
@@ -212,6 +224,8 @@ class MarketRepository(
             false
         } finally {
             if (db.inTransaction()) db.endTransaction()
+        }
+    
         }
     }
 
@@ -389,6 +403,7 @@ class MarketRepository(
     // ---------------------------------------------------------
 
     fun saveRawTick(tick: MarketTick): Boolean {
+        return maintenanceGate.withOperation {
         if (!tick.isValid ||
             !tick.ltp.isFinite() ||
             tick.ltp <= 0.0 ||
@@ -435,9 +450,12 @@ class MarketRepository(
             )
             false
         }
+    
+        }
     }
 
     fun pruneRawTicks(olderThanTimestamp: Long): Int {
+        return maintenanceGate.withOperation {
         if (olderThanTimestamp <= 0L) return 0
 
         return try {
@@ -449,6 +467,8 @@ class MarketRepository(
         } catch (e: Exception) {
             Log.e("MarketRepository", "Raw tick prune failed", e)
             0
+        }
+    
         }
     }
 
@@ -467,6 +487,7 @@ class MarketRepository(
         quoteSaved: Int = 0,
         saveFailed: Int = 0
     ): Boolean {
+        return maintenanceGate.withOperation {
         val normalizedExchange = normalize(exchange)
         val normalizedSymbol = normalize(symbol)
 
@@ -552,6 +573,8 @@ class MarketRepository(
         } finally {
             if (db.inTransaction()) db.endTransaction()
         }
+    
+        }
     }
 
     // ---------------------------------------------------------
@@ -562,6 +585,7 @@ class MarketRepository(
         symbol: String,
         exchange: String = "NSE"
     ): Quote? {
+        return maintenanceGate.withOperation {
         val normalizedSymbol = normalize(symbol)
         val normalizedExchange = normalize(exchange)
 
@@ -586,12 +610,15 @@ class MarketRepository(
             Log.e("MarketRepository", "Quote read failed", e)
             null
         }
+    
+        }
     }
 
     fun getQuotes(
         symbols: List<String>,
         exchange: String? = null
     ): List<Quote> {
+        return maintenanceGate.withOperation {
         val result = ArrayList<Quote>()
 
         symbols.forEach { symbol ->
@@ -605,6 +632,8 @@ class MarketRepository(
         }
 
         return result
+    
+        }
     }
 
     private fun getAnyExchangeQuote(symbol: String): Quote? {
@@ -640,6 +669,7 @@ class MarketRepository(
         timeframe: String,
         candles: List<Candle>
     ): Int {
+        return maintenanceGate.withOperation {
         val normalizedSymbol = normalize(symbol)
         val normalizedExchange = normalize(exchange)
         val normalizedTimeframe = normalizeCandleTimeframe(timeframe)
@@ -702,6 +732,8 @@ class MarketRepository(
         }
 
         return saved
+    
+        }
     }
 
     // ---------------------------------------------------------
@@ -714,6 +746,7 @@ class MarketRepository(
         exchange: String = "NSE",
         limit: Int = 500
     ): List<Candle> {
+        return maintenanceGate.withOperation {
         val normalizedSymbol = normalize(symbol)
         val normalizedExchange = normalize(exchange)
         val normalizedTimeframe = normalizeCandleTimeframe(timeframe)
@@ -752,6 +785,8 @@ class MarketRepository(
             Log.e("MarketRepository", "Candle read failed", e)
             emptyList()
         }
+    
+        }
     }
 
     fun getCandlesBetween(
@@ -762,6 +797,7 @@ class MarketRepository(
         exchange: String = "NSE",
         limit: Int = 5000
     ): List<Candle> {
+        return maintenanceGate.withOperation {
         val normalizedSymbol = normalize(symbol)
         val normalizedExchange = normalize(exchange)
         val normalizedTimeframe = normalizeCandleTimeframe(timeframe)
@@ -805,6 +841,8 @@ class MarketRepository(
             Log.e("MarketRepository", "Candle range read failed", e)
             emptyList()
         }
+    
+        }
     }
 
     fun latestCandle(
@@ -812,6 +850,7 @@ class MarketRepository(
         timeframe: String,
         exchange: String = "NSE"
     ): Candle? {
+        return maintenanceGate.withOperation {
         val normalizedSymbol = normalize(symbol)
         val normalizedExchange = normalize(exchange)
         val normalizedTimeframe = normalizeCandleTimeframe(timeframe)
@@ -845,6 +884,8 @@ class MarketRepository(
             Log.e("MarketRepository", "Latest candle read failed", e)
             null
         }
+    
+        }
     }
 
     fun countCandles(
@@ -852,6 +893,7 @@ class MarketRepository(
         timeframe: String,
         exchange: String = "NSE"
     ): Int {
+        return maintenanceGate.withOperation {
         val normalizedSymbol = normalize(symbol)
         val normalizedExchange = normalize(exchange)
         val normalizedTimeframe = normalizeCandleTimeframe(timeframe)
@@ -880,9 +922,12 @@ class MarketRepository(
             Log.e("MarketRepository", "Candle count failed", e)
             0
         }
+    
+        }
     }
 
     fun pruneCandles(olderThanTimestamp: Long): Int {
+        return maintenanceGate.withOperation {
         if (olderThanTimestamp <= 0L) return 0
 
         return try {
@@ -895,6 +940,8 @@ class MarketRepository(
             Log.e("MarketRepository", "Candle prune failed", e)
             0
         }
+    
+        }
     }
 
     fun deleteCandles(
@@ -902,6 +949,7 @@ class MarketRepository(
         timeframe: String,
         exchange: String = "NSE"
     ): Int {
+        return maintenanceGate.withOperation {
         val normalizedSymbol = normalize(symbol)
         val normalizedExchange = normalize(exchange)
         val normalizedTimeframe = normalizeCandleTimeframe(timeframe)
@@ -928,9 +976,12 @@ class MarketRepository(
             Log.e("MarketRepository", "Candle delete failed", e)
             0
         }
+    
+        }
     }
 
     fun clearQuotes(): Int {
+        return maintenanceGate.withOperation {
         return try {
             databaseHelper.writableDatabase.delete(
                 quotesTable,
@@ -941,9 +992,12 @@ class MarketRepository(
             Log.e("MarketRepository", "Clear quotes failed", e)
             0
         }
+    
+        }
     }
 
     fun clearCandles(): Int {
+        return maintenanceGate.withOperation {
         return try {
             databaseHelper.writableDatabase.delete(
                 candlesTable,
@@ -953,6 +1007,8 @@ class MarketRepository(
         } catch (e: Exception) {
             Log.e("MarketRepository", "Clear candles failed", e)
             0
+        }
+    
         }
     }
 
