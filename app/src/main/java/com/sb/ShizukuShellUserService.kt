@@ -7,14 +7,14 @@ class ShizukuShellUserService : IShizukuShellService.Stub() {
         require(command.isNotBlank() && command.length <= 2048) {
             "Command must be 1–2048 characters"
         }
-        val process = Runtime.getRuntime().exec(arrayOf("sh", "-c", command))
+        val process = ProcessBuilder("sh", "-c", command)
+            .redirectErrorStream(true)
+            .start()
         process.outputStream.close()
         val output = process.inputStream.bufferedReader().use { it.readText() }
-        val error = process.errorStream.bufferedReader().use { it.readText() }
         val exitCode = process.waitFor()
         return buildString {
             append(output)
-            if (error.isNotBlank()) append("\n").append(error)
             append("\n[exit ").append(exitCode).append("]")
         }
     }
