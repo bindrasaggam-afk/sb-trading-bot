@@ -489,6 +489,7 @@ class InstrumentRepository(
     // ------------------------------------------------------------
 
     fun getActive(limit: Int = 5000): List<Instrument> {
+        return maintenanceGate.withOperation {
         val result = ArrayList<Instrument>()
 
         databaseHelper.readableDatabase.query(
@@ -510,9 +511,12 @@ class InstrumentRepository(
         }
 
         return result
+    
+        }
     }
 
     fun getActiveWithTokens(limit: Int = 3000): List<Instrument> {
+        return maintenanceGate.withOperation {
         val result = ArrayList<Instrument>()
 
         databaseHelper.readableDatabase.query(
@@ -534,6 +538,8 @@ class InstrumentRepository(
         }
 
         return result
+    
+        }
     }
 
     fun count(): Int {
