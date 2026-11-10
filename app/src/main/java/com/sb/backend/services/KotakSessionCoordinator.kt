@@ -487,11 +487,6 @@ object KotakSessionCoordinator {
                                     )
                                 }
                             if (monthlyCandles.isNotEmpty()) {
-                                market.deleteCandles(
-                                    symbol = instrument.symbol,
-                                    timeframe = "1M",
-                                    exchange = instrument.exchange
-                                )
                                 historicalImportMonthlyCandlesSaved += market.saveCandles(
                                     symbol = instrument.symbol,
                                     exchange = instrument.exchange,
