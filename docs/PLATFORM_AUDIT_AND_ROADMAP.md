@@ -104,3 +104,23 @@ The backup/restore call path was traced through `DatabaseBackup`, the primary si
 3. Add synchronous stop/drain operations for market feed, historical imports, API server and backend workers; await worker termination before closing helpers.
 4. Only then implement staged backup/restore with SQLite integrity/schema validation and rollback protection.
 5. Add isolated instrumentation tests for backup/restore and service quiescence. Do not test against or overwrite an installed user's database.
+
+
+### Database writer and ownership map (follow-up source trace, 2026-11-10)
+
+The following call paths were confirmed by reading the current branch source:
+
+| Component | Database access / writer path | Maintenance implication |
+|---|---|---|
+| `MarketForegroundService` | Initializes and starts the primary `com.sb.backend.core.BackendManager`; owns `EmbeddedApiServer` | Service is the natural lifecycle owner, but its current destroy path only stops the API server. |
+| Primary `core.BackendManager` | Owns one `SBDatabaseHelper`, repositories, a single-thread startup executor and `MarketDataService` | Exposes repositories/helper to callers; `stop()` calls executor shutdown without awaiting termination. |
+| `KotakSessionCoordinator` | Feed, scrip-master sync, equity/MCX historical imports use repositories from primary manager; has separate live-feed and historical executors | Feed disconnect is queued asynchronously; historical jobs have no public pause/drain barrier. |
+| `MarketDataService` | Own executor; saves quotes and candles through `MarketRepository` | `shutdown()` sets shutdown flag and calls executor shutdown, but does not await in-flight tasks. |
+| `EmbeddedApiServer` | Cached thread pool; API routes read DB and can start historical imports/migrations | `stop()` implementation and active-client draining must be verified; closing listener alone is not enough. |
+| `com.sb.backend.services.BackendManager` | Separate instance owns `BackendDatabase` and another `SBDatabaseHelper` | No active production call site was found in the specific app entry/settings/API files inspected; repository-wide reference search is still required before classifying it as dead code. |
+| `MainActivity` / `SettingsScreen` | Use the primary manager's repositories; activity intentionally does not stop persistent backend | UI lifecycle is not a safe database maintenance boundary. |
+| `McxBhavcopyHistoricalService` | Writes candles through `MarketRepository`; invoked by coordinator historical executor | Must be included in the historical-import drain barrier. |
+
+### Current safe boundary
+
+No database maintenance lock, shared admission gate, or synchronous drain protocol exists across these components. Do not implement file replacement yet. The next code change should introduce a narrowly scoped maintenance coordinator and explicit stop/drain contracts, with tests, rather than simply calling `close()` or shutting down executors. Before implementing it, finish repository-wide call-site search for the second manager and inspect the full API server stop path and all historical import entry points.
