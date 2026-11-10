@@ -145,3 +145,17 @@ No database maintenance lock, shared admission gate, or synchronous drain protoc
 7. Add deterministic tests for admission rejection, in-flight request draining, executor timeout/failure, service restart, and no DB access after maintenance begins.
 
 **Gate remains closed:** do not add a superficial restore patch or expose a restore UI until the above contracts and isolated tests exist.
+
+
+### Repository API surface inventory for maintenance-gate integration (2026-11-10)
+
+A source scan identified four primary SQLite repositories and their public database methods. The maintenance gate must cover both reads and writes so restore cannot replace the DB while any cursor/query remains active.
+
+- `InstrumentRepository`: 17 public DB methods, including save/upsert/deactivate/delete, token backfill, seed, search and lookup.
+- `MarketRepository`: 20 public DB methods, including quote/tick/candle writes, retry queues, pruning, audits and reads.
+- `PaperRepository`: 16 public DB methods, including account/order/position updates and P&L/margin reads.
+- `SignalRepository`: 15 public DB methods, including save/update/expire/delete and reads.
+- The API server also accesses `BackendManager.database()` directly in diagnostic/recovery endpoints, bypassing repository method boundaries. Those direct DB routes need their own operation leases.
+- Repository constructors currently receive `SBDatabaseHelper`; the gate is not injected into these repositories. Therefore the new gate is presently a tested coordination primitive, not an enforced database-wide lock.
+
+**Implementation decision:** do not claim integration by only exposing the gate from BackendManager. The next safe change is to add a shared database-access wrapper at the repository/helper boundary and explicitly wrap direct API database routes. Every method must release leases in `finally`/structured `use`, including nested repository calls (avoid double acquisition deadlocks by using a re-entrant operation context or keep the lease only at outer transaction boundaries). This needs focused tests for concurrent reads/writes and maintenance exclusion before backup/restore can consume the gate.
