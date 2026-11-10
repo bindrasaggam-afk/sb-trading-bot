@@ -6,6 +6,7 @@ import android.os.Looper
 import android.util.Log
 import com.sb.backend.core.BackendManager
 import com.sb.backend.market.MarketDataManager
+import com.sb.backend.market.TimeframeBuckets
 import com.sb.backend.models.Candle
 import com.sb.backend.security.KotakNeoSecureStore
 import java.util.concurrent.ExecutorService
@@ -380,6 +381,9 @@ object KotakSessionCoordinator {
     private var historicalImportCandlesSaved = 0L
 
     @Volatile
+    private var historicalImportMonthlyCandlesSaved = 0L
+
+    @Volatile
     private var historicalImportSkipped = 0
 
     @Volatile
@@ -431,6 +435,7 @@ object KotakSessionCoordinator {
             historicalImportTotal = candidates.size
             historicalImportCompleted = 0
             historicalImportCandlesSaved = 0L
+            historicalImportMonthlyCandlesSaved = 0L
             historicalImportSkipped = 0
             historicalImportErrors = 0
             historicalImportLastError = ""
@@ -448,7 +453,54 @@ object KotakSessionCoordinator {
                             years = 3
                         )
                         historicalImportCandlesSaved += saved.size
-                        if (saved.isEmpty()) historicalImportSkipped++
+
+                        // Rebuild calendar-month candles from persisted daily history.
+                        // Keep existing monthly rows untouched when no daily source exists.
+                        val market = BackendManager.market()
+                        val dailyCandles = market.getCandles(
+                            symbol = instrument.symbol,
+                            timeframe = "1D",
+                            exchange = instrument.exchange,
+                            limit = 5000
+                        )
+                        if (dailyCandles.isNotEmpty()) {
+                            val monthlyCandles = dailyCandles
+                                .groupBy { candle ->
+                                    TimeframeBuckets.bucketStart(
+                                        candle.timestamp,
+                                        "1M",
+                                        instrument.exchange
+                                    )
+                                }
+                                .toSortedMap()
+                                .map { (monthStart, rows) ->
+                                    val ordered = rows.sortedBy { it.timestamp }
+                                    Candle(
+                                        symbol = instrument.symbol,
+                                        timeframe = "1M",
+                                        timestamp = monthStart,
+                                        open = ordered.first().open,
+                                        high = ordered.maxOf { it.high },
+                                        low = ordered.minOf { it.low },
+                                        close = ordered.last().close,
+                                        volume = ordered.sumOf { it.volume }
+                                    )
+                                }
+                            if (monthlyCandles.isNotEmpty()) {
+                                market.deleteCandles(
+                                    symbol = instrument.symbol,
+                                    timeframe = "1M",
+                                    exchange = instrument.exchange
+                                )
+                                historicalImportMonthlyCandlesSaved += market.saveCandles(
+                                    symbol = instrument.symbol,
+                                    exchange = instrument.exchange,
+                                    timeframe = "1M",
+                                    candles = monthlyCandles
+                                )
+                            }
+                        }
+                        if (saved.isEmpty() && dailyCandles.isEmpty()) historicalImportSkipped++
                     } catch (error: Exception) {
                         historicalImportErrors++
                         historicalImportLastError =
@@ -476,6 +528,7 @@ object KotakSessionCoordinator {
         .put("completed_instruments", historicalImportCompleted)
         .put("remaining_instruments", (historicalImportTotal - historicalImportCompleted).coerceAtLeast(0))
         .put("saved_candles_reported", historicalImportCandlesSaved)
+        .put("monthly_candles_saved", historicalImportMonthlyCandlesSaved)
         .put("skipped_instruments", historicalImportSkipped)
         .put("instrument_errors", historicalImportErrors)
         .put("last_error", historicalImportLastError)
