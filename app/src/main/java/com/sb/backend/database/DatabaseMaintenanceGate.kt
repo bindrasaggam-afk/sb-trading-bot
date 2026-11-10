@@ -79,7 +79,7 @@ class DatabaseMaintenanceGate {
     }
 
     /** Runs a complete database operation while holding an operation lease. */
-    fun <T> withOperation(
+    inline fun <T> withOperation(
         timeout: Long = DEFAULT_TIMEOUT_SECONDS,
         unit: TimeUnit = TimeUnit.SECONDS,
         operation: () -> T
