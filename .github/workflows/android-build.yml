@@ -64,9 +64,7 @@ jobs:
           target: default
           arch: x86_64
           script: |
-            export JAVA_HOME="$JAVA_HOME_11_X64"
-            export PATH="$JAVA_HOME/bin:$PATH"
-            ./gradlew :app:connectedDebugAndroidTest --stacktrace
+            export JAVA_HOME="$JAVA_HOME_11_X64" && export PATH="$JAVA_HOME/bin:$PATH" && ./gradlew :app:connectedDebugAndroidTest --stacktrace
 
       - name: Set up Java 11 for APK build
         uses: actions/setup-java@v4
