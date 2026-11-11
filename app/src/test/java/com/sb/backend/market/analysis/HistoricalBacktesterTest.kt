@@ -82,4 +82,28 @@ class HistoricalBacktesterTest {
         assertEquals(0.0, report.coveragePct, 0.0001)
         assertEquals(0.0, report.winRatePct, 0.0001)
     }
+    @Test fun stopGapUsesWorseOpeningPriceInsteadOfUnreachableStop() {
+        val candles = listOf(
+            candle(0, 100.0, 101.0, 99.0, 100.0),
+            candle(1, 100.0, 102.0, 99.0, 101.0),
+            candle(2, 90.0, 94.0, 88.0, 92.0),
+            candle(3, 92.0, 93.0, 91.0, 92.0)
+        )
+        val report = HistoricalBacktester.evaluateOutOfSample(
+            candles = candles,
+            outOfSampleStartIndex = 1,
+            minimumHistory = 1,
+            config = HistoricalBacktester.Config(feeBpsPerSide = 0.0, slippageBpsPerSide = 0.0)
+        ) {
+            HistoricalBacktester.Candidate(
+                HistoricalBacktester.Direction.LONG,
+                stopLoss = 95.0,
+                target = 105.0
+            )
+        }
+
+        assertEquals(HistoricalBacktester.ExitReason.STOP_LOSS, report.trades.single().exitReason)
+        assertEquals(90.0, report.trades.single().exitPrice, 0.0001)
+    }
+
 }
