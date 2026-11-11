@@ -238,8 +238,23 @@ object MarketRuntimeService {
 
         targetTimeframes.forEach { timeframe ->
             val savedKey = "$id|${timeframe.label}"
-            val lastSaved = lastSavedTarget[savedKey] ?: 0L
             val interval = timeframe.seconds * 1_000L
+            val lastSaved = lastSavedTarget[savedKey] ?: run {
+                // Resume from the latest stored bucket instead of rewriting
+                // the full historical series after every app restart.
+                val latestStored = MarketFeedRepository.loadStoredCandles(
+                    key = key,
+                    timeframe = timeframe.label,
+                    limit = 1
+                ).lastOrNull()?.timestamp ?: 0L
+                val resumeAfter = if (latestStored > 0L) {
+                    (latestStored - interval).coerceAtLeast(0L)
+                } else {
+                    0L
+                }
+                lastSavedTarget.putIfAbsent(savedKey, resumeAfter)
+                lastSavedTarget[savedKey] ?: resumeAfter
+            }
 
             val closed = engine.candles(key, timeframe)
                 .filter { candle ->
