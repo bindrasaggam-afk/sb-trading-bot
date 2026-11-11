@@ -163,7 +163,7 @@ class CandleEngineTest {
         assertEquals(MarketTimeframe.MIN_5, MarketTimeframe.fromLabel("5m"))
         assertEquals(null, MarketTimeframe.fromLabel("5M"))
         assertEquals(MarketTimeframe.MONTH_1, MarketTimeframe.fromLabel("1M"))
-        assertEquals(null, MarketTimeframe.fromLabel("1m").takeIf { it == MarketTimeframe.MONTH_1 })
+        assertEquals(MarketTimeframe.MIN_1, MarketTimeframe.fromLabel("1m"))
     }
 
     @Test
