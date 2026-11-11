@@ -12,7 +12,6 @@ import com.sb.backend.market.model.MarketTick
 import com.sb.backend.market.model.MarketTimeframe
 import com.sb.backend.market.model.MarketUiState
 import com.sb.backend.market.repo.MarketFeedRepository
-import com.sb.backend.services.SignalScanCoordinator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -134,7 +133,6 @@ class InstrumentLiveViewModel(
         repository.subscribe(normalized)
         loadStoredCandles(normalized, timeframe.value, token)
         requestHistoricalCandles(normalized, timeframe.value, token)
-        SignalScanCoordinator.scan(normalized)
     }
 
     fun setTimeframe(label: String) {
@@ -233,13 +231,10 @@ class InstrumentLiveViewModel(
         }
 
         if (finalizedBase.isNotEmpty()) {
-            persist(key, MarketTimeframe.MIN_1.label, finalizedBase)
-            SignalScanCoordinator.scan(key)
         }
         val targetToPersist = finalizedTarget
         val targetLabel = finalizedTargetLabel
         if (targetToPersist != null && targetLabel != null) {
-            persist(key, targetLabel, listOf(targetToPersist))
         }
     }
 
@@ -430,21 +425,6 @@ class InstrumentLiveViewModel(
             ArrayList(result.subList(result.size - MAX_CANDLES, result.size))
         } else {
             result
-        }
-    }
-
-    private fun persist(
-        key: InstrumentKey,
-        label: String,
-        candles: List<MarketCandle>
-    ) {
-        val valid = candles
-            .map { normalizeCandle(it) }
-            .filter { isValidCandle(it) }
-        if (valid.isEmpty()) return
-
-        viewModelScope.launch(Dispatchers.IO) {
-            repository.saveCandles(key, label, valid)
         }
     }
 
