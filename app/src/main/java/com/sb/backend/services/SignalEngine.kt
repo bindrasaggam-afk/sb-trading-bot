@@ -341,6 +341,9 @@ class SignalEngine(
                 volume = candle.volume
             )
         }
+        val doji = patternWindow.lastOrNull()?.let {
+            CandlePatternAnalyzer.isDoji(it)
+        } ?: false
         val bullishHammer = patternWindow.lastOrNull()?.let {
             CandlePatternAnalyzer.isHammer(it)
         } ?: false
@@ -590,6 +593,9 @@ class SignalEngine(
 
             append("; Bearish engulfing=")
             append(bearishEngulfing)
+
+            append("; Doji (neutral)=")
+            append(doji)
 
             append("; Hammer=")
             append(bullishHammer)
