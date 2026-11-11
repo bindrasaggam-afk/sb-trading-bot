@@ -306,16 +306,6 @@ class InstrumentLiveViewModel(
             timeframe.value == requested
     }
 
-    private fun mergeCandles(
-        base: List<MarketCandle>,
-        live: List<MarketCandle>
-    ): List<MarketCandle> {
-        return CandleSeriesReconciler.merge(
-            sources = listOf(base, live),
-            limit = MAX_CANDLES
-        )
-    }
-
     /**
      * Source priority: historical < stored chart series < in-memory live engine.
      * A later source replaces a candle as a whole; OHLC is never mixed.
