@@ -1,9 +1,11 @@
 package com.sb.ui.market
 
 import androidx.lifecycle.ViewModel
+import android.util.Log
 import androidx.lifecycle.viewModelScope
 import com.sb.backend.market.MarketDataManager
 import com.sb.backend.market.analysis.CandleSeriesReconciler
+import com.sb.backend.market.analysis.CandleSeriesAudit
 import com.sb.backend.market.TimeframeBuckets
 import com.sb.backend.market.engine.CandleEngine
 import com.sb.backend.market.model.ChartStatus
@@ -247,8 +249,22 @@ class InstrumentLiveViewModel(
                 }
 
                 val live = engine.candles(key, requested)
+                if (storedTarget.isNotEmpty() && live.isNotEmpty()) {
+                    val audit = CandleSeriesAudit.compare(storedTarget, live)
+                    if (!audit.exactMatch) {
+                        Log.w(
+                            "InstrumentLiveViewModel",
+                            "Stored/live ${requested.label} mismatch for ${key.key()}: " +
+                                "missingLive=${audit.missingFromLive}, " +
+                                "missingStored=${audit.missingFromStored}, " +
+                                "ohlc=${audit.ohlcMismatches}, volume=${audit.volumeMismatches}, " +
+                                "duplicates=${audit.duplicateStoredTimestamps + audit.duplicateLiveTimestamps}"
+                        )
+                    }
+                }
+                val currentLive = live.filter { it.timestamp == liveTargetBucket }
                 val merged = mergeAll(
-                    listOf(storedTarget, _candles.value, live)
+                    listOf(_candles.value, storedTarget, currentLive)
                 )
                 if (merged.isNotEmpty()) {
                     _candles.value = merged
@@ -284,7 +300,7 @@ class InstrumentLiveViewModel(
                 } else {
                     val live = engine.candles(key, requested)
                     _candles.value = mergeAll(
-                        listOf(valid, _candles.value, live)
+                        listOf(valid, _candles.value, live.filter { it.timestamp == liveTargetBucket })
                     )
                     historicalLoaded = true
                     historicalUnavailable = false
