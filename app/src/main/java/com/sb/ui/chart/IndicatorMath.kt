@@ -3,12 +3,13 @@ package com.sb.ui.chart
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.sqrt
+import com.sb.backend.market.TimeframeBuckets
 
 object IndicatorMath {
 
     fun sma(values: List<Double>, period: Int): DoubleArray {
         val result = DoubleArray(values.size) { Double.NaN }
-        if (period <= 0 || values.size < period) return result
+        if (period <= 0 || values.size < period || values.any { !it.isFinite() }) return result
         var sum = 0.0
         for (i in values.indices) {
             sum += values[i]
@@ -24,7 +25,7 @@ object IndicatorMath {
 
     fun ema(values: List<Double>, period: Int): DoubleArray {
         val result = DoubleArray(values.size) { Double.NaN }
-        if (period <= 0 || values.isEmpty()) return result
+        if (period <= 0 || values.isEmpty() || values.any { !it.isFinite() }) return result
         val multiplier = 2.0 / (period + 1.0)
         var seed = 0.0
         var seedCount = 0
@@ -46,20 +47,36 @@ object IndicatorMath {
         return result
     }
 
+    /**
+     * Session VWAP using the exchange-local trading date (IST for supported
+     * Indian exchanges). Zero-volume candles do not fabricate a VWAP value.
+     */
     fun vwap(candles: List<ChartCandle>): DoubleArray {
         val result = DoubleArray(candles.size) { Double.NaN }
+        var activeSession = ""
         var cumulativePriceVolume = 0.0
         var cumulativeVolume = 0.0
         for (i in candles.indices) {
             val candle = candles[i]
+            val session = if (candle.timestamp > 0L) {
+                TimeframeBuckets.sessionKey(candle.timestamp)
+            } else {
+                ""
+            }
+            if (i == 0 || session != activeSession) {
+                activeSession = session
+                cumulativePriceVolume = 0.0
+                cumulativeVolume = 0.0
+            }
+            if (!candle.high.isFinite() || !candle.low.isFinite() ||
+                !candle.close.isFinite() || candle.volume < 0L
+            ) continue
             val typical = (candle.high + candle.low + candle.close) / 3.0
-            val volume = candle.volume.coerceAtLeast(0L).toDouble()
+            val volume = candle.volume.toDouble()
             cumulativePriceVolume += typical * volume
             cumulativeVolume += volume
-            result[i] = if (cumulativeVolume > 0.0) {
-                cumulativePriceVolume / cumulativeVolume
-            } else {
-                typical
+            if (cumulativeVolume > 0.0) {
+                result[i] = cumulativePriceVolume / cumulativeVolume
             }
         }
         return result
@@ -91,6 +108,7 @@ object IndicatorMath {
     }
 
     private fun rsiValue(averageGain: Double, averageLoss: Double): Double {
+        if (averageGain == 0.0 && averageLoss == 0.0) return 50.0
         if (averageLoss == 0.0) return 100.0
         val relativeStrength = averageGain / averageLoss
         return 100.0 - (100.0 / (1.0 + relativeStrength))
@@ -108,14 +126,36 @@ object IndicatorMath {
         slowPeriod: Int = 26,
         signalPeriod: Int = 9
     ): MacdResult {
+        val macd = DoubleArray(values.size) { Double.NaN }
+        val signal = DoubleArray(values.size) { Double.NaN }
+        val histogram = DoubleArray(values.size) { Double.NaN }
+        if (fastPeriod <= 0 || slowPeriod <= fastPeriod || signalPeriod <= 0 ||
+            values.isEmpty() || values.any { !it.isFinite() }
+        ) {
+            return MacdResult(macd, signal, histogram)
+        }
+
         val fast = ema(values, fastPeriod)
         val slow = ema(values, slowPeriod)
-        val macd = DoubleArray(values.size) { i ->
-            if (fast[i].isFinite() && slow[i].isFinite()) fast[i] - slow[i] else Double.NaN
+        for (i in values.indices) {
+            if (fast[i].isFinite() && slow[i].isFinite()) {
+                macd[i] = fast[i] - slow[i]
+            }
         }
-        val signal = ema(macd.map { if (it.isFinite()) it else 0.0 }, signalPeriod)
-        val histogram = DoubleArray(values.size) { i ->
-            if (macd[i].isFinite() && signal[i].isFinite()) macd[i] - signal[i] else Double.NaN
+
+        // Seed the signal EMA from the first real MACD value. Replacing
+        // pre-warmup NaNs with zero biases the signal line toward zero.
+        val firstMacdIndex = macd.indexOfFirst { it.isFinite() }
+        if (firstMacdIndex >= 0) {
+            val validMacd = macd.copyOfRange(firstMacdIndex, macd.size).toList()
+            val alignedSignal = ema(validMacd, signalPeriod)
+            for (offset in alignedSignal.indices) {
+                val index = firstMacdIndex + offset
+                signal[index] = alignedSignal[offset]
+                if (macd[index].isFinite() && signal[index].isFinite()) {
+                    histogram[index] = macd[index] - signal[index]
+                }
+            }
         }
         return MacdResult(macd, signal, histogram)
     }
