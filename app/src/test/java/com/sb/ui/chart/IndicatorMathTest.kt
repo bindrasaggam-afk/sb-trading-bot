@@ -1,5 +1,7 @@
 package com.sb.ui.chart
 
+import com.sb.backend.market.TimeframeBuckets
+
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertFalse
