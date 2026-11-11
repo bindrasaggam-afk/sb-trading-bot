@@ -167,7 +167,12 @@ object MarketRuntimeService {
         val key = normalize(tick.key)
         val id = key.key()
 
-        if (!tracked.containsKey(id)) return
+        // The foreground runtime observes every instrument that the broker
+        // feed actually delivers. This keeps candle persistence independent
+        // of whether a chart screen/ViewModel is currently open.
+        if (tracked.putIfAbsent(id, key) == null) {
+            seedFromStore(key)
+        }
 
         val result = try {
             engine.addTick(tick)
