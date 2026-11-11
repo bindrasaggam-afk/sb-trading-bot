@@ -159,6 +159,14 @@ class CandleEngineTest {
     }
 
     @Test
+    fun intradayAndCalendarMonthLabelsRemainCaseSensitive() {
+        assertEquals(MarketTimeframe.MIN_5, MarketTimeframe.fromLabel("5m"))
+        assertEquals(null, MarketTimeframe.fromLabel("5M"))
+        assertEquals(MarketTimeframe.MONTH_1, MarketTimeframe.fromLabel("1M"))
+        assertEquals(null, MarketTimeframe.fromLabel("1m").takeIf { it == MarketTimeframe.MONTH_1 })
+    }
+
+    @Test
     fun timeframeBucketsAreSessionAligned() {
         assertEquals(time(9, 15, 0), TimeframeBuckets.bucketStart(time(9, 16, 0), "15m", "NSE"))
         assertEquals(time(9, 30, 0), TimeframeBuckets.bucketStart(time(9, 44, 59), "15m", "NSE"))
