@@ -359,7 +359,7 @@ object BackendManager {
                                 if (cursor.isNull(index)) "" else cursor.getString(index)
                             }
                             writer.write(fields.joinToString(",") { csvEscape(it) })
-                            writer.write("\\n")
+                            writer.write("\n")
                             exported++
                         }
                     }
@@ -398,8 +398,8 @@ object BackendManager {
         return if (
             escaped.contains(",") ||
             escaped.contains("\"") ||
-            escaped.contains("\\n") ||
-            escaped.contains("\\r")
+            escaped.contains("\n") ||
+            escaped.contains("\r")
         ) {
             "\"$escaped\""
         } else {
