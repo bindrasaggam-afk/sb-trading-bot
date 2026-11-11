@@ -116,6 +116,9 @@ class MarketForegroundService : Service() {
                         applicationContext
                     )
 
+                    // Persist finalized candles independently of chart visibility.
+                    MarketRuntimeService.start()
+
                     KotakSessionCoordinator.startIfEnabled()
 
                     Log.d(
@@ -210,6 +213,7 @@ class MarketForegroundService : Service() {
     override fun onDestroy() {
         Log.w(TAG, "Foreground service destroyed")
 
+        MarketRuntimeService.stop()
         stopApiServer()
         resetRuntimeState()
 
