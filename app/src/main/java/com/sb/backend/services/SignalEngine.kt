@@ -19,9 +19,9 @@ class SignalEngine(
     companion object {
         private const val MIN_CANDLES = 200
 
-        private const val PRIMARY_TIMEFRAME = "5M"
-        private const val CONFIRMATION_TIMEFRAME = "15M"
-        private const val TREND_TIMEFRAME = "1H"
+        private const val PRIMARY_TIMEFRAME = "5m"
+        private const val CONFIRMATION_TIMEFRAME = "15m"
+        private const val TREND_TIMEFRAME = "1h"
 
         private const val ATR_MULTIPLIER = 1.5
         private const val MIN_SIGNAL_SCORE = 65.0
@@ -45,7 +45,7 @@ class SignalEngine(
             exchange.trim().toUpperCase(Locale.ROOT)
 
         val normalizedTimeframe =
-            timeframe.trim().toUpperCase(Locale.ROOT)
+            timeframe.trim()
 
         if (normalizedSymbol.isBlank() ||
             normalizedExchange.isBlank()
