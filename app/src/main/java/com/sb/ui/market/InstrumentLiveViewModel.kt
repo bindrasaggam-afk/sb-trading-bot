@@ -359,18 +359,10 @@ class InstrumentLiveViewModel(
             val normalized = normalizeCandle(candle)
             if (!isValidCandle(normalized)) return@forEach
 
-            val existing = merged[normalized.timestamp]
-            merged[normalized.timestamp] = if (existing == null) {
-                normalized
-            } else {
-                normalized.copy(
-                    open = existing.open,
-                    high = max(existing.high, normalized.high),
-                    low = min(existing.low, normalized.low),
-                    close = normalized.close,
-                    volume = max(existing.volume, normalized.volume)
-                )
-            }
+            // The later source is authoritative for this timestamp.
+            // Do not synthesize OHLC by mixing historical and live values:
+            // that can create a candle that never actually traded.
+            merged[normalized.timestamp] = normalized
         }
 
         return merged.values
