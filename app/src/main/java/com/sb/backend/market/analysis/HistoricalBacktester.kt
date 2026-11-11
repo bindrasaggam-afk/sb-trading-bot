@@ -129,10 +129,19 @@ object HistoricalBacktester {
                     exitIndex = futureIndex
                     // Conservative intrabar assumption when both levels touched.
                     if (stopHit) {
-                        rawExit = candidate.stopLoss
+                        // A gap through the stop is filled at the worse candle
+                        // open, not at the unreachable stop price.
+                        rawExit = when (candidate.direction) {
+                            Direction.LONG -> min(candidate.stopLoss, candle.open)
+                            Direction.SHORT -> max(candidate.stopLoss, candle.open)
+                        }
                         reason = ExitReason.STOP_LOSS
                     } else {
-                        rawExit = candidate.target
+                        // A favourable gap through target receives the open.
+                        rawExit = when (candidate.direction) {
+                            Direction.LONG -> max(candidate.target, candle.open)
+                            Direction.SHORT -> min(candidate.target, candle.open)
+                        }
                         reason = ExitReason.TARGET
                     }
                     break
