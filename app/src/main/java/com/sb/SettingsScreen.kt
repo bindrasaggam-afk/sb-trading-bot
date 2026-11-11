@@ -209,6 +209,38 @@ class SettingsScreen(private val context: Context) {
             syncKotakScripMaster()
         })
 
+        label(body, "Historical Market Data", 18f, yellow, true)
+        label(
+            body,
+            "Export saved OHLCV candles only. Kotak credentials and account data are not exported.",
+            11f,
+            grey
+        )
+
+        body.addView(actionButton("Export Historical Candles CSV") {
+            if (!BackendManager.isReady()) {
+                statusText.text = "Export unavailable: backend/database is not ready."
+                statusText.setTextColor(Color.RED)
+            } else {
+                statusText.text = "Exporting historical candles..."
+                statusText.setTextColor(yellow)
+                thread {
+                    val result = BackendManager.exportCandlesCsvToDownloads()
+                    android.os.Handler(context.mainLooper).post {
+                        if (result == null) {
+                            statusText.text =
+                                "CSV export failed or no candle data found. Android 10+ is required for this Downloads export."
+                            statusText.setTextColor(Color.RED)
+                        } else {
+                            statusText.text =
+                                "CSV export successful. Rows: ${result.second}\nSaved in Downloads as ${result.first.lastPathSegment}"
+                            statusText.setTextColor(Color.GREEN)
+                        }
+                    }
+                }
+            }
+        })
+
         body.addView(actionButton("Connect Kotak Live Feed") {
             connectLiveFeed()
         })
