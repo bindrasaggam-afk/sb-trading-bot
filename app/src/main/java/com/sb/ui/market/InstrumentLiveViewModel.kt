@@ -187,10 +187,6 @@ class InstrumentLiveViewModel(
         val key = currentKey ?: return
         if (!sameInstrument(tick.key, key)) return
 
-        var finalizedBase: List<MarketCandle> = emptyList()
-        var finalizedTarget: MarketCandle? = null
-        var finalizedTargetLabel: String? = null
-
         synchronized(candleLock) {
             val active = currentKey ?: return
             if (!sameInstrument(active, key)) return
@@ -205,37 +201,18 @@ class InstrumentLiveViewModel(
                 timestamp = result.baseTimestamp
             ) ?: return
 
-            val existing = _candles.value.firstOrNull {
-                it.timestamp == target.timestamp
-            }
-
-            if (liveTargetBucket != 0L && target.timestamp > liveTargetBucket) {
-                val previous = _candles.value.firstOrNull {
-                    it.timestamp == liveTargetBucket
-                }
-                if (previous != null) {
-                    finalizedTarget = previous
-                    finalizedTargetLabel = activeTimeframe.label
-                }
-            }
-
             liveTargetBucket = target.timestamp
             liveActive = true
-            finalizedBase = result.finalizedBase
 
+            // CandleEngine already aggregates all ticks for this bucket.
+            // Replace the row atomically; combining old and new OHLC fields
+            // could manufacture a candle that never existed in the market.
             _candles.value = upsertCandle(
                 current = _candles.value,
-                candle = mergeLiveTarget(existing, target)
+                candle = target
             )
 
             publishStatusLocked()
-        }
-
-        if (finalizedBase.isNotEmpty()) {
-        }
-        val targetToPersist = finalizedTarget
-        val targetLabel = finalizedTargetLabel
-        if (targetToPersist != null && targetLabel != null) {
         }
     }
 
@@ -327,20 +304,6 @@ class InstrumentLiveViewModel(
         return generation.get() == token &&
             sameInstrument(active, key) &&
             timeframe.value == requested
-    }
-
-    private fun mergeLiveTarget(
-        existing: MarketCandle?,
-        target: MarketCandle
-    ): MarketCandle {
-        if (existing == null) return target
-        return target.copy(
-            open = existing.open,
-            high = max(existing.high, target.high),
-            low = min(existing.low, target.low),
-            close = target.close,
-            volume = max(existing.volume, target.volume)
-        )
     }
 
     private fun mergeCandles(
