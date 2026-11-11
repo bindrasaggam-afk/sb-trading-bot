@@ -1,6 +1,8 @@
 package com.sb.backend.services
 
 import com.sb.backend.core.AppConfig
+import com.sb.backend.market.analysis.CandlePatternAnalyzer
+import com.sb.backend.market.model.MarketCandle
 import com.sb.backend.models.SignalStatus
 import com.sb.backend.models.SignalType
 import com.sb.backend.models.TradingSignal
@@ -326,6 +328,34 @@ class SignalEngine(
                 lastCandle.open >= previousCandle.close &&
                 lastCandle.close <= previousCandle.open
 
+        // Pattern geometry is evaluated on the same ordered 5m candles.
+        // Patterns add price-action context; they never override 15m/1h trend
+        // confirmation or the independent signal-score threshold.
+        val patternWindow = candles5m.takeLast(3).map { candle ->
+            MarketCandle(
+                timestamp = candle.timestamp,
+                open = candle.open,
+                high = candle.high,
+                low = candle.low,
+                close = candle.close,
+                volume = candle.volume
+            )
+        }
+        val bullishHammer = patternWindow.lastOrNull()?.let {
+            CandlePatternAnalyzer.isHammer(it)
+        } ?: false
+        val bearishShootingStar = patternWindow.lastOrNull()?.let {
+            CandlePatternAnalyzer.isShootingStar(it)
+        } ?: false
+        val bullishMorningStar = patternWindow.size == 3 &&
+            CandlePatternAnalyzer.isMorningStar(
+                patternWindow[0], patternWindow[1], patternWindow[2]
+            )
+        val bearishEveningStar = patternWindow.size == 3 &&
+            CandlePatternAnalyzer.isEveningStar(
+                patternWindow[0], patternWindow[1], patternWindow[2]
+            )
+
         val bullishBreakout =
             resistance != null &&
                 price > resistance
@@ -335,10 +365,10 @@ class SignalEngine(
                 price < support
 
         val bullishPriceAction =
-            bullishEngulfing || bullishBreakout
+            bullishEngulfing || bullishHammer || bullishMorningStar || bullishBreakout
 
         val bearishPriceAction =
-            bearishEngulfing || bearishBreakdown
+            bearishEngulfing || bearishShootingStar || bearishEveningStar || bearishBreakdown
 
         // --------------------------------------------------------
         // 10. DIRECTIONAL INDICATOR CONDITIONS
@@ -560,6 +590,18 @@ class SignalEngine(
 
             append("; Bearish engulfing=")
             append(bearishEngulfing)
+
+            append("; Hammer=")
+            append(bullishHammer)
+
+            append("; Shooting star=")
+            append(bearishShootingStar)
+
+            append("; Morning star=")
+            append(bullishMorningStar)
+
+            append("; Evening star=")
+            append(bearishEveningStar)
 
             append("; Breakout=")
             append(bullishBreakout)
