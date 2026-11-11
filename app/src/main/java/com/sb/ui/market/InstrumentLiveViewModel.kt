@@ -3,6 +3,7 @@ package com.sb.ui.market
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.sb.backend.market.MarketDataManager
+import com.sb.backend.market.analysis.CandleSeriesReconciler
 import com.sb.backend.market.TimeframeBuckets
 import com.sb.backend.market.engine.CandleEngine
 import com.sb.backend.market.model.ChartStatus
@@ -346,46 +347,21 @@ class InstrumentLiveViewModel(
         base: List<MarketCandle>,
         live: List<MarketCandle>
     ): List<MarketCandle> {
-        val merged = LinkedHashMap<Long, MarketCandle>()
-
-        base.forEach { candle ->
-            val normalized = normalizeCandle(candle)
-            if (isValidCandle(normalized)) {
-                merged[normalized.timestamp] = normalized
-            }
-        }
-
-        live.forEach { candle ->
-            val normalized = normalizeCandle(candle)
-            if (!isValidCandle(normalized)) return@forEach
-
-            // The later source is authoritative for this timestamp.
-            // Do not synthesize OHLC by mixing historical and live values:
-            // that can create a candle that never actually traded.
-            merged[normalized.timestamp] = normalized
-        }
-
-        return merged.values
-            .sortedBy { it.timestamp }
-            .takeLast(MAX_CANDLES)
+        return CandleSeriesReconciler.merge(
+            sources = listOf(base, live),
+            limit = MAX_CANDLES
+        )
     }
 
     /**
-     * Unions multiple candle sources without dropping data.
-     *
-     * Sources are applied in increasing priority order: the first source keeps
-     * its open/high/low, later sources can extend the range and override the
-     * close. This prevents a late stored/historical load from wiping candles
-     * that were already merged from the other source (multi-timeframe race).
+     * Source priority: historical < stored chart series < in-memory live engine.
+     * A later source replaces a candle as a whole; OHLC is never mixed.
      */
     private fun mergeAll(sources: List<List<MarketCandle>>): List<MarketCandle> {
-        var merged: List<MarketCandle> = emptyList()
-        sources.forEach { series ->
-            if (series.isNotEmpty()) {
-                merged = mergeCandles(merged, series)
-            }
-        }
-        return merged
+        return CandleSeriesReconciler.merge(
+            sources = sources,
+            limit = MAX_CANDLES
+        )
     }
 
     private fun upsertCandle(
