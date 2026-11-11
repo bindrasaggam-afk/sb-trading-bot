@@ -344,7 +344,7 @@ object BackendManager {
             var exported = 0
             resolver.openOutputStream(uri)?.use { stream ->
                 OutputStreamWriter(stream, StandardCharsets.UTF_8).use { writer ->
-                    writer.write("symbol,exchange,timeframe,timestamp,open,high,low,close,volume,candle_status\\n")
+                    writer.write("symbol,exchange,timeframe,timestamp,open,high,low,close,volume,candle_status\n")
                     database().readableDatabase.rawQuery(
                         """
                         SELECT symbol, exchange, timeframe, timestamp,
