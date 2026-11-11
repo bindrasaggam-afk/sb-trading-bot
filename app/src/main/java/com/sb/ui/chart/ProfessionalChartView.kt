@@ -331,11 +331,14 @@ class ProfessionalChartView @JvmOverloads constructor(
     }
 
     private fun ensureIndicators() {
-        val signature = System.identityHashCode(candles) * 31 + indicators.hashCode()
+        // Indicators must always use the original market OHLCV series.
+        // "candles" is a presentation series and may contain Heikin-Ashi values.
+        val signature = System.identityHashCode(source) * 31 + indicators.hashCode()
         if (signature == indicatorSignature) return
         indicatorSignature = signature
 
-        val closes = candles.map { it.close }
+        val indicatorCandles = source
+        val closes = indicatorCandles.map { it.close }
         ema20 = if (ChartIndicator.EMA_20 in indicators) {
             IndicatorMath.ema(closes, 20)
         } else {
@@ -347,7 +350,7 @@ class ProfessionalChartView @JvmOverloads constructor(
             DoubleArray(0)
         }
         vwap = if (ChartIndicator.VWAP in indicators) {
-            IndicatorMath.vwap(candles)
+            IndicatorMath.vwap(indicatorCandles)
         } else {
             DoubleArray(0)
         }
@@ -367,7 +370,7 @@ class ProfessionalChartView @JvmOverloads constructor(
             null
         }
         supertrendResult = if (ChartIndicator.SUPERTREND in indicators) {
-            IndicatorMath.supertrend(candles)
+            IndicatorMath.supertrend(indicatorCandles)
         } else {
             null
         }
