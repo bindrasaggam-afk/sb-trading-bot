@@ -209,11 +209,15 @@ object MarketRuntimeService {
 
         executor.execute {
             try {
-                saveCandlesWithRetry(
+                val baseSaved = saveCandlesWithRetry(
                     key = key,
                     timeframe = BASE_TIMEFRAME_LABEL,
                     candles = snapshot
                 )
+                check(baseSaved == snapshot.size) {
+                    "Base candle persistence incomplete: saved " +
+                        baseSaved + " of " + snapshot.size
+                }
 
                 persistClosedTargets(key, latestBaseTimestamp)
 
@@ -273,8 +277,7 @@ object MarketRuntimeService {
         var lastSaved = 0
 
         for (attempt in 0..delaysMs.size) {
-            if (!running.get()) return 0
-
+            // Finish already-enqueued persistence even if the feed is stopping.
             lastSaved = MarketFeedRepository.saveCandles(
                 key = key,
                 timeframe = timeframe,
