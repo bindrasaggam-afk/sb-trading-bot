@@ -38,7 +38,7 @@ class CandleSeriesReconcilerTest {
 
     @Test fun limitKeepsNewestCandles() {
         val result = CandleSeriesReconciler.merge(
-            listOf((1L..5L).map { c(it * 1_700_000_000_000L, 100.0, 101.0, 99.0, 100.5) }),
+            listOf((1L..5L).map { c(1_700_000_000_000L + (it - 1L) * 60_000L, 100.0, 101.0, 99.0, 100.5) }),
             limit = 2
         )
         assertEquals(listOf(1_700_000_180_000L, 1_700_000_240_000L), result.map { it.timestamp })
