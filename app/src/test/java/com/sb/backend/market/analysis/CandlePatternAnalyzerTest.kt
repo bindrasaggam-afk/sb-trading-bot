@@ -20,7 +20,7 @@ class CandlePatternAnalyzerTest {
     }
 
     @Test fun detectsShootingStarGeometry() {
-        assertTrue(CandlePatternAnalyzer.isShootingStar(c(1, 100.0, 103.5, 100.4, 100.5)))
+        assertTrue(CandlePatternAnalyzer.isShootingStar(c(1, 100.5, 103.5, 100.4, 101.0)))
         assertFalse(CandlePatternAnalyzer.isShootingStar(c(1, 100.0, 100.5, 97.0, 100.2)))
     }
 
