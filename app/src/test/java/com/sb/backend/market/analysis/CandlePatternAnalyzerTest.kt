@@ -1,6 +1,7 @@
 package com.sb.backend.market.analysis
 
 import com.sb.backend.market.model.MarketCandle
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -52,4 +53,16 @@ class CandlePatternAnalyzerTest {
         assertFalse(CandlePatternAnalyzer.isDoji(c(0, 100.0, 102.0, 98.0, 100.0)))
         assertFalse(CandlePatternAnalyzer.isHammer(c(1, 100.0, 99.0, 101.0, 100.2)))
     }
+    @Test fun detectReturnsPatternTimestampWindowInChronologicalOrder() {
+        val rows = listOf(
+            c(3, 101.0, 108.0, 100.0, 107.0),
+            c(1, 110.0, 111.0, 99.0, 100.0),
+            c(2, 100.0, 102.0, 98.0, 100.5)
+        )
+        val matches = CandlePatternAnalyzer.detect(rows)
+        val morningStar = matches.single { it.pattern == CandlePatternAnalyzer.Pattern.MORNING_STAR }
+        assertEquals(1L, morningStar.startTimestamp)
+        assertEquals(3L, morningStar.endTimestamp)
+    }
+
 }
