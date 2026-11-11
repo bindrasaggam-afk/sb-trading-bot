@@ -673,25 +673,38 @@ class MarketRepository(
         candles: List<Candle>
     ): Int {
         return maintenanceGate.withOperation {
-        val normalizedSymbol = normalize(symbol)
-        val normalizedExchange = normalize(exchange)
-        val normalizedTimeframe = normalizeCandleTimeframe(timeframe)
+            val normalizedSymbol = normalize(symbol)
+            val normalizedExchange = normalize(exchange)
+            val normalizedTimeframe = normalizeCandleTimeframe(timeframe)
 
-        if (normalizedSymbol.isBlank() ||
-            normalizedExchange.isBlank() ||
-            normalizedTimeframe.isBlank() ||
-            candles.isEmpty()
-        ) return 0
+            if (normalizedSymbol.isBlank() ||
+                normalizedExchange.isBlank() ||
+                normalizedTimeframe.isBlank() ||
+                candles.isEmpty()
+            ) {
+                return@withOperation 0
+            }
 
-        val db = databaseHelper.writableDatabase
-        var saved = 0
+            // Reject the whole batch before opening a transaction. Silently
+            // skipping malformed rows would leave a plausible-looking but
+            // incomplete candle series in the database.
+            val timestamps = HashSet<Long>(candles.size)
+            if (candles.any { !isValidCandle(it) || !timestamps.add(it.timestamp) }) {
+                Log.e(
+                    "MarketRepository",
+                    "Candle batch rejected: invalid candle or duplicate timestamp for " +
+                        "$normalizedExchange:$normalizedSymbol/$normalizedTimeframe"
+                )
+                return@withOperation 0
+            }
 
-        db.beginTransaction()
-        try {
-            candles.forEach { candle ->
-                if (!isValidCandle(candle)) return@forEach
+            val db = databaseHelper.writableDatabase
+            var saved = 0
 
-                try {
+            try {
+                db.beginTransaction()
+
+                candles.forEach { candle ->
                     val values = ContentValues().apply {
                         put("symbol", normalizedSymbol)
                         put("exchange", normalizedExchange)
@@ -719,23 +732,27 @@ class MarketRepository(
                         SQLiteDatabase.CONFLICT_REPLACE
                     )
 
-                    if (result != -1L) saved++
-                } catch (e: Exception) {
-                    Log.e(
-                        "MarketRepository",
-                        "Candle save failed: $normalizedSymbol",
-                        e
-                    )
+                    check(result != -1L) {
+                        "Candle insert failed at timestamp ${candle.timestamp}"
+                    }
+                    saved++
+                }
+
+                db.setTransactionSuccessful()
+                saved
+            } catch (e: Exception) {
+                Log.e(
+                    "MarketRepository",
+                    "Candle batch transaction rolled back: " +
+                        "$normalizedExchange:$normalizedSymbol/$normalizedTimeframe",
+                    e
+                )
+                0
+            } finally {
+                if (db.inTransaction()) {
+                    db.endTransaction()
                 }
             }
-
-            db.setTransactionSuccessful()
-        } finally {
-            db.endTransaction()
-        }
-
-        return saved
-    
         }
     }
 
