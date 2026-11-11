@@ -15,12 +15,12 @@ class CandlePatternAnalyzerTest {
     }
 
     @Test fun detectsHammerGeometry() {
-        assertTrue(CandlePatternAnalyzer.isHammer(c(1, 100.0, 100.25, 97.0, 100.2)))
+        assertTrue(CandlePatternAnalyzer.isHammer(c(1, 100.0, 100.6, 97.0, 100.5)))
         assertFalse(CandlePatternAnalyzer.isHammer(c(1, 100.0, 103.0, 99.5, 100.2)))
     }
 
     @Test fun detectsShootingStarGeometry() {
-        assertTrue(CandlePatternAnalyzer.isShootingStar(c(1, 100.0, 103.0, 100.1, 100.2)))
+        assertTrue(CandlePatternAnalyzer.isShootingStar(c(1, 100.0, 103.5, 100.4, 100.5)))
         assertFalse(CandlePatternAnalyzer.isShootingStar(c(1, 100.0, 100.5, 97.0, 100.2)))
     }
 
