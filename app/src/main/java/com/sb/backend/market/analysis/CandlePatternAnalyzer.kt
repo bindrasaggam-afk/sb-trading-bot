@@ -103,23 +103,27 @@ object CandlePatternAnalyzer {
     fun isMorningStar(first: MarketCandle, middle: MarketCandle, last: MarketCandle): Boolean {
         if (!first.isValid || !middle.isValid || !last.isValid) return false
         val firstBody = body(first)
+        val firstRange = first.high - first.low
         val middleRange = middle.high - middle.low
-        if (first.close >= first.open || firstBody == 0.0 || middleRange <= 0.0) return false
-        val smallMiddle = body(middle) / middleRange <= 0.30
+        if (first.close >= first.open || firstRange <= 0.0 || middleRange <= 0.0) return false
+        val longFirst = firstBody / firstRange >= 0.50
+        val smallMiddle = body(middle) <= firstBody * 0.30
         val closesAboveMidpoint = last.close > last.open &&
             last.close >= (first.open + first.close) / 2.0
-        return smallMiddle && closesAboveMidpoint
+        return longFirst && smallMiddle && closesAboveMidpoint
     }
 
     fun isEveningStar(first: MarketCandle, middle: MarketCandle, last: MarketCandle): Boolean {
         if (!first.isValid || !middle.isValid || !last.isValid) return false
         val firstBody = body(first)
+        val firstRange = first.high - first.low
         val middleRange = middle.high - middle.low
-        if (first.close <= first.open || firstBody == 0.0 || middleRange <= 0.0) return false
-        val smallMiddle = body(middle) / middleRange <= 0.30
+        if (first.close <= first.open || firstRange <= 0.0 || middleRange <= 0.0) return false
+        val longFirst = firstBody / firstRange >= 0.50
+        val smallMiddle = body(middle) <= firstBody * 0.30
         val closesBelowMidpoint = last.close < last.open &&
             last.close <= (first.open + first.close) / 2.0
-        return smallMiddle && closesBelowMidpoint
+        return longFirst && smallMiddle && closesBelowMidpoint
     }
 
     private fun body(c: MarketCandle): Double = abs(c.close - c.open)
