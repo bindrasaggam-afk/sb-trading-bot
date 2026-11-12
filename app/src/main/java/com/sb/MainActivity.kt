@@ -79,6 +79,8 @@ class MainActivity : AppCompatActivity() {
     private var quoteRefresh: Runnable? = null
     private val marketListAdapter = MarketListAdapter()
     private var marketTicksJob: Job? = null
+    private var dashboardMetricsJob: Job? = null
+    private var quoteUpdateJob: Job? = null
     private var marketListVisible = false
     private lateinit var liveViewModel: InstrumentLiveViewModel
     private var isChartFullscreen = false
@@ -97,14 +99,13 @@ class MainActivity : AppCompatActivity() {
         stockMasterDbHelper = StockMasterDbHelper(this)
 
         buildApp()
+        showScreen("Home")
 
-        // Persistent backend runtime is owned by the foreground service.
-        // MainActivity must not initialize or stop the backend.
+        // Show the first frame before starting backend/API initialization.
+        // The service performs its heavy work on its own worker thread.
         com.sb.backend.services.MarketForegroundService.start(
             applicationContext
         )
-
-        showScreen("Home")
     }
 
     // बैक बटन दबाने पर सीधे होम स्क्रीन पर जाने का लॉजिक
@@ -592,19 +593,36 @@ class MainActivity : AppCompatActivity() {
         body.addView(secondRow)
 
         fun updateMetrics() {
-            if (!BackendManager.isInitialized()) {
+            if (!BackendManager.isInitialized() ||
+                dashboardMetricsJob?.isActive == true
+            ) {
                 return
             }
 
-            try {
-                val snapshot = BackendManager.paperEngine().snapshot()
-                capitalValue.text = snapshot?.let {
-                    formatRupees(it.availableBalance)
-                } ?: "—"
+            dashboardMetricsJob = lifecycleScope.launch {
+                val metrics = withContext(Dispatchers.IO) {
+                    try {
+                        val snapshot = BackendManager.paperEngine().snapshot()
+                        val activeSignals = BackendManager.signals().getActive().size
+                        snapshot to activeSignals
+                    } catch (error: Exception) {
+                        android.util.Log.e(
+                            "SB_DASHBOARD",
+                            "Dashboard metrics query failed",
+                            error
+                        )
+                        null
+                    }
+                }
 
+                val snapshot = metrics?.first
                 val pnl = snapshot?.let {
                     it.realizedPnl + it.unrealizedPnl
                 }
+
+                capitalValue.text = snapshot?.let {
+                    formatRupees(it.availableBalance)
+                } ?: "—"
                 pnlValue.text = pnl?.let { formatRupees(it) } ?: "—"
                 pnlValue.setTextColor(
                     when {
@@ -613,19 +631,9 @@ class MainActivity : AppCompatActivity() {
                         else -> red
                     }
                 )
-
                 positionsValue.text =
                     snapshot?.openPositions?.size?.toString() ?: "—"
-            } catch (_: Exception) {
-                capitalValue.text = "—"
-                pnlValue.text = "—"
-                positionsValue.text = "—"
-            }
-
-            signalsValue.text = try {
-                BackendManager.signals().getActive().size.toString()
-            } catch (_: Exception) {
-                "—"
+                signalsValue.text = metrics?.second?.toString() ?: "—"
             }
         }
 
@@ -716,41 +724,55 @@ class MainActivity : AppCompatActivity() {
     private fun updateQuoteViews(
         views: List<Triple<String, String, TextView>>
     ) {
-        if (!com.sb.backend.core.BackendManager.isInitialized()) {
+        if (!com.sb.backend.core.BackendManager.isInitialized() ||
+            quoteUpdateJob?.isActive == true
+        ) {
             return
         }
 
-        val market = com.sb.backend.core.BackendManager.market()
-
-        views.forEach { item ->
-            val symbol = item.first
-            val exchange = item.second
-            val view = item.third
-
-            val quote = try {
-                com.sb.backend.services.LiveQuoteCache.get(symbol, exchange)
-                    ?: market.getQuote(symbol, exchange)
-            } catch (_: Exception) {
-                try {
-                    com.sb.backend.services.LiveQuoteCache.get(symbol, exchange)
-                } catch (_: Exception) {
-                    null
+        quoteUpdateJob = lifecycleScope.launch {
+            val updates = withContext(Dispatchers.IO) {
+                val market = try {
+                    com.sb.backend.core.BackendManager.market()
+                } catch (error: Exception) {
+                    android.util.Log.e(
+                        "SB_DASHBOARD",
+                        "Market repository unavailable",
+                        error
+                    )
+                    return@withContext emptyList<Triple<TextView, String, Int>>()
                 }
-            } ?: return@forEach
 
-            view.text = String.format(
-                Locale.US,
-                "₹%.2f",
-                quote.ltp
-            )
+                views.mapNotNull { item ->
+                    val symbol = item.first
+                    val exchange = item.second
+                    val quote = try {
+                        com.sb.backend.services.LiveQuoteCache.get(symbol, exchange)
+                            ?: market.getQuote(symbol, exchange)
+                    } catch (_: Exception) {
+                        try {
+                            com.sb.backend.services.LiveQuoteCache.get(symbol, exchange)
+                        } catch (_: Exception) {
+                            null
+                        }
+                    } ?: return@mapNotNull null
 
-            val change = quote.change
-                ?: quote.previousClose?.let {
-                    quote.ltp - it
+                    val change = quote.change
+                        ?: quote.previousClose?.let { quote.ltp - it }
+                        ?: 0.0
+
+                    Triple(
+                        item.third,
+                        String.format(Locale.US, "₹%.2f", quote.ltp),
+                        if (change >= 0.0) green else red
+                    )
                 }
-                ?: 0.0
+            }
 
-            view.setTextColor(if (change >= 0.0) green else red)
+            updates.forEach { update ->
+                update.first.text = update.second
+                update.first.setTextColor(update.third)
+            }
         }
     }
 
