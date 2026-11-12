@@ -60,6 +60,11 @@ class MarketForegroundService : Service() {
 
     // API server is owned by this foreground service.
     private var embeddedApiServer: EmbeddedApiServer? = null
+    private val runtimeExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "sb-market-runtime").apply {
+            isDaemon = true
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -74,13 +79,18 @@ class MarketForegroundService : Service() {
     ): Int {
 
         try {
+            // Android requires foreground promotion promptly. Keep this small
+            // operation on the service thread, and move all backend/API work
+            // off the main thread to avoid startup ANRs.
             startForeground(
                 NOTIFICATION_ID,
                 createNotification()
             )
 
             if (intent == null || intent.action == ACTION_START) {
-                startBackendRuntime()
+                runtimeExecutor.execute {
+                    startBackendRuntime()
+                }
             }
 
         } catch (error: Exception) {
@@ -216,6 +226,7 @@ class MarketForegroundService : Service() {
         MarketRuntimeService.stop()
         stopApiServer()
         resetRuntimeState()
+        runtimeExecutor.shutdownNow()
 
         super.onDestroy()
     }
