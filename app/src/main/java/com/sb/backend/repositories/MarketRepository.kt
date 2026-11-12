@@ -33,6 +33,18 @@ class MarketRepository(
             get() = attempted == saved && rejected == 0 && failed == 0
     }
 
+    data class TickAuditDelta(
+        val exchange: String,
+        val symbol: String,
+        val received: Int = 0,
+        val parsed: Int = 0,
+        val mapped: Int = 0,
+        val rejected: Int = 0,
+        val rawSaved: Int = 0,
+        val quoteSaved: Int = 0,
+        val saveFailed: Int = 0
+    )
+
     private val quotesTable = SBDatabaseHelper.TABLE_QUOTES
     private val candlesTable = SBDatabaseHelper.TABLE_CANDLES
     private val rawTicksTable = SBDatabaseHelper.TABLE_RAW_TICKS
@@ -478,6 +490,81 @@ class MarketRepository(
     // ---------------------------------------------------------
     // TICK AUDIT
     // ---------------------------------------------------------
+
+    /**
+     * Applies multiple per-instrument audit deltas in one SQLite transaction.
+     * Intended for the live-feed persistence worker, not the WebSocket callback.
+     */
+    fun recordTickAudits(deltas: List<TickAuditDelta>): Boolean {
+        return maintenanceGate.withOperation {
+            val valid = deltas.filter { delta ->
+                normalize(delta.exchange).isNotBlank() &&
+                    normalize(delta.symbol).isNotBlank() &&
+                    listOf(
+                        delta.received, delta.parsed, delta.mapped,
+                        delta.rejected, delta.rawSaved, delta.quoteSaved,
+                        delta.saveFailed
+                    ).all { it >= 0 }
+            }
+            if (valid.isEmpty()) return@withOperation true
+
+            val db = databaseHelper.writableDatabase
+            val updatedAt = System.currentTimeMillis()
+            try {
+                db.beginTransaction()
+                valid.forEach { delta ->
+                    val exchange = normalize(delta.exchange)
+                    val symbol = normalize(delta.symbol)
+                    db.execSQL(
+                        """
+                        UPDATE `$tickAuditTable`
+                        SET received = received + ?,
+                            parsed = parsed + ?,
+                            mapped = mapped + ?,
+                            rejected = rejected + ?,
+                            raw_saved = raw_saved + ?,
+                            quote_saved = quote_saved + ?,
+                            save_failed = save_failed + ?,
+                            updated_at = ?
+                        WHERE exchange = ? AND symbol = ?
+                        """.trimIndent(),
+                        arrayOf(
+                            delta.received, delta.parsed, delta.mapped,
+                            delta.rejected, delta.rawSaved, delta.quoteSaved,
+                            delta.saveFailed, updatedAt, exchange, symbol
+                        )
+                    )
+                    val rowsUpdated = db.rawQuery("SELECT changes()", null).use { cursor ->
+                        if (cursor.moveToFirst()) cursor.getInt(0) else 0
+                    }
+                    if (rowsUpdated == 0) {
+                        val values = ContentValues().apply {
+                            put("exchange", exchange)
+                            put("symbol", symbol)
+                            put("received", delta.received)
+                            put("parsed", delta.parsed)
+                            put("mapped", delta.mapped)
+                            put("rejected", delta.rejected)
+                            put("raw_saved", delta.rawSaved)
+                            put("quote_saved", delta.quoteSaved)
+                            put("save_failed", delta.saveFailed)
+                            put("updated_at", updatedAt)
+                        }
+                        check(db.insert(tickAuditTable, null, values) != -1L) {
+                            "Tick audit insert failed for $exchange:$symbol"
+                        }
+                    }
+                }
+                db.setTransactionSuccessful()
+                true
+            } catch (e: Exception) {
+                Log.e("MarketRepository", "Batched tick audit save failed", e)
+                false
+            } finally {
+                if (db.inTransaction()) db.endTransaction()
+            }
+        }
+    }
 
     fun recordTickAudit(
         exchange: String,
