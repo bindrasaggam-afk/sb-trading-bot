@@ -11,6 +11,7 @@ import com.sb.backend.models.Quote
 import com.sb.backend.repositories.MarketRepository
 import com.sb.backend.security.KotakNeoSecureStore
 import java.util.Locale
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
@@ -27,6 +28,19 @@ class KotakNeoLiveFeedService(
 
     private val parser = KotakNeoBinaryParser()
     private val tickCount = AtomicLong(0L)
+
+    private data class TickPersistenceEvent(
+        val tick: MarketTick?,
+        val audit: MarketRepository.TickAuditDelta
+    )
+
+    private val tickPersistenceQueue =
+        ArrayBlockingQueue<TickPersistenceEvent>(8_192)
+    private val tickPersistenceWorkerRunning = AtomicBoolean(false)
+    private val droppedTickPersistenceEvents = AtomicLong(0L)
+
+    @Volatile
+    private var tickPersistenceThread: Thread? = null
 
     private val pendingQuotes = ConcurrentHashMap<String, Quote>()
     private val quoteFlushScheduled = AtomicBoolean(false)
@@ -113,6 +127,8 @@ class KotakNeoLiveFeedService(
         require(feedUrl.isNotBlank()) {
             "ERROR | Kotak Feed URL missing. Authenticate again."
         }
+
+        startTickPersistenceWorker()
 
         val ws = KotakNeoWebSocketClient(
             ucc = ucc,
@@ -298,6 +314,106 @@ class KotakNeoLiveFeedService(
         }
     }
 
+    private fun enqueueTickPersistence(
+        tick: MarketTick?,
+        audit: MarketRepository.TickAuditDelta
+    ) {
+        if (!tickPersistenceQueue.offer(TickPersistenceEvent(tick, audit))) {
+            val dropped = droppedTickPersistenceEvents.incrementAndGet()
+            if (dropped == 1L || dropped % 100L == 0L) {
+                onStatus("WARNING | Tick persistence queue full; dropped events=$dropped")
+            }
+        }
+    }
+
+    private fun startTickPersistenceWorker() {
+        if (!tickPersistenceWorkerRunning.compareAndSet(false, true)) return
+
+        val worker = Thread({
+            val pendingAudits =
+                LinkedHashMap<String, MarketRepository.TickAuditDelta>()
+            var lastAuditFlushAt = System.currentTimeMillis()
+
+            fun mergeAudit(delta: MarketRepository.TickAuditDelta) {
+                val key = delta.exchange.trim().uppercase(Locale.ROOT) + "|" +
+                    delta.symbol.trim().uppercase(Locale.ROOT)
+                val previous = pendingAudits[key]
+                pendingAudits[key] = if (previous == null) {
+                    delta
+                } else {
+                    previous.copy(
+                        received = previous.received + delta.received,
+                        parsed = previous.parsed + delta.parsed,
+                        mapped = previous.mapped + delta.mapped,
+                        rejected = previous.rejected + delta.rejected,
+                        rawSaved = previous.rawSaved + delta.rawSaved,
+                        quoteSaved = previous.quoteSaved + delta.quoteSaved,
+                        saveFailed = previous.saveFailed + delta.saveFailed
+                    )
+                }
+            }
+
+            fun flushAudits() {
+                if (pendingAudits.isEmpty()) return
+                val batch = pendingAudits.values.toList()
+                if (marketRepository.recordTickAudits(batch)) {
+                    pendingAudits.clear()
+                } else {
+                    onStatus("Tick audit batch persistence failed: ${batch.size} instruments")
+                }
+                lastAuditFlushAt = System.currentTimeMillis()
+            }
+
+            while (tickPersistenceWorkerRunning.get() || tickPersistenceQueue.isNotEmpty()) {
+                try {
+                    val batch = ArrayList<TickPersistenceEvent>(512)
+                    val first = tickPersistenceQueue.poll(250L, TimeUnit.MILLISECONDS)
+                    if (first != null) {
+                        batch.add(first)
+                        tickPersistenceQueue.drainTo(batch, 511)
+                    }
+
+                    batch.forEach { event ->
+                        val saved = if (event.tick == null) {
+                            null
+                        } else {
+                            try {
+                                marketRepository.saveRawTick(event.tick)
+                            } catch (e: Exception) {
+                                onStatus("Raw tick save error ${event.tick.key.symbol}: ${e.message}")
+                                false
+                            }
+                        }
+                        mergeAudit(
+                            if (saved == null) event.audit else event.audit.copy(
+                                rawSaved = if (saved) 1 else 0,
+                                saveFailed = if (saved) 0 else 1
+                            )
+                        )
+                    }
+
+                    val now = System.currentTimeMillis()
+                    if (now - lastAuditFlushAt >= 1_000L ||
+                        (!tickPersistenceWorkerRunning.get() && tickPersistenceQueue.isEmpty())
+                    ) {
+                        flushAudits()
+                    }
+                } catch (e: InterruptedException) {
+                    if (!tickPersistenceWorkerRunning.get()) continue
+                } catch (e: Exception) {
+                    onStatus("Tick persistence worker error: ${e.message}")
+                }
+            }
+
+            flushAudits()
+        }, "KotakTickPersistenceWorker").apply {
+            isDaemon = true
+            start()
+        }
+
+        tickPersistenceThread = worker
+    }
+
     private fun safeRecordTickAudit(
         exchange: String,
         symbol: String,
@@ -366,13 +482,13 @@ class KotakNeoLiveFeedService(
                 val instrument = instrumentMap[key]
                     ?: requestedInstruments[key]
                     ?: run {
-                        safeRecordTickAudit(
-                            exchange = exchangeName(tick.exchange)
-                                .ifBlank { tick.exchange },
-                            symbol = tick.symbol.ifBlank {
-                                tick.token.toString()
-                            },
-                            rejected = 1
+                        enqueueTickPersistence(
+                            tick = null,
+                            audit = MarketRepository.TickAuditDelta(
+                                exchange = exchangeName(tick.exchange).ifBlank { tick.exchange },
+                                symbol = tick.symbol.ifBlank { tick.token.toString() },
+                                rejected = 1
+                            )
                         )
                         return@forEach
                     }
@@ -382,12 +498,15 @@ class KotakNeoLiveFeedService(
             }
 
             if (tick.ltp <= 0.0 || !tick.ltp.isFinite()) {
-                safeRecordTickAudit(
-                    exchange = exchange,
-                    symbol = symbol,
-                    received = 1,
-                    parsed = 1,
-                    rejected = 1
+                enqueueTickPersistence(
+                    tick = null,
+                    audit = MarketRepository.TickAuditDelta(
+                        exchange = exchange,
+                        symbol = symbol,
+                        received = 1,
+                        parsed = 1,
+                        rejected = 1
+                    )
                 )
                 return@forEach
             }
@@ -459,26 +578,17 @@ class KotakNeoLiveFeedService(
                     receivedAt = received,
                     isIndex = tick.isIndex
                 )
-                // Persist every mapped market tick before quote batching.
-                // Raw ticks must not be lost when pendingQuotes overwrites older quotes.
-                val rawSaved = try {
-                    marketRepository.saveRawTick(mTick)
-                } catch (e: Exception) {
-                    onStatus("Raw tick save error $symbol: ${e.message}")
-                    false
-                }
-
-                // Record per-instrument feed and raw persistence counters.
-                safeRecordTickAudit(
-                    exchange = exchange,
-                    symbol = symbol,
-                    received = 1,
-                    parsed = 1,
-                    mapped = 1,
-                    rejected = 0,
-                    rawSaved = if (rawSaved) 1 else 0,
-                    quoteSaved = 0,
-                    saveFailed = if (rawSaved) 0 else 1
+                // Keep SQLite off OkHttp's WebSocket reader thread.
+                // A bounded worker queue persists raw ticks and batches audit deltas.
+                enqueueTickPersistence(
+                    tick = mTick,
+                    audit = MarketRepository.TickAuditDelta(
+                        exchange = exchange,
+                        symbol = symbol,
+                        received = 1,
+                        parsed = 1,
+                        mapped = 1
+                    )
                 )
 
                 val candleResult = MarketDataManager.onNewTick(mTick)
@@ -760,12 +870,23 @@ class KotakNeoLiveFeedService(
         client?.shutdown()
         client = null
 
+        // Stop accepting events and let the persistence worker drain queued ticks.
+        tickPersistenceWorkerRunning.set(false)
+
         try {
             quoteExecutor.execute { flushPendingQuotes() }
         } catch (_: Exception) {
         }
 
         quoteExecutor.shutdown()
+
+        try {
+            tickPersistenceThread?.join(2_000L)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+        tickPersistenceThread = null
+
         onStatus("Kotak Live Feed closed")
     }
 }
