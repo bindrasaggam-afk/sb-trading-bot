@@ -23,7 +23,8 @@ class KotakNeoLiveFeedService(
     private val secureStore: KotakNeoSecureStore,
     private val marketRepository: MarketRepository,
     private val instruments: List<Instrument>,
-    private val onStatus: (String) -> Unit
+    private val onStatus: (String) -> Unit,
+    private val activeInstrumentsProvider: (() -> List<Instrument>)? = null
 ) {
 
     private val parser = KotakNeoBinaryParser()
@@ -74,6 +75,9 @@ class KotakNeoLiveFeedService(
 
     private fun instrumentKey(instrument: Instrument): FeedKey? {
         if (!instrument.isActive) return null
+        if (instrument.segment.trim().equals("INDEX", ignoreCase = true)) {
+            return null
+        }
 
         val token = instrument.token
             ?.trim()
@@ -103,6 +107,9 @@ class KotakNeoLiveFeedService(
      * Needed so ticks for on-demand chart subscriptions are not dropped.
      */
     private val requestedInstruments =
+        java.util.concurrent.ConcurrentHashMap<FeedKey, Instrument>()
+
+    private val activeInstruments =
         java.util.concurrent.ConcurrentHashMap<FeedKey, Instrument>()
 
     @Synchronized
@@ -161,17 +168,6 @@ class KotakNeoLiveFeedService(
      */
     @Synchronized
     fun subscribeAll() {
-        val allKeys = (instrumentMap.keys + requestedInstruments.keys).distinct()
-
-        val tokens = allKeys.map { key ->
-            "${key.feedSegment}|${key.token}"
-        }.distinct()
-
-        if (tokens.isEmpty()) {
-            onStatus("No active instruments with valid Kotak tokens")
-            return
-        }
-
         val ws = client
 
         if (ws == null || !ws.isAuthenticated()) {
@@ -179,12 +175,48 @@ class KotakNeoLiveFeedService(
             return
         }
 
-        ws.subscribe(tokens)
-        ws.subscribeIndices(indexTokens)
+        val restored = activeInstrumentsProvider?.invoke().orEmpty()
+
+        restored.forEach { instrument ->
+            instrumentKey(instrument)?.let { key ->
+                activeInstruments[key] = instrument
+            }
+        }
+
+        val restoredIndices = restored
+            .filter {
+                it.segment.trim().equals("INDEX", ignoreCase = true)
+            }
+            .mapNotNull { instrument ->
+                val feedName = indexFeedName(instrument.symbol)
+                if (feedName.isBlank()) {
+                    null
+                } else {
+                    "${feedSegment(instrument)}|$feedName"
+                }
+            }
+
+        val indexFeedTokens = (indexTokens + restoredIndices).distinct()
+
+        val allKeys = (
+            instrumentMap.keys +
+                requestedInstruments.keys +
+                activeInstruments.keys
+            ).distinct()
+
+        val tokens = allKeys.map { key ->
+            "${key.feedSegment}|${key.token}"
+        }.distinct()
+
+        if (tokens.isNotEmpty()) {
+            ws.subscribe(tokens)
+        }
+
+        ws.subscribeIndices(indexFeedTokens)
 
         onStatus(
             "Live feed subscription requested: " +
-                "${tokens.size} instruments, ${indexTokens.size} indices"
+                "${tokens.size} instruments, ${indexFeedTokens.size} indices"
         )
     }
 
@@ -232,6 +264,7 @@ class KotakNeoLiveFeedService(
         }
 
         requestedInstruments[key] = instrument
+        activeInstruments[key] = instrument
         ws.subscribe(
             listOf("${key.feedSegment}|${key.token}")
         )
@@ -268,14 +301,10 @@ class KotakNeoLiveFeedService(
         }
 
         requestedInstruments.remove(key)
-
-        // शुरुआती instrumentMap में मौजूद इंस्ट्रूमेंट को
-        // ऑन-डिमांड unsubscribe से हटाना नहीं है।
-        if (key !in instrumentMap) {
-            ws.unsubscribe(
-                listOf("${key.feedSegment}|${key.token}")
-            )
-        }
+        activeInstruments.remove(key)
+        ws.unsubscribe(
+            listOf("${key.feedSegment}|${key.token}")
+        )
 
         onStatus("Unsubscribe requested: ${instrument.symbol}")
     }
@@ -284,6 +313,11 @@ class KotakNeoLiveFeedService(
      * Resolve Kotak feed segment from exchange + instrument metadata.
      */
     private fun feedSegment(instrument: Instrument): String {
+        val configuredSegment = instrument.exchangeSegment.trim()
+        if (configuredSegment.isNotBlank()) {
+            return configuredSegment
+        }
+
         val exchange = instrument.exchange
             .trim()
             .toUpperCase(Locale.ROOT)
@@ -481,6 +515,7 @@ class KotakNeoLiveFeedService(
 
                 val instrument = instrumentMap[key]
                     ?: requestedInstruments[key]
+                    ?: activeInstruments[key]
                     ?: run {
                         enqueueTickPersistence(
                             tick = null,
@@ -644,7 +679,7 @@ class KotakNeoLiveFeedService(
 
                     onStatus(
                         "Live ticks: $count | " +
-                            "$symbol ₹$price"
+                            "$symbol | Token: ${tick.token} | ₹$price"
                     )
                 }
             } catch (e: Exception) {

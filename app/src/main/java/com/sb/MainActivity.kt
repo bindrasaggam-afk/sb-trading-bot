@@ -18,6 +18,7 @@ import android.view.WindowManager
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.ScrollView
@@ -30,7 +31,9 @@ import androidx.recyclerview.widget.RecyclerView
 import com.sb.backend.core.BackendManager
 import com.sb.backend.market.MarketDataManager
 import com.sb.backend.market.model.InstrumentKey
+import com.sb.backend.market.repo.MarketFeedRepository
 import com.sb.backend.models.Instrument
+import com.sb.backend.repositories.InstrumentRepository
 import com.sb.ui.market.InstrumentLiveViewModel
 import com.sb.ui.market.MarketListAdapter
 import com.sb.ui.market.MarketListItem
@@ -73,7 +76,6 @@ class MainActivity : AppCompatActivity() {
     private var marketCategory = ""
     private var mcxCommodity = ""
     private var mcxExpirySymbol = ""
-    private lateinit var stockMasterDbHelper: StockMasterDbHelper
     private var settingsScreen: SettingsScreen? = null
     private val quoteHandler = Handler(Looper.getMainLooper())
     private var quoteRefresh: Runnable? = null
@@ -86,6 +88,7 @@ class MainActivity : AppCompatActivity() {
     private var isChartFullscreen = false
     private var chartScreen: HeikinAshiChartScreen? = null
     private var dashboardMetricsUpdater: (() -> Unit)? = null
+    private val dashboardSubscriptions = ArrayList<InstrumentKey>()
     private var chromeAnimator: ValueAnimator? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -95,8 +98,6 @@ class MainActivity : AppCompatActivity() {
 
         liveViewModel = ViewModelProvider(this)
             .get(InstrumentLiveViewModel::class.java)
-
-        stockMasterDbHelper = StockMasterDbHelper(this)
 
         buildApp()
         showScreen("Home")
@@ -698,7 +699,19 @@ class MainActivity : AppCompatActivity() {
             quoteViews.add(Triple(symbol, exchange, price))
         }
 
+        subscribeDashboardQuotes(quoteViews)
         startQuoteRefresh(quoteViews)
+    }
+
+    private fun subscribeDashboardQuotes(
+        views: List<Triple<String, String, TextView>>
+    ) {
+        views.distinctBy { "${it.second}|${it.first}" }
+            .forEach { (symbol, exchange, _) ->
+                val key = InstrumentKey(exchange = exchange, symbol = symbol)
+                dashboardSubscriptions.add(key)
+                MarketFeedRepository.subscribe(key)
+            }
     }
 
     private fun startQuoteRefresh(
@@ -782,6 +795,11 @@ class MainActivity : AppCompatActivity() {
         }
         quoteRefresh = null
         dashboardMetricsUpdater = null
+
+        dashboardSubscriptions.forEach { key ->
+            MarketFeedRepository.unsubscribe(key)
+        }
+        dashboardSubscriptions.clear()
     }
 
     override fun onStart() {
@@ -987,13 +1005,13 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun createMarketTabs(): LinearLayout {
+    private fun createMarketTabs(): View {
         val tabs = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, dp(6), 0, dp(8))
         }
 
-        listOf("Equity", "Index", "F&O", "ETFs").forEach { tab ->
+        marketTabs().forEach { tab ->
             val selected = marketTab == tab
             val button = Button(this).apply {
                 text = tab
@@ -1008,7 +1026,7 @@ class MainActivity : AppCompatActivity() {
                     8
                 )
                 layoutParams = LinearLayout.LayoutParams(
-                    0, dp(38), 1f
+                    ViewGroup.LayoutParams.WRAP_CONTENT, dp(38)
                 ).apply {
                     setMargins(dp(2), 0, dp(2), 0)
                 }
@@ -1021,11 +1039,22 @@ class MainActivity : AppCompatActivity() {
             tabs.addView(button)
         }
 
-        return tabs
+        return HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            addView(
+                tabs,
+                ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+            )
+        }
     }
 
     private fun showMarket(body: LinearLayout) {
-        if (marketTab == "F&O" && marketCategory == "Commodity / MCX") {
+        if (marketTab == "Commodity" ||
+            (marketTab == "F&O" && marketCategory == "Commodity / MCX")
+        ) {
             showMcxMarketWatch()
             return
         }
@@ -1054,7 +1083,12 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     setOnClickListener {
-                        marketCategory = category
+                        if (category == "Commodity / MCX") {
+                            marketTab = "Commodity"
+                            marketCategory = ""
+                        } else {
+                            marketCategory = category
+                        }
                         showScreen("Market")
                     }
                 }
@@ -1074,36 +1108,13 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val categories: List<String> = when (marketTab) {
-            "Equity" -> listOf("NSE", "BSE")
-            "Index" -> listOf(
-                "NIFTY 50",
-                "BANK NIFTY",
-                "FINNIFTY",
-                "NIFTY 100",
-                "NIFTY 200",
-                "NIFTY 500",
-                "NIFTY NEXT 50",
-                "NIFTY MIDCAP 50",
-                "NIFTY MIDCAP 100",
-                "NIFTY SMALLCAP 100",
-                "NIFTY IT",
-                "NIFTY AUTO",
-                "NIFTY PHARMA",
-                "NIFTY FMCG",
-                "NIFTY METAL",
-                "NIFTY REALTY",
-                "NIFTY ENERGY",
-                "OTHER INDICES"
-            )
-            else -> emptyList()
-        }
+        val categories = marketCategories()
 
         if (categories.isNotEmpty()) {
             addLabel(
                 body,
                 if (marketTab == "Equity") "Equity Categories"
-                else "Index Categories",
+                else "$marketTab Categories",
                 17f, yellow, true
             )
 
@@ -1133,7 +1144,12 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
 
-                val name = makeText(category, 15f, white, true)
+                val name = makeText(
+                    marketCategoryLabel(category),
+                    15f,
+                    white,
+                    true
+                )
                 name.layoutParams = LinearLayout.LayoutParams(
                     0,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -1154,178 +1170,322 @@ class MainActivity : AppCompatActivity() {
                 return
             }
 
-            addLabel(body, "$marketCategory Instruments", 17f, yellow, true)
-        }
-
-        val symbols: List<String> = when (marketTab) {
-            "Equity" -> when (marketCategory) {
-                "NSE" -> EquityStockMaster.allEquities.map {
-                    "${it.first} — ${it.second}"
-                }
-
-                "BSE" -> BseEquityStockMaster.stocks.map {
-                    "${it.symbol} — ${it.name}"
-                }
-
-                else -> emptyList()
-            }
-
-            "F&O" -> when (marketCategory) {
-                "Index F&O" -> listOf(
-                    "NIFTY — Nifty 50",
-                    "BANKNIFTY — Bank Nifty",
-                    "FINNIFTY — Nifty Financial Services",
-                    "MIDCPNIFTY — Nifty Midcap Select"
-                )
-
-                "Equity F&O" -> listOf(
-                    "RELIANCE — Reliance Industries Limited",
-                    "TCS — Tata Consultancy Services Limited",
-                    "HDFCBANK — HDFC Bank Limited",
-                    "INFY — Infosys Limited",
-                    "ICICIBANK — ICICI Bank Limited",
-                    "SBIN — State Bank of India",
-                    "TATAMOTORS — Tata Motors Limited",
-                    "TATASTEEL — Tata Steel Limited",
-                    "AXISBANK — Axis Bank Limited",
-                    "BHARTIARTL — Bharti Airtel Limited",
-                    "ITC — ITC Limited",
-                    "LT — Larsen & Toubro Limited",
-                    "BAJFINANCE — Bajaj Finance Limited",
-                    "MARUTI — Maruti Suzuki India Limited",
-                    "SUNPHARMA — Sun Pharmaceutical Industries Limited",
-                    "NTPC — NTPC Limited",
-                    "POWERGRID — Power Grid Corporation of India Limited",
-                    "ONGC — Oil & Natural Gas Corporation Limited",
-                    "COALINDIA — Coal India Limited",
-                    "TITAN — Titan Company Limited",
-                    "WIPRO — Wipro Limited",
-                    "ADANIENT — Adani Enterprises Limited",
-                    "ADANIPORTS — Adani Ports and SEZ Limited",
-                    "ZOMATO — Zomato Limited",
-                    "JSWSTEEL — JSW Steel Limited"
-                )
-
-                "Commodity / MCX" -> emptyList()
-
-                else -> emptyList()
-            }
-
-            "Index" -> when (marketCategory) {
-                "NIFTY 50" -> Nifty50StockMaster.allStocks.map {
-                    "${it.first} — ${it.second}"
-                }
-                "BANK NIFTY" -> BankNiftyStockMaster.allStocks.map {
-                    "${it.first} — ${it.second}"
-                }
-                "FINNIFTY" -> FinniftyStockMaster.allStocks.map {
-                    "${it.first} — ${it.second}"
-                }
-                "NIFTY 100" -> Nifty100StockMaster.allStocks.map {
-                    "${it.first} — ${it.second}"
-                }
-                "NIFTY 200" -> Nifty200StockMaster.allStocks.map {
-                    "${it.first} — ${it.second}"
-                }
-                "NIFTY 500" -> Nifty500StockMaster.allStocks.map {
-                    "${it.first} — ${it.second}"
-                }
-                "NIFTY NEXT 50" -> NiftyNext50StockMaster.allStocks.map {
-                    "${it.first} — ${it.second}"
-                }
-                "NIFTY MIDCAP 50" -> NiftyMidcap50StockMaster.allStocks.map {
-                    "${it.first} — ${it.second}"
-                }
-                "NIFTY MIDCAP 100" -> NiftyMidcap100StockMaster.allStocks.map {
-                    "${it.first} — ${it.second}"
-                }
-                "NIFTY SMALLCAP 100" -> NiftySmallcap100StockMaster.allStocks.map {
-                    "${it.first} — ${it.second}"
-                }
-                "NIFTY IT" -> NiftyITStockMaster.allStocks.map {
-                    "${it.first} — ${it.second}"
-                }
-                "NIFTY AUTO" -> NiftyAutoStockMaster.allStocks.map {
-                    "${it.first} — ${it.second}"
-                }
-                "NIFTY PHARMA" -> NiftyPharmaStockMaster.allStocks.map {
-                    "${it.first} — ${it.second}"
-                }
-                "NIFTY FMCG" -> NiftyFMCGStockMaster.allStocks.map {
-                    "${it.first} — ${it.second}"
-                }
-                "NIFTY METAL" -> NiftyMetalStockMaster.allStocks.map {
-                    "${it.first} — ${it.second}"
-                }
-                "NIFTY REALTY" -> NiftyRealtyStockMaster.allStocks.map {
-                    "${it.first} — ${it.second}"
-                }
-                "NIFTY ENERGY" -> NiftyEnergyStockMaster.allStocks.map {
-                    "${it.first} — ${it.second}"
-                }
-                "OTHER INDICES" -> listOf(
-                    "NIFTY 100",
-                    "NIFTY NEXT 50",
-                    "NIFTY MIDCAP 50",
-                    "NIFTY MIDCAP 100",
-                    "NIFTY SMALLCAP 100",
-                    "NIFTY IT",
-                    "NIFTY AUTO",
-                    "NIFTY PHARMA",
-                    "NIFTY FMCG",
-                    "NIFTY METAL",
-                    "NIFTY REALTY",
-                    "NIFTY ENERGY",
-                    "NIFTY 500"
-                )
-                else -> emptyList()
-            }
-
-            "ETFs" -> NseEtfStockMaster.allEtfs.map { etf ->
-                "${etf.symbol} — ${etf.name}"
-            }
-
-            else -> listOf(
-                "GOLD", "GOLD MINI", "GOLD PETAL",
-                "SILVER", "SILVER MINI", "SILVER MICRO",
-                "CRUDE OIL", "CRUDE OIL MINI",
-                "NATURAL GAS", "NATURAL GAS MINI",
-                "ZINC", "ZINC MINI", "COPPER",
-                "ALUMINIUM", "LEAD MINI", "MENTHA OIL"
+            addLabel(
+                body,
+                "${marketCategoryLabel(marketCategory)} Instruments",
+                17f, yellow, true
             )
         }
 
-        if (symbols.isEmpty()) {
-            if (marketTab == "Equity" &&
-                marketCategory in setOf("NSE", "BSE") &&
-                symbols.isEmpty()
-            ) {
-                addLabel(
-                    body,
-                    "$marketCategory master data अभी उपलब्ध नहीं है।",
-                    13f,
-                    yellow
-                )
-                return
-            }
+        val listItems = when (marketTab) {
+            "Equity" -> equityMarketItems()
+            "Index" -> indexMarketItems()
+            "F&O" -> fnoMarketItems()
+            "ETFs", "Bonds", "MF", "Other" -> databaseMarketItems()
+            else -> emptyList()
+        }
+
+        if (listItems.isEmpty()) {
+            addLabel(
+                body,
+                "${marketTab} instruments अभी उपलब्ध नहीं हैं।",
+                13f,
+                yellow
+            )
             return
         }
 
-        val liveExchange = resolveLiveExchange(marketTab, marketCategory)
+        showMarketInstruments(listItems)
+    }
 
-        val listItems = symbols.map { symbol ->
+    private fun marketTabs(): List<String> {
+        val repository = repository()
+            ?: return listOf(
+                "Equity",
+                "Index",
+                "F&O",
+                "ETFs",
+                "Bonds",
+                "MF",
+                "Other",
+                "Commodity"
+            )
+
+        return try {
+            buildList {
+                add("Equity")
+                add("Index")
+                add("F&O")
+                if (repository.countByCategory("ETF") > 0) add("ETFs")
+                if (repository.countByCategory("BOND") > 0) add("Bonds")
+                if (repository.countByCategory("MUTUAL_FUND") > 0) add("MF")
+                if (repository.countByCategory("OTHER") > 0) add("Other")
+                add("Commodity")
+            }
+        } catch (_: Exception) {
+            listOf(
+                "Equity",
+                "Index",
+                "F&O",
+                "ETFs",
+                "Bonds",
+                "MF",
+                "Other",
+                "Commodity"
+            )
+        }
+    }
+
+    private fun marketCategories(): List<String> {
+        return when (marketTab) {
+            "Equity" -> listOf(
+                "NSE_CASH",
+                "NSE_SME",
+                "NSE_T2T",
+                "NSE_SME_T2T",
+                "NSE_T2T_SURVEILLANCE",
+                "BSE"
+            )
+            "Index" -> listOf(
+                "NIFTY 50",
+                "BANK NIFTY",
+                "FINNIFTY",
+                "MIDCPNIFTY",
+                "SENSEX",
+                "OTHER INDICES"
+            )
+            "Bonds" -> listOf("SDL", "NCD", "GSEC", "TBILL", "SGB", "FCD")
+            "MF" -> listOf("NSE_MF", "SIF")
+            "Other" -> listOf("INVIT", "REIT", "RIGHTS", "WARRANT")
+            else -> emptyList()
+        }
+    }
+
+    private fun marketCategoryLabel(category: String): String {
+        return category.split('_').joinToString(" ") { part ->
+            when (part) {
+                "NSE", "SME", "T2T", "SDL", "NCD", "GSEC",
+                "SGB", "FCD", "MF", "SIF", "REIT" -> part
+                "TBILL" -> "T-Bill"
+                "INVIT" -> "InvIT"
+                else -> part
+                    .lowercase(Locale.ROOT)
+                    .replaceFirstChar { char ->
+                        if (char.isLowerCase()) {
+                            char.titlecase(Locale.ROOT)
+                        } else {
+                            char.toString()
+                        }
+                    }
+            }
+        }
+    }
+
+    private fun equityMarketItems(): List<MarketListItem> {
+        if (marketCategory.equals("BSE", ignoreCase = true)) {
+            return BseEquityStockMaster.stocks.map { stock ->
+                MarketListItem(
+                    key = InstrumentKey("BSE", stock.symbol),
+                    title = stock.symbol,
+                    subtitle = stock.name
+                )
+            }
+        }
+
+        val instruments = databaseInstruments(
+            category = "EQUITY",
+            subcategory = marketCategory,
+            exchange = "NSE"
+        )
+
+        return instruments.map(::toMarketListItem)
+    }
+
+    private fun indexMarketItems(): List<MarketListItem> {
+        if (marketCategory.equals("OTHER INDICES", ignoreCase = true)) {
+            return databaseInstruments(category = "INDEX")
+                .map(::toMarketListItem)
+        }
+
+        val items = ArrayList<MarketListItem>()
+        val indexInstrument = repository()?.findBySymbol(
+            marketCategory,
+            "NSE"
+        )
+
+        if (indexInstrument != null) {
+            items.add(
+                MarketListItem(
+                    key = InstrumentKey(
+                        indexInstrument.exchange,
+                        indexInstrument.symbol
+                    ),
+                    title = indexInstrument.symbol,
+                    subtitle = "Index • " +
+                        (indexInstrument.feedName ?: "live feed")
+                )
+            )
+        }
+
+        val constituents: List<Pair<String, String>> = when (marketCategory) {
+            "NIFTY 50" -> Nifty50StockMaster.allStocks.map {
+                it.first to it.second
+            }
+            "BANK NIFTY" -> BankNiftyStockMaster.allStocks.map {
+                it.first to it.second
+            }
+            "FINNIFTY" -> FinniftyStockMaster.allStocks.map {
+                it.first to it.second
+            }
+            else -> emptyList()
+        }
+
+        items.addAll(constituentItems(constituents))
+        return items
+    }
+
+    private fun fnoMarketItems(): List<MarketListItem> {
+        val symbols = when (marketCategory) {
+            "Index F&O" -> listOf(
+                "NIFTY — Nifty 50",
+                "BANKNIFTY — Bank Nifty",
+                "FINNIFTY — Nifty Financial Services",
+                "MIDCPNIFTY — Nifty Midcap Select"
+            )
+            "Equity F&O" -> listOf(
+                "RELIANCE — Reliance Industries Limited",
+                "TCS — Tata Consultancy Services Limited",
+                "HDFCBANK — HDFC Bank Limited",
+                "INFY — Infosys Limited",
+                "ICICIBANK — ICICI Bank Limited",
+                "SBIN — State Bank of India",
+                "TATAMOTORS — Tata Motors Limited",
+                "TATASTEEL — Tata Steel Limited",
+                "AXISBANK — Axis Bank Limited",
+                "BHARTIARTL — Bharti Airtel Limited",
+                "ITC — ITC Limited",
+                "LT — Larsen & Toubro Limited",
+                "BAJFINANCE — Bajaj Finance Limited",
+                "MARUTI — Maruti Suzuki India Limited",
+                "SUNPHARMA — Sun Pharmaceutical Industries Limited",
+                "NTPC — NTPC Limited",
+                "POWERGRID — Power Grid Corporation of India Limited",
+                "ONGC — Oil & Natural Gas Corporation Limited",
+                "COALINDIA — Coal India Limited",
+                "TITAN — Titan Company Limited",
+                "WIPRO — Wipro Limited",
+                "ADANIENT — Adani Enterprises Limited",
+                "ADANIPORTS — Adani Ports and SEZ Limited",
+                "ZOMATO — Zomato Limited",
+                "JSWSTEEL — JSW Steel Limited"
+            )
+            else -> emptyList()
+        }
+
+        return symbols.map { symbol ->
             val selected = symbol.substringBefore(" — ").trim()
-            val liveSymbol =
-                resolveLiveSymbol(selected, marketTab, marketCategory)
+            val liveSymbol = resolveLiveSymbol(
+                selected,
+                marketTab,
+                marketCategory
+            )
 
             MarketListItem(
-                key = InstrumentKey(liveExchange, liveSymbol),
+                key = InstrumentKey("NSE", liveSymbol),
                 title = selected,
                 subtitle = symbol.substringAfter(" — ", "").trim()
             )
         }
+    }
 
-        showMarketInstruments(listItems)
+    private fun databaseMarketItems(): List<MarketListItem> {
+        val category = when (marketTab) {
+            "ETFs" -> "ETF"
+            "Bonds" -> "BOND"
+            "MF" -> "MUTUAL_FUND"
+            "Other" -> "OTHER"
+            else -> marketTab
+        }
+
+        return databaseInstruments(
+            category = category,
+            subcategory = marketCategory
+        ).map(::toMarketListItem)
+    }
+
+    private fun constituentItems(
+        constituents: List<Pair<String, String>>
+    ): List<MarketListItem> {
+        val repository = repository()
+        return constituents.mapNotNull { (symbol, name) ->
+            val instrument = repository?.findBySymbol(symbol, "NSE")
+            if (instrument != null) {
+                MarketListItem(
+                    key = InstrumentKey(
+                        instrument.exchange,
+                        instrument.symbol
+                    ),
+                    title = instrument.symbol,
+                    subtitle = instrument.name
+                )
+            } else {
+                MarketListItem(
+                    key = InstrumentKey("NSE", symbol),
+                    title = symbol,
+                    subtitle = name
+                )
+            }
+        }
+    }
+
+    private fun databaseInstruments(
+        category: String,
+        subcategory: String? = null,
+        exchange: String? = null
+    ): List<Instrument> {
+        return try {
+            repository()?.getByCategory(
+                category = category,
+                subcategory = subcategory,
+                exchange = exchange,
+                limit = 10000
+            ).orEmpty()
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private fun toMarketListItem(instrument: Instrument): MarketListItem {
+        val subtitle = buildString {
+            append(instrument.name)
+            if (instrument.subcategory.isNotBlank() &&
+                !instrument.subcategory.equals(instrument.category, true)
+            ) {
+                append(" • ")
+                append(marketCategoryLabel(instrument.subcategory))
+            }
+            if (instrument.isin?.isNotBlank() == true) {
+                append(" • ")
+                append(instrument.isin)
+            }
+        }
+        return MarketListItem(
+            key = InstrumentKey(instrument.exchange, instrument.symbol),
+            title = instrument.symbol,
+            subtitle = subtitle
+        )
+    }
+
+    private fun repository(): InstrumentRepository? {
+        return try {
+            if (BackendManager.isInitialized()) {
+                BackendManager.instruments()
+            } else {
+                null
+            }
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun showMcxMarketWatch() {
@@ -1574,8 +1734,8 @@ class MainActivity : AppCompatActivity() {
         items: List<MarketListItem>,
         mcxGroups: Map<String, List<Instrument>> = emptyMap()
     ) {
-        val isMcx = marketTab == "F&O" &&
-            marketCategory == "Commodity / MCX"
+        val isMcx = marketTab == "Commodity" ||
+            (marketTab == "F&O" && marketCategory == "Commodity / MCX")
 
         marketListVisible = true
         content.removeAllViews()
@@ -1819,6 +1979,25 @@ class MainActivity : AppCompatActivity() {
             )
 
             if (MarketDataManager.getTick(key) != null) {
+                return@forEach
+            }
+
+            if (instrument.segment.equals("COMMODITY", true) &&
+                instrument.expiryMillis == null
+            ) {
+                // Base commodity rows are templates, not tradeable contracts.
+                return@forEach
+            }
+
+            if (instrument.segment.equals("INDEX", true)) {
+                // Index subscriptions use feed names, not Kotak tokens.
+                noTick++
+                if (rows.size < MAX_MISSING_LIVE_PRICE_ROWS) {
+                    rows.add(
+                        "${instrument.symbol}  •  ${instrument.exchange}" +
+                            "  —  index feed waiting for tick"
+                    )
+                }
                 return@forEach
             }
 

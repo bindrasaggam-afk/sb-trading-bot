@@ -316,6 +316,24 @@ object MarketDataManager {
     fun isSubscribed(key: InstrumentKey): Boolean =
         subscribedKeys.contains(key.key())
 
+    fun activeKeys(): List<InstrumentKey> {
+        return subscribedKeys.mapNotNull { raw ->
+            val separator = raw.indexOf('|')
+            if (separator <= 0 || separator >= raw.lastIndex) {
+                null
+            } else {
+                try {
+                    InstrumentKey(
+                        exchange = raw.substring(0, separator),
+                        symbol = raw.substring(separator + 1)
+                    )
+                } catch (_: IllegalArgumentException) {
+                    null
+                }
+            }
+        }
+    }
+
     // ------------------------------------------------------------
     // SUBSCRIBER COUNT
     // ------------------------------------------------------------

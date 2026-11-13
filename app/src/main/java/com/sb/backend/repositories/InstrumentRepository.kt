@@ -13,6 +13,7 @@ import com.sb.backend.database.DatabaseMaintenanceGate
 import com.sb.backend.models.Instrument
 import com.sb.backend.services.KotakKnownTokenMaster
 import com.sb.backend.services.KotakScripToken
+import com.sb.backend.services.KotakSymbolAliases
 import java.util.Locale
 
 class InstrumentRepository(
@@ -362,6 +363,8 @@ class InstrumentRepository(
         query: String,
         exchange: String? = null,
         segment: String? = null,
+        category: String? = null,
+        subcategory: String? = null,
         limit: Int = 100
     ): List<Instrument> {
         return maintenanceGate.withOperation {
@@ -378,13 +381,14 @@ class InstrumentRepository(
 
             clauses.add(
                 "(symbol LIKE ? ESCAPE '\\' " +
+                    "OR raw_symbol LIKE ? ESCAPE '\\' " +
                     "OR name LIKE ? ESCAPE '\\' " +
-                    "OR trading_symbol LIKE ? ESCAPE '\\')"
+                    "OR description LIKE ? ESCAPE '\\' " +
+                    "OR trading_symbol LIKE ? ESCAPE '\\' " +
+                    "OR isin LIKE ? ESCAPE '\\')"
             )
 
-            args.add(pattern)
-            args.add(pattern)
-            args.add(pattern)
+            repeat(6) { args.add(pattern) }
         }
 
         if (!exchange.isNullOrBlank()) {
@@ -395,6 +399,16 @@ class InstrumentRepository(
         if (!segment.isNullOrBlank()) {
             clauses.add("UPPER(segment) = ?")
             args.add(normalize(segment))
+        }
+
+        if (!category.isNullOrBlank()) {
+            clauses.add("UPPER(category) = ?")
+            args.add(normalize(category))
+        }
+
+        if (!subcategory.isNullOrBlank()) {
+            clauses.add("UPPER(subcategory) = ?")
+            args.add(normalize(subcategory))
         }
 
         val order = if (text.isBlank()) {
@@ -481,6 +495,283 @@ class InstrumentRepository(
 
         return result
     
+        }
+    }
+
+    fun getByCategory(
+        category: String,
+        subcategory: String? = null,
+        exchange: String? = null,
+        limit: Int = 2000
+    ): List<Instrument> {
+        return maintenanceGate.withOperation {
+            val normalizedCategory = normalize(category)
+            if (normalizedCategory.isBlank()) return@withOperation emptyList()
+
+            val clauses = ArrayList<String>()
+            val args = ArrayList<String>()
+
+            clauses.add("is_active = 1")
+            clauses.add("is_alias = 0")
+            clauses.add("UPPER(category) = ?")
+            args.add(normalizedCategory)
+
+            if (!subcategory.isNullOrBlank()) {
+                clauses.add("UPPER(subcategory) = ?")
+                args.add(normalize(subcategory))
+            }
+
+            if (!exchange.isNullOrBlank()) {
+                clauses.add("UPPER(exchange) = ?")
+                args.add(normalize(exchange))
+            }
+
+            val result = ArrayList<Instrument>()
+            databaseHelper.readableDatabase.query(
+                SBDatabaseHelper.TABLE_INSTRUMENTS,
+                projection,
+                clauses.joinToString(" AND "),
+                args.toTypedArray(),
+                null,
+                null,
+                "CASE WHEN expiry_millis IS NULL THEN 1 ELSE 0 END, " +
+                    "expiry_millis ASC, symbol COLLATE NOCASE",
+                limit.coerceIn(1, 10000).toString()
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    result.add(readInstrument(cursor))
+                }
+            }
+            result
+        }
+    }
+
+    fun countByCategory(category: String): Int {
+        return maintenanceGate.withOperation {
+            databaseHelper.readableDatabase.rawQuery(
+                "SELECT COUNT(*) FROM ${SBDatabaseHelper.TABLE_INSTRUMENTS} " +
+                    "WHERE is_active = 1 AND is_alias = 0 " +
+                    "AND UPPER(category) = ?",
+                arrayOf(normalize(category))
+            ).use { cursor ->
+                if (cursor.moveToFirst()) cursor.getInt(0) else 0
+            }
+        }
+    }
+
+    fun findByToken(
+        token: String,
+        exchangeSegment: String? = null
+    ): Instrument? {
+        return maintenanceGate.withOperation {
+            val normalizedToken = token.trim()
+            if (normalizedToken.isBlank()) return@withOperation null
+
+            val selection = if (exchangeSegment.isNullOrBlank()) {
+                "TRIM(token) = ?"
+            } else {
+                "TRIM(token) = ? AND UPPER(exchange_segment) = ?"
+            }
+            val args = if (exchangeSegment.isNullOrBlank()) {
+                arrayOf(normalizedToken)
+            } else {
+                arrayOf(normalizedToken, normalize(exchangeSegment))
+            }
+
+            databaseHelper.readableDatabase.query(
+                SBDatabaseHelper.TABLE_INSTRUMENTS,
+                projection,
+                selection,
+                args,
+                null,
+                null,
+                "is_alias ASC, id ASC",
+                "1"
+            ).use { cursor ->
+                if (cursor.moveToFirst()) readInstrument(cursor) else null
+            }
+        }
+    }
+
+    // ------------------------------------------------------------
+    // FULL MASTER IMPORT
+    // ------------------------------------------------------------
+
+    fun upsertMasterBatch(instruments: List<Instrument>): Int {
+        return maintenanceGate.withOperation {
+            if (instruments.isEmpty()) return@withOperation 0
+
+            val db = databaseHelper.writableDatabase
+            var saved = 0
+            db.beginTransaction()
+            try {
+                instruments.forEach { instrument ->
+                    if (!isValid(instrument)) return@forEach
+                    if (upsertMasterPreservingId(db, instrument) != -1L) {
+                        saved++
+                    }
+                }
+                db.setTransactionSuccessful()
+            } finally {
+                db.endTransaction()
+            }
+            saved
+        }
+    }
+
+    private fun upsertMasterPreservingId(
+        db: SQLiteDatabase,
+        instrument: Instrument
+    ): Long {
+        val normalized = instrument.copy(
+            symbol = normalize(instrument.symbol),
+            exchange = normalize(instrument.exchange),
+            segment = normalize(instrument.segment),
+            instrumentType = normalize(instrument.instrumentType),
+            tradingSymbol = normalize(
+                instrument.tradingSymbol.ifBlank { instrument.symbol }
+            ),
+            exchangeSegment = instrument.exchangeSegment.trim()
+        )
+        val values = valuesOf(normalized)
+
+        val symbolSelection = "UPPER(exchange) = ? AND UPPER(symbol) = ?"
+        val symbolArgs = arrayOf(
+            normalized.exchange,
+            normalized.symbol
+        )
+
+        val existingBySymbol = findId(db, symbolSelection, symbolArgs)
+        if (existingBySymbol != -1L) {
+            db.update(
+                SBDatabaseHelper.TABLE_INSTRUMENTS,
+                values,
+                "id = ?",
+                arrayOf(existingBySymbol.toString())
+            )
+            return existingBySymbol
+        }
+
+        val token = normalized.token?.trim()
+        if (!token.isNullOrBlank() && normalized.exchangeSegment.isNotBlank()) {
+            val tokenSelection =
+                "UPPER(exchange) = ? AND UPPER(exchange_segment) = ? " +
+                    "AND TRIM(token) = ?"
+            val tokenArgs = arrayOf(
+                normalized.exchange,
+                normalize(normalized.exchangeSegment),
+                token
+            )
+
+            val existingByToken = findId(
+                db,
+                tokenSelection,
+                tokenArgs,
+                order = "is_alias ASC, id ASC"
+            )
+            if (existingByToken != -1L) {
+                val existingSymbol = findSymbolById(db, existingByToken)
+                if (existingSymbol.equals(normalized.symbol, ignoreCase = true)) {
+                    db.update(
+                        SBDatabaseHelper.TABLE_INSTRUMENTS,
+                        values,
+                        "id = ?",
+                        arrayOf(existingByToken.toString())
+                    )
+                    return existingByToken
+                }
+
+                val rawMatchesExisting = normalized.rawSymbol.isNotBlank() &&
+                    existingSymbol.equals(
+                        normalized.rawSymbol.trim(),
+                        ignoreCase = true
+                    )
+
+                if (rawMatchesExisting) {
+                    db.update(
+                        SBDatabaseHelper.TABLE_INSTRUMENTS,
+                        values,
+                        "id = ?",
+                        arrayOf(existingByToken.toString())
+                    )
+                    return existingByToken
+                }
+
+                val aliasTarget = KotakSymbolAliases.map[
+                    normalize(existingSymbol)
+                ]
+                if (aliasTarget.equals(normalized.symbol, ignoreCase = true)) {
+                    markAlias(db, existingByToken, normalized.symbol)
+                }
+            }
+        }
+
+        return db.insertWithOnConflict(
+            SBDatabaseHelper.TABLE_INSTRUMENTS,
+            null,
+            values,
+            SQLiteDatabase.CONFLICT_IGNORE
+        )
+    }
+
+    private fun markAlias(
+        db: SQLiteDatabase,
+        id: Long,
+        canonicalSymbol: String
+    ) {
+        val values = ContentValues().apply {
+            put("is_alias", 1)
+            put("alias_of", normalize(canonicalSymbol))
+            putNull("token")
+            put("is_active", 1)
+        }
+        db.update(
+            SBDatabaseHelper.TABLE_INSTRUMENTS,
+            values,
+            "id = ?",
+            arrayOf(id.toString())
+        )
+    }
+
+    private fun findId(
+        db: SQLiteDatabase,
+        selection: String,
+        args: Array<String>,
+        order: String = "id ASC"
+    ): Long {
+        db.query(
+            SBDatabaseHelper.TABLE_INSTRUMENTS,
+            arrayOf("id"),
+            selection,
+            args,
+            null,
+            null,
+            order,
+            "1"
+        ).use { cursor ->
+            return if (cursor.moveToFirst()) cursor.getLong(0) else -1L
+        }
+    }
+
+    private fun findSymbolById(
+        db: SQLiteDatabase,
+        id: Long
+    ): String {
+        db.query(
+            SBDatabaseHelper.TABLE_INSTRUMENTS,
+            arrayOf("symbol"),
+            "id = ?",
+            arrayOf(id.toString()),
+            null,
+            null,
+            null,
+            "1"
+        ).use { cursor ->
+            return if (cursor.moveToFirst()) {
+                cursor.getString(0).orEmpty()
+            } else {
+                ""
+            }
         }
     }
 
@@ -921,12 +1212,24 @@ class InstrumentRepository(
 
     private fun valuesOf(instrument: Instrument): ContentValues {
         val symbol = normalize(instrument.symbol)
+        val exchange = normalize(instrument.exchange)
+        val segment = normalize(instrument.segment)
+        val category = normalize(
+            instrument.category.ifBlank {
+                categoryForSegment(exchange, segment)
+            }
+        )
+        val subcategory = normalize(
+            instrument.subcategory.ifBlank {
+                subcategoryFor(exchange, segment, category)
+            }
+        )
 
         return ContentValues().apply {
             put("symbol", symbol)
             put("name", instrument.name.trim())
-            put("exchange", normalize(instrument.exchange))
-            put("segment", normalize(instrument.segment))
+            put("exchange", exchange)
+            put("segment", segment)
             put("instrument_type", normalize(instrument.instrumentType))
 
             put(
@@ -949,6 +1252,105 @@ class InstrumentRepository(
             } else {
                 put("expiry_millis", instrument.expiryMillis)
             }
+
+            put(
+                "exchange_segment",
+                instrument.exchangeSegment.ifBlank {
+                    exchangeSegmentFor(exchange, segment, instrument.instrumentType)
+                }.trim()
+            )
+            put("category", category)
+            put("subcategory", subcategory)
+            put(
+                "raw_symbol",
+                instrument.rawSymbol.ifBlank { instrument.symbol }.trim()
+            )
+            putOptional("isin", instrument.isin)
+            putOptional("description", instrument.description)
+            putOptional("group_code", instrument.groupCode)
+            putOptional("asset_code", instrument.assetCode)
+            putOptional("amc_code", instrument.amcCode)
+            putOptional("issue_millis", instrument.issueMillis)
+            putOptional("maturity_millis", instrument.maturityMillis)
+            put("case_eligible", if (instrument.caseEligible) 1 else 0)
+            putOptional("source_tick_size", instrument.sourceTickSize)
+            put(
+                "source",
+                instrument.source.ifBlank { "LEGACY" }.trim()
+            )
+            putOptional("source_updated_at", instrument.sourceUpdatedAt)
+            put("is_alias", if (instrument.isAlias) 1 else 0)
+            putOptional("alias_of", instrument.aliasOf?.uppercase(Locale.ROOT))
+            putOptional("feed_name", instrument.feedName)
+        }
+    }
+
+    private fun ContentValues.putOptional(key: String, value: String?) {
+        if (value.isNullOrBlank()) putNull(key) else put(key, value.trim())
+    }
+
+    private fun ContentValues.putOptional(key: String, value: Long?) {
+        if (value == null || value <= 0L) putNull(key) else put(key, value)
+    }
+
+    private fun ContentValues.putOptional(key: String, value: Double?) {
+        if (value == null || !value.isFinite()) putNull(key) else put(key, value)
+    }
+
+    private fun categoryForSegment(exchange: String, segment: String): String {
+        return when (segment.uppercase(Locale.ROOT)) {
+            "INDEX" -> "INDEX"
+            "ETF" -> "ETF"
+            "COMMODITY" -> "COMMODITY"
+            "BOND" -> "BOND"
+            "MF", "MUTUAL_FUND" -> "MUTUAL_FUND"
+            "OTHER" -> "OTHER"
+            else -> "EQUITY"
+        }
+    }
+
+    private fun subcategoryFor(
+        exchange: String,
+        segment: String,
+        category: String
+    ): String {
+        val normalizedSegment = segment.uppercase(Locale.ROOT)
+        return when (category.uppercase(Locale.ROOT)) {
+            "INDEX" -> "INDEX"
+            "ETF" -> "NSE_ETF"
+            "COMMODITY" -> "MCX_FUTURES"
+            "EQUITY" -> if (exchange.equals("BSE", true)) {
+                "BSE_CASH"
+            } else {
+                when (normalizedSegment) {
+                    "SM" -> "NSE_SME"
+                    "BE" -> "NSE_T2T"
+                    "ST" -> "NSE_SME_T2T"
+                    "BZ" -> "NSE_T2T_SURVEILLANCE"
+                    else -> "NSE_CASH"
+                }
+            }
+            else -> ""
+        }
+    }
+
+    private fun exchangeSegmentFor(
+        exchange: String,
+        segment: String,
+        instrumentType: String
+    ): String {
+        val derivative = listOf(segment, instrumentType).any { value ->
+            val upper = value.uppercase(Locale.ROOT)
+            upper.contains("FO") ||
+                upper.contains("FUT") ||
+                upper.contains("OPT") ||
+                upper.contains("DERIV")
+        }
+        return when (exchange.uppercase(Locale.ROOT)) {
+            "NSE" -> if (derivative) "nse_fo" else "nse_cm"
+            "BSE" -> if (derivative) "bse_fo" else "bse_cm"
+            "MCX" -> "mcx_fo"
+            else -> ""
         }
     }
 
@@ -973,7 +1375,25 @@ class InstrumentRepository(
                 null
             } else {
                 cursor.getLong(11)
-            }
+            },
+            exchangeSegment = cursor.getString(12).orEmpty(),
+            category = cursor.getString(13).orEmpty(),
+            subcategory = cursor.getString(14).orEmpty(),
+            rawSymbol = cursor.getString(15).orEmpty(),
+            isin = if (cursor.isNull(16)) null else cursor.getString(16),
+            description = if (cursor.isNull(17)) null else cursor.getString(17),
+            groupCode = if (cursor.isNull(18)) null else cursor.getString(18),
+            assetCode = if (cursor.isNull(19)) null else cursor.getString(19),
+            amcCode = if (cursor.isNull(20)) null else cursor.getString(20),
+            issueMillis = if (cursor.isNull(21)) null else cursor.getLong(21),
+            maturityMillis = if (cursor.isNull(22)) null else cursor.getLong(22),
+            caseEligible = cursor.getInt(23) == 1,
+            sourceTickSize = if (cursor.isNull(24)) null else cursor.getDouble(24),
+            source = cursor.getString(25).orEmpty(),
+            sourceUpdatedAt = if (cursor.isNull(26)) null else cursor.getLong(26),
+            isAlias = cursor.getInt(27) == 1,
+            aliasOf = if (cursor.isNull(28)) null else cursor.getString(28),
+            feedName = if (cursor.isNull(29)) null else cursor.getString(29)
         )
     }
 
@@ -1012,7 +1432,25 @@ class InstrumentRepository(
             "lot_size",
             "tick_size",
             "is_active",
-            "expiry_millis"
+            "expiry_millis",
+            "exchange_segment",
+            "category",
+            "subcategory",
+            "raw_symbol",
+            "isin",
+            "description",
+            "group_code",
+            "asset_code",
+            "amc_code",
+            "issue_millis",
+            "maturity_millis",
+            "case_eligible",
+            "source_tick_size",
+            "source",
+            "source_updated_at",
+            "is_alias",
+            "alias_of",
+            "feed_name"
         )
     }
 }

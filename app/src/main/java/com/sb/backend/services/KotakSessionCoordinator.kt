@@ -7,6 +7,7 @@ import android.util.Log
 import com.sb.backend.core.BackendManager
 import com.sb.backend.market.MarketDataManager
 import com.sb.backend.models.Candle
+import com.sb.backend.models.Instrument
 import com.sb.backend.security.KotakNeoSecureStore
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -203,12 +204,7 @@ object KotakSessionCoordinator {
                     return@execute
                 }
 
-                val instruments = BackendManager.instruments()
-                    .getActiveWithTokens(2950)
-
-                require(instruments.isNotEmpty()) {
-                    "No instruments with Kotak tokens. Sync scrip master first."
-                }
+                val instruments = activeInstrumentsForFeed()
 
                 val service = KotakNeoLiveFeedService(
                     secureStore = store(),
@@ -216,6 +212,9 @@ object KotakSessionCoordinator {
                     instruments = instruments,
                     onStatus = { message ->
                         updateStatus(message)
+                    },
+                    activeInstrumentsProvider = {
+                        activeInstrumentsForFeed()
                     }
                 )
 
@@ -235,8 +234,7 @@ object KotakSessionCoordinator {
 
     /**
      * Subscribe one instrument on demand (used by the live chart screen).
-     * The global feed already subscribes all tokenised instruments; this
-     * additionally handles indices and instruments outside that snapshot.
+     * The feed only restores active watchlist/chart keys plus primary indices.
      */
     fun requestSubscription(symbol: String, exchange: String) {
         val context = appContext
@@ -277,6 +275,43 @@ object KotakSessionCoordinator {
                     "Live subscribe failed for $exchange:$symbol: ${e.message}"
                 )
             }
+        }
+    }
+
+    fun requestUnsubscription(symbol: String, exchange: String) {
+        val context = appContext
+
+        if (context == null) return
+
+        executor.execute {
+            try {
+                BackendManager.initialize(context)
+
+                val instrument = BackendManager.instruments()
+                    .findBySymbol(symbol, exchange)
+                    ?: return@execute
+
+                val service = synchronized(lock) {
+                    liveFeedService
+                } ?: return@execute
+
+                service.unsubscribeInstrument(instrument)
+            } catch (e: Exception) {
+                updateStatus(
+                    "Live unsubscribe failed for $exchange:$symbol: ${e.message}"
+                )
+            }
+        }
+    }
+
+    private fun activeInstrumentsForFeed(): List<Instrument> {
+        return try {
+            val repository = BackendManager.instruments()
+            MarketDataManager.activeKeys().mapNotNull { key ->
+                repository.findBySymbol(key.symbol, key.exchange)
+            }.distinctBy { "${it.exchange}:${it.symbol}" }
+        } catch (_: Exception) {
+            emptyList()
         }
     }
 

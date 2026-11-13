@@ -14,20 +14,23 @@ import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
 import android.widget.Toast
+import com.sb.backend.core.BackendManager
+import com.sb.backend.models.Instrument
+import com.sb.backend.repositories.InstrumentRepository
 import com.sb.ui.theme.AppDesign
 
 private data class UniversalSearchItem(
     val title: String,
     val subtitle: String,
     val screen: String? = null,
-    val stock: Stock? = null
+    val stock: Instrument? = null
 )
 
 class StockSearchScreen(
     private val context: Context,
-    private val repository: StockRepository = StockRepository(context),
+    private val repository: InstrumentRepository? = null,
     private val onOpenScreen: ((String) -> Unit)? = null,
-    private val onStockSelected: ((Stock) -> Unit)? = null
+    private val onStockSelected: ((Instrument) -> Unit)? = null
 ) {
     private val appScreens = listOf(
         UniversalSearchItem(
@@ -67,6 +70,19 @@ class StockSearchScreen(
         )
     )
 
+    private fun instrumentRepository(): InstrumentRepository? {
+        repository?.let { return it }
+        return try {
+            if (BackendManager.isInitialized()) {
+                BackendManager.instruments()
+            } else {
+                null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     fun createView(): View {
         val root = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -86,7 +102,7 @@ class StockSearchScreen(
         }
 
         val count = TextView(context).apply {
-            text = "Loaded instruments: ${repository.getStockCount()}"
+            text = "Loaded instruments: ${instrumentRepository()?.count() ?: 0}"
             textSize = 11f
             setTextColor(AppDesign.textMuted)
             setPadding(0, 3, 0, 8)
@@ -172,15 +188,30 @@ class StockSearchScreen(
                         item.subtitle.contains(query, ignoreCase = true)
                     }
 
-                    val stockResults = repository.searchStocks(
-                        query,
-                        100
-                    ).map { stock ->
+                    val searchRepository = instrumentRepository()
+                    val stockResults = searchRepository?.search(
+                        query = query,
+                        limit = 100
+                    ).orEmpty().map { stock ->
                         UniversalSearchItem(
                             title = "${stock.symbol} • ${stock.exchange}",
-                            subtitle =
-                                "${stock.name} | ${stock.instrumentType}" +
-                                (stock.isin?.let { " | $it" } ?: ""),
+                            subtitle = buildString {
+                                append(stock.name)
+                                if (stock.category.isNotBlank()) {
+                                    append(" | ")
+                                    append(stock.category)
+                                }
+                                if (stock.subcategory.isNotBlank() &&
+                                    stock.subcategory != stock.category
+                                ) {
+                                    append(" / ")
+                                    append(stock.subcategory)
+                                }
+                                stock.isin?.takeIf { it.isNotBlank() }?.let {
+                                    append(" | ")
+                                    append(it)
+                                }
+                            },
                             stock = stock
                         )
                     }

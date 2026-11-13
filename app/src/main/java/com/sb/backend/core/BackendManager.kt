@@ -14,6 +14,7 @@ import com.sb.backend.repositories.MarketRepository
 import com.sb.backend.repositories.PaperRepository
 import com.sb.backend.repositories.SignalRepository
 import com.sb.backend.security.DeviceIdentity
+import com.sb.backend.services.InstrumentMasterImporter
 import com.sb.backend.services.KotakNeoLiveFeedService
 import com.sb.backend.services.KotakNeoWebSocketClient
 import com.sb.backend.services.KotakSessionCoordinator
@@ -119,6 +120,28 @@ object BackendManager {
                             }
 
                             instrumentRepository.backfillKnownTokens()
+                        }
+
+                        val importContext = appContext
+                        if (importContext != null) {
+                            val importResult = InstrumentMasterImporter(
+                                context = importContext,
+                                databaseHelper = dbHelper,
+                                instrumentRepository = instrumentRepository
+                            ).importIfNeeded()
+
+                            importResult.errors.take(5).forEach { error ->
+                                Log.w(TAG, "Instrument master import: $error")
+                            }
+
+                            Log.i(
+                                TAG,
+                                "Instrument master import: rows=${importResult.rowCount}, " +
+                                    "saved=${importResult.savedCount}, " +
+                                    "skipped=${importResult.skippedCount}, " +
+                                    "changed=${importResult.importedNow}, " +
+                                    "categories=${importResult.categoryCounts}"
+                            )
                         }
 
                         signalRepository.expireOld()
