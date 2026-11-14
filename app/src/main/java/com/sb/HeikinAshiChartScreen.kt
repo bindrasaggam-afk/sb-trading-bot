@@ -1271,6 +1271,20 @@ class HeikinAshiChartScreen(
         val firstTs = candles.firstOrNull()?.timestamp ?: 0L
         val lastTs = candles.lastOrNull()?.timestamp ?: 0L
         Log.i("ChartCandleAudit", "symbol=" + selectedSymbol + " exchange=" + exchangeHint + " timeframe=" + selectedTimeframe + " count=" + candles.size + " first=" + firstTs + " last=" + lastTs)
+        candles.takeLast(5).forEachIndexed { index, candle ->
+            Log.i(
+                "ChartCandleOHLC",
+                "symbol=$selectedSymbol " +
+                    "timeframe=$selectedTimeframe " +
+                    "index=$index " +
+                    "timestamp=${candle.timestamp} " +
+                    "open=${candle.open} " +
+                    "high=${candle.high} " +
+                    "low=${candle.low} " +
+                    "close=${candle.close} " +
+                    "volume=${candle.volume}"
+            )
+        }
         currentCandles = candles.map {
             ChartCandle(
                 timestamp = it.timestamp,

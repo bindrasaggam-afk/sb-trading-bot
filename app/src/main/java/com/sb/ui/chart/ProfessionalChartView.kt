@@ -12,6 +12,7 @@ import android.util.AttributeSet
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
+import android.view.ViewConfiguration
 import com.sb.ui.theme.AppDesign
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -72,6 +73,13 @@ class ProfessionalChartView @JvmOverloads constructor(
     private var crosshairIndex = -1
 
     private var lastTouchX = 0f
+    private var touchStartX = 0f
+    private var isPanning = false
+
+    private val touchSlop = ViewConfiguration
+        .get(context)
+        .scaledTouchSlop
+
     private var previewX = 0f
     private var previewY = 0f
     private var lastGeometry: Geometry? = null
@@ -213,17 +221,78 @@ class ProfessionalChartView @JvmOverloads constructor(
         style = Paint.Style.STROKE
     }
 
-    private val scaleDetector = ScaleGestureDetector(context, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
-        override fun onScale(detector: ScaleGestureDetector): Boolean {
-            val maxLimit = max(MIN_VISIBLE, candles.size.toFloat().coerceAtLeast(MIN_VISIBLE))
-            visibleCount = (visibleCount / detector.scaleFactor).coerceIn(MIN_VISIBLE, maxLimit)
-            if (followLatest) {
-                scrollOffset = max(0f, candles.size - visibleCount)
+    private val scaleDetector = ScaleGestureDetector(
+        context,
+        object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+
+            override fun onScale(detector: ScaleGestureDetector): Boolean {
+                if (candles.isEmpty()) return false
+
+                val geometry = computeGeometry() ?: return false
+
+                // Keep the zoom anchor within the chart's price area.
+                val focusX = detector.focusX.coerceIn(
+                    geometry.left,
+                    geometry.right
+                )
+
+                // Find the exact fractional candle position under the fingers.
+                val anchorPosition =
+                    (focusX - geometry.left) / geometry.slot
+
+                val anchorIndex =
+                    geometry.start + anchorPosition
+
+                // Calculate the new zoom level.
+                val maxLimit = max(
+                    MIN_VISIBLE,
+                    candles.size.toFloat()
+                )
+
+                val newVisibleCount = (
+                    visibleCount / detector.scaleFactor
+                ).coerceIn(
+                    MIN_VISIBLE,
+                    maxLimit
+                )
+
+                if (newVisibleCount == visibleCount) {
+                    return true
+                }
+
+                visibleCount = newVisibleCount
+
+                // Calculate the new candle slot width after zoom.
+                val newVisible = max(
+                    1,
+                    min(candles.size, visibleCount.toInt())
+                )
+
+                val newSlot =
+                    (geometry.right - geometry.left) / newVisible.toFloat()
+
+                // Keep the same candle beneath the fingers.
+                val newStart =
+                    anchorIndex - (focusX - geometry.left) / newSlot
+
+                val maxStart = max(
+                    0f,
+                    candles.size - newVisible.toFloat()
+                )
+
+                scrollOffset = newStart.coerceIn(
+                    0f,
+                    maxStart
+                )
+
+                // Manual zoom should preserve the selected viewport.
+                followLatest = false
+
+                invalidate()
+                return true
             }
-            invalidate()
-            return true
         }
-    })
+    )
 
     init {
         setBackgroundColor(AppDesign.background)
@@ -518,6 +587,17 @@ class ProfessionalChartView @JvmOverloads constructor(
         return raw.coerceIn(geometry.start, geometry.end - 1)
     }
 
+    private fun isInsidePriceArea(
+        x: Float,
+        y: Float,
+        geometry: Geometry
+    ): Boolean {
+        return x >= geometry.left &&
+            x <= geometry.right &&
+            y >= geometry.priceTop &&
+            y <= geometry.priceBottom
+    }
+
     private fun priceAt(y: Float, geometry: Geometry): Double {
         val ratio = ((geometry.priceBottom - y) / (geometry.priceBottom - geometry.priceTop))
             .coerceIn(0f, 1f)
@@ -526,11 +606,54 @@ class ProfessionalChartView @JvmOverloads constructor(
 
     private fun drawPriceGrid(canvas: Canvas, geometry: Geometry) {
         axisPaint.color = AppDesign.textMuted
+        gridPaint.color = AppDesign.divider
+
+        // Keep grid lines inside the actual price chart area.
+        val saveCount = canvas.save()
+        canvas.clipRect(
+            geometry.left,
+            geometry.priceTop,
+            geometry.right,
+            geometry.priceBottom
+        )
+
+        // Horizontal price grid lines.
         for (index in 0..4) {
-            val y = geometry.priceTop + (geometry.priceBottom - geometry.priceTop) * index / 4f
-            canvas.drawLine(geometry.left, y, geometry.right, y, gridPaint)
+            val ratio = index / 4f
+            val y = geometry.priceTop +
+                (geometry.priceBottom - geometry.priceTop) * ratio
+            canvas.drawLine(
+                geometry.left,
+                y,
+                geometry.right,
+                y,
+                gridPaint
+            )
+        }
+
+        // Vertical time grid lines.
+        for (index in 1..3) {
+            val ratio = index / 4f
+            val x = geometry.left +
+                (geometry.right - geometry.left) * ratio
+            canvas.drawLine(
+                x,
+                geometry.priceTop,
+                x,
+                geometry.priceBottom,
+                gridPaint
+            )
+        }
+
+        canvas.restoreToCount(saveCount)
+
+        // Draw price labels outside the clipped chart area.
+        for (index in 0..4) {
+            val ratio = index / 4.0
+            val y = geometry.priceTop +
+                (geometry.priceBottom - geometry.priceTop) * ratio.toFloat()
             val price = geometry.maxPrice -
-                ((geometry.maxPrice - geometry.minPrice) * index / 4.0)
+                (geometry.maxPrice - geometry.minPrice) * ratio
             canvas.drawText(
                 formatPrice(price),
                 width - dp(4f),
@@ -546,7 +669,10 @@ class ProfessionalChartView @JvmOverloads constructor(
             if (candles[index].volume > maxVolume) maxVolume = candles[index].volume
         }
 
-        val candleWidth = max(dp(1.5f), min(dp(12f), geometry.slot * 0.62f))
+        val candleWidth = min(
+            dp(12f),
+            geometry.slot * 0.72f
+        ).coerceAtLeast(dp(0.5f))
         for (index in geometry.start until geometry.end) {
             val candle = candles[index]
             val x = xFor(index, geometry)
@@ -580,61 +706,167 @@ class ProfessionalChartView @JvmOverloads constructor(
     }
 
     private fun drawBars(canvas: Canvas, geometry: Geometry) {
-        val tickWidth = max(dp(2f), min(dp(6f), geometry.slot * 0.35f))
+
+        // Calculate OHLC tick width according to candle spacing.
+        val tickWidth = min(
+            dp(6f),
+            geometry.slot * 0.35f
+        ).coerceAtLeast(dp(0.5f))
+
+        // Restrict OHLC drawing to the price chart area.
+        val saveCount = canvas.save()
+
+        canvas.clipRect(
+            geometry.left,
+            geometry.priceTop,
+            geometry.right,
+            geometry.priceBottom
+        )
 
         for (index in geometry.start until geometry.end) {
+
             val candle = candles[index]
+
+            // Skip invalid OHLC data.
+            if (!candle.open.isFinite() ||
+                !candle.high.isFinite() ||
+                !candle.low.isFinite() ||
+                !candle.close.isFinite()
+            ) {
+                continue
+            }
+
             val x = xFor(index, geometry)
-            val color = if (candle.close >= candle.open) bullishColor else bearishColor
+
+            val color = if (candle.close >= candle.open) {
+                bullishColor
+            } else {
+                bearishColor
+            }
+
             wickPaint.color = color
 
-            canvas.drawLine(
-                x,
-                priceY(candle.high, geometry),
-                x,
-                priceY(candle.low, geometry),
-                wickPaint
-            )
+            val highY = priceY(candle.high, geometry)
+            val lowY = priceY(candle.low, geometry)
             val openY = priceY(candle.open, geometry)
             val closeY = priceY(candle.close, geometry)
-            canvas.drawLine(x - tickWidth / 2f, openY, x, openY, wickPaint)
-            canvas.drawLine(x, closeY, x + tickWidth / 2f, closeY, wickPaint)
+
+            // 1. High-Low vertical line.
+            canvas.drawLine(
+                x,
+                highY,
+                x,
+                lowY,
+                wickPaint
+            )
+
+            // 2. Open tick on the left.
+            canvas.drawLine(
+                x - tickWidth / 2f,
+                openY,
+                x,
+                openY,
+                wickPaint
+            )
+
+            // 3. Close tick on the right.
+            canvas.drawLine(
+                x,
+                closeY,
+                x + tickWidth / 2f,
+                closeY,
+                wickPaint
+            )
         }
+
+        // Restore the original canvas clipping.
+        canvas.restoreToCount(saveCount)
     }
 
     private fun drawCandles(canvas: Canvas, geometry: Geometry) {
-        val candleWidth = max(dp(1.5f), min(dp(12f), geometry.slot * 0.62f))
+        val candleWidth = min(
+            dp(12f),
+            geometry.slot * 0.72f
+        ).coerceAtLeast(dp(0.5f))
+
         val minimumBody = dp(1.2f)
+
+        // Keep candle bodies and wicks inside the price chart area.
+        val saveCount = canvas.save()
+        canvas.clipRect(
+            geometry.left,
+            geometry.priceTop,
+            geometry.right,
+            geometry.priceBottom
+        )
 
         for (index in geometry.start until geometry.end) {
             val candle = candles[index]
+
+            // Ignore invalid OHLC values.
+            if (!candle.open.isFinite() ||
+                !candle.high.isFinite() ||
+                !candle.low.isFinite() ||
+                !candle.close.isFinite()
+            ) {
+                continue
+            }
+
             val x = xFor(index, geometry)
+
             val isBullish = candle.close >= candle.open
             val color = if (isBullish) bullishColor else bearishColor
 
+            val highY = priceY(candle.high, geometry)
+            val lowY = priceY(candle.low, geometry)
+            val openY = priceY(candle.open, geometry)
+            val closeY = priceY(candle.close, geometry)
+
+            // Draw the complete high-low wick first.
             wickPaint.color = color
+
             canvas.drawLine(
                 x,
-                priceY(candle.high, geometry),
+                highY,
                 x,
-                priceY(candle.low, geometry),
+                lowY,
                 wickPaint
             )
 
-            val openY = priceY(candle.open, geometry)
-            val closeY = priceY(candle.close, geometry)
-            val bodyTop = min(openY, closeY)
-            val bodyBottom = max(openY, closeY)
+            // Calculate the actual Open-Close body.
+            val actualTop = min(openY, closeY)
+            val actualBottom = max(openY, closeY)
+            val actualHeight = actualBottom - actualTop
+
+            // Expand tiny bodies equally around their actual center.
+            // This keeps Doji candles visually centered.
+            val bodyCenter = (openY + closeY) / 2f
+
+            val bodyHeight = max(
+                actualHeight,
+                minimumBody
+            )
+
+            val bodyTop = (bodyCenter - bodyHeight / 2f).coerceAtLeast(
+                geometry.priceTop
+            )
+
+            val bodyBottom = (bodyCenter + bodyHeight / 2f).coerceAtMost(
+                geometry.priceBottom
+            )
 
             candlePaint.color = color
+
             canvas.drawRect(
                 x - candleWidth / 2f,
                 bodyTop,
                 x + candleWidth / 2f,
-                max(bodyTop + minimumBody, bodyBottom),
+                bodyBottom,
                 candlePaint
             )
         }
+
+        canvas.restoreToCount(saveCount)
     }
 
     private fun drawLineSeries(canvas: Canvas, geometry: Geometry) {
@@ -1070,10 +1302,22 @@ class ProfessionalChartView @JvmOverloads constructor(
     private fun drawCrosshair(canvas: Canvas, geometry: Geometry) {
         if (!crosshairVisible) return
 
-        val index = crosshairIndex.coerceIn(geometry.start, geometry.end - 1)
-        val candle = candles.getOrNull(index) ?: return
+        val index = crosshairIndex.coerceIn(
+            geometry.start,
+            geometry.end - 1
+        )
+
+        // Original market candle for accurate OHLCV.
+        // Display candles remain responsible for chart rendering.
+        val candle = source.getOrNull(index)
+            ?: candles.getOrNull(index)
+            ?: return
+
         val x = xFor(index, geometry)
-        val y = crosshairY.coerceIn(geometry.priceTop, geometry.priceBottom)
+        val y = crosshairY.coerceIn(
+            geometry.priceTop,
+            geometry.priceBottom
+        )
 
         canvas.drawLine(x, geometry.priceTop, x, geometry.bottom, crosshairPaint)
         canvas.drawLine(geometry.left, y, geometry.right, y, crosshairPaint)
@@ -1090,11 +1334,17 @@ class ProfessionalChartView @JvmOverloads constructor(
         canvas.drawRect(
             (x - timeWidth / 2f - dp(5f)).coerceIn(
                 geometry.left,
-                max(geometry.left, geometry.right - timeWidth - dp(10f))
+                max(
+                    geometry.left,
+                    geometry.right - timeWidth - dp(10f)
+                )
             ),
             height - dp(18f),
             (x + timeWidth / 2f + dp(5f)).coerceIn(
-                min(geometry.right, geometry.left + timeWidth + dp(10f)),
+                min(
+                    geometry.right,
+                    geometry.left + timeWidth + dp(10f)
+                ),
                 width.toFloat()
             ),
             height.toFloat(),
@@ -1102,14 +1352,26 @@ class ProfessionalChartView @JvmOverloads constructor(
         )
         canvas.drawText(
             timeText,
-            (x - timeWidth / 2f).coerceIn(geometry.left + dp(2f), max(geometry.left + dp(2f), geometry.right - timeWidth)),
+            (x - timeWidth / 2f).coerceIn(
+                geometry.left + dp(2f),
+                max(
+                    geometry.left + dp(2f),
+                    geometry.right - timeWidth
+                )
+            ),
             height - dp(5f),
             tooltipTextPaint
         )
 
-        val info = "O ${formatPrice(candle.open)}  H ${formatPrice(candle.high)}  " +
-            "L ${formatPrice(candle.low)}  C ${formatPrice(candle.close)}  V ${formatQuantity(candle.volume)}"
-        val infoWidth = min(geometry.right - geometry.left - dp(8f), tooltipTextPaint.measureText(info) + dp(12f))
+        val info = "O ${formatPrice(candle.open)} " +
+            "H ${formatPrice(candle.high)} " +
+            "L ${formatPrice(candle.low)} " +
+            "C ${formatPrice(candle.close)} " +
+            "V ${formatQuantity(candle.volume)}"
+        val infoWidth = min(
+            geometry.right - geometry.left - dp(8f),
+            tooltipTextPaint.measureText(info) + dp(12f)
+        )
         val boxLeft = geometry.left + dp(2f)
         val boxTop = geometry.priceTop + dp(16f)
         canvas.drawRect(
@@ -1129,7 +1391,9 @@ class ProfessionalChartView @JvmOverloads constructor(
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         scaleDetector.onTouchEvent(event)
+
         if (scaleDetector.isInProgress) {
+            isPanning = false
             crosshairVisible = false
             onCrosshairChanged?.invoke(null, -1)
             invalidate()
@@ -1139,18 +1403,38 @@ class ProfessionalChartView @JvmOverloads constructor(
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 lastTouchX = event.x
+                touchStartX = event.x
+                isPanning = false
+
                 previewX = event.x
                 previewY = event.y
+
                 if (activeTool == ChartTool.CROSSHAIR) {
                     val geometry = computeGeometry()
-                    if (geometry != null) {
+
+                    if (geometry != null &&
+                        isInsidePriceArea(event.x, event.y, geometry)
+                    ) {
                         crosshairVisible = true
                         crosshairX = event.x
-                        crosshairY = event.y
+                        crosshairY = event.y.coerceIn(
+                            geometry.priceTop,
+                            geometry.priceBottom
+                        )
+
                         crosshairIndex = indexAt(event.x, geometry)
-                        onCrosshairChanged?.invoke(candles.getOrNull(crosshairIndex), crosshairIndex)
+
+                        onCrosshairChanged?.invoke(
+                            source.getOrNull(crosshairIndex),
+                            crosshairIndex
+                        )
+                    } else {
+                        crosshairVisible = false
+                        crosshairIndex = -1
+                        onCrosshairChanged?.invoke(null, -1)
                     }
                 }
+
                 invalidate()
                 return true
             }
@@ -1158,17 +1442,58 @@ class ProfessionalChartView @JvmOverloads constructor(
             MotionEvent.ACTION_MOVE -> {
                 previewX = event.x
                 previewY = event.y
+
                 if (activeTool == ChartTool.CROSSHAIR) {
+                    // CROSSHAIR mode: move crosshair only.
+                    // Never pan the chart in this mode.
                     val geometry = computeGeometry()
-                    if (geometry != null) {
-                        // Crosshair drag only selects another candle.
-                        // Keep the candle viewport fixed while inspecting data.
-                        crosshairX = event.x
-                        crosshairY = event.y
-                        crosshairIndex = indexAt(event.x, geometry)
-                        onCrosshairChanged?.invoke(candles.getOrNull(crosshairIndex), crosshairIndex)
+
+                    if (geometry != null && crosshairVisible) {
+                        crosshairX = event.x.coerceIn(
+                            geometry.left,
+                            geometry.right
+                        )
+
+                        crosshairY = event.y.coerceIn(
+                            geometry.priceTop,
+                            geometry.priceBottom
+                        )
+
+                        crosshairIndex = indexAt(crosshairX, geometry)
+
+                        onCrosshairChanged?.invoke(
+                            source.getOrNull(crosshairIndex),
+                            crosshairIndex
+                        )
+                    }
+                } else {
+                    // Other tool modes: horizontal chart pan.
+                    val totalDrag = abs(event.x - touchStartX)
+
+                    if (totalDrag > touchSlop) {
+                        isPanning = true
+                    }
+
+                    if (isPanning) {
+                        val deltaX = event.x - lastTouchX
+                        val geometry = lastGeometry ?: computeGeometry()
+
+                        if (geometry != null && geometry.slot > 0f) {
+                            val maxScroll = max(
+                                0f,
+                                candles.size.toFloat() - visibleCount
+                            )
+
+                            scrollOffset = (
+                                scrollOffset - deltaX / geometry.slot
+                            ).coerceIn(0f, maxScroll)
+
+                            followLatest = scrollOffset >= maxScroll - 0.01f
+                        }
                     }
                 }
+
+                lastTouchX = event.x
                 invalidate()
                 return true
             }
@@ -1177,8 +1502,14 @@ class ProfessionalChartView @JvmOverloads constructor(
                 if (activeTool != ChartTool.CROSSHAIR) {
                     handleDrawingTap(event.x, event.y)
                 }
+
                 crosshairVisible = false
                 onCrosshairChanged?.invoke(null, -1)
+
+                isPanning = false
+                previewX = 0f
+                previewY = 0f
+
                 invalidate()
                 performClick()
                 return true
@@ -1187,12 +1518,16 @@ class ProfessionalChartView @JvmOverloads constructor(
             MotionEvent.ACTION_CANCEL -> {
                 crosshairVisible = false
                 onCrosshairChanged?.invoke(null, -1)
+
+                isPanning = false
                 previewX = 0f
                 previewY = 0f
+
                 invalidate()
                 return true
             }
         }
+
         return true
     }
 
