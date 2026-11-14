@@ -14,6 +14,7 @@ import com.sb.backend.repositories.MarketRepository
 import com.sb.backend.repositories.PaperRepository
 import com.sb.backend.repositories.SignalRepository
 import com.sb.backend.security.DeviceIdentity
+import com.sb.backend.services.InstrumentMasterImporter
 import com.sb.backend.services.KotakNeoLiveFeedService
 import com.sb.backend.services.KotakNeoWebSocketClient
 import com.sb.backend.services.KotakSessionCoordinator
@@ -23,6 +24,8 @@ import com.sb.backend.services.RiskManager
 import com.sb.backend.services.SignalEngine
 import java.io.File
 import java.io.IOException
+import java.io.OutputStreamWriter
+import java.nio.charset.StandardCharsets
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
@@ -117,6 +120,28 @@ object BackendManager {
                             }
 
                             instrumentRepository.backfillKnownTokens()
+                        }
+
+                        val importContext = appContext
+                        if (importContext != null) {
+                            val importResult = InstrumentMasterImporter(
+                                context = importContext,
+                                databaseHelper = dbHelper,
+                                instrumentRepository = instrumentRepository
+                            ).importIfNeeded()
+
+                            importResult.errors.take(5).forEach { error ->
+                                Log.w(TAG, "Instrument master import: $error")
+                            }
+
+                            Log.i(
+                                TAG,
+                                "Instrument master import: rows=${importResult.rowCount}, " +
+                                    "saved=${importResult.savedCount}, " +
+                                    "skipped=${importResult.skippedCount}, " +
+                                    "changed=${importResult.importedNow}, " +
+                                    "categories=${importResult.categoryCounts}"
+                            )
                         }
 
                         signalRepository.expireOld()
@@ -308,6 +333,100 @@ object BackendManager {
         } catch (error: Exception) {
             error.printStackTrace()
             null
+        }
+    }
+
+    /**
+     * Exports only historical candle rows to a CSV in the public Downloads folder.
+     * The database is queried read-only; no candle or account rows are modified.
+     * Returns the saved Uri and exported row count.
+     */
+    fun exportCandlesCsvToDownloads(): Pair<Uri, Int>? {
+        val context = appContext ?: return null
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+
+        var outputUri: Uri? = null
+        return try {
+            val resolver = context.contentResolver
+            val values = ContentValues().apply {
+                put(
+                    MediaStore.Downloads.DISPLAY_NAME,
+                    "sb_historical_candles_${System.currentTimeMillis()}.csv"
+                )
+                put(MediaStore.Downloads.MIME_TYPE, "text/csv")
+                put(MediaStore.Downloads.RELATIVE_PATH, "Download")
+                put(MediaStore.Downloads.IS_PENDING, 1)
+            }
+
+            val uri = resolver.insert(
+                MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                values
+            ) ?: throw IOException("Cannot create CSV in Downloads")
+            outputUri = uri
+
+            var exported = 0
+            resolver.openOutputStream(uri)?.use { stream ->
+                OutputStreamWriter(stream, StandardCharsets.UTF_8).use { writer ->
+                    writer.write("symbol,exchange,timeframe,timestamp,open,high,low,close,volume,candle_status\n")
+                    database().readableDatabase.rawQuery(
+                        """
+                        SELECT symbol, exchange, timeframe, timestamp,
+                               open, high, low, close, volume, status
+                        FROM ${SBDatabaseHelper.TABLE_CANDLES}
+                        ORDER BY symbol ASC, exchange ASC, timeframe ASC, timestamp ASC
+                        """.trimIndent(),
+                        null
+                    ).use { cursor ->
+                        while (cursor.moveToNext()) {
+                            val fields = (0 until cursor.columnCount).map { index ->
+                                if (cursor.isNull(index)) "" else cursor.getString(index)
+                            }
+                            writer.write(fields.joinToString(",") { csvEscape(it) })
+                            writer.write("\n")
+                            exported++
+                        }
+                    }
+                    writer.flush()
+                }
+            } ?: throw IOException("Cannot open CSV output stream")
+
+            if (exported == 0) {
+                resolver.delete(uri, null, null)
+                outputUri = null
+                null
+            } else {
+                val completed = ContentValues().apply {
+                    put(MediaStore.Downloads.IS_PENDING, 0)
+                }
+                check(resolver.update(uri, completed, null, null) == 1) {
+                    "Could not finalize CSV in Downloads"
+                }
+                Pair(uri, exported)
+            }
+        } catch (error: Exception) {
+            outputUri?.let { uri ->
+                try {
+                    context.contentResolver.delete(uri, null, null)
+                } catch (_: Exception) {
+                    // Keep the original export error.
+                }
+            }
+            Log.e(TAG, "Historical candle CSV export failed", error)
+            null
+        }
+    }
+
+    private fun csvEscape(value: String): String {
+        val escaped = value.replace("\"", "\"\"")
+        return if (
+            escaped.contains(",") ||
+            escaped.contains("\"") ||
+            escaped.contains("\n") ||
+            escaped.contains("\r")
+        ) {
+            "\"$escaped\""
+        } else {
+            escaped
         }
     }
 

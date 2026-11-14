@@ -115,13 +115,13 @@ object SignalScanCoordinator {
 
             if (aggregated.size >= MIN_CANDLES) {
                 return try {
-                    BackendManager.market().saveCandles(
+                    val saved = BackendManager.market().saveCandles(
                         symbol = key.symbol,
                         exchange = key.exchange,
                         timeframe = target,
                         candles = aggregated
                     )
-                    true
+                    saved == aggregated.size
                 } catch (_: Exception) {
                     false
                 }

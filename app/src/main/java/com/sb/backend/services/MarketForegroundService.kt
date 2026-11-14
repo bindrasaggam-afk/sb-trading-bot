@@ -1,4 +1,3 @@
-
 package com.sb.backend.services
 
 import android.app.Notification
@@ -13,6 +12,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.sb.backend.core.BackendManager
 import com.sb.backend.server.EmbeddedApiServer
+import java.util.concurrent.Executors
 
 class MarketForegroundService : Service() {
 
@@ -60,6 +60,11 @@ class MarketForegroundService : Service() {
 
     // API server is owned by this foreground service.
     private var embeddedApiServer: EmbeddedApiServer? = null
+    private val runtimeExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "sb-market-runtime").apply {
+            isDaemon = true
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -74,13 +79,18 @@ class MarketForegroundService : Service() {
     ): Int {
 
         try {
+            // Android requires foreground promotion promptly. Keep this small
+            // operation on the service thread, and move all backend/API work
+            // off the main thread to avoid startup ANRs.
             startForeground(
                 NOTIFICATION_ID,
                 createNotification()
             )
 
             if (intent == null || intent.action == ACTION_START) {
-                startBackendRuntime()
+                runtimeExecutor.execute {
+                    startBackendRuntime()
+                }
             }
 
         } catch (error: Exception) {
@@ -115,6 +125,9 @@ class MarketForegroundService : Service() {
                     KotakSessionCoordinator.initialize(
                         applicationContext
                     )
+
+                    // Persist finalized candles independently of chart visibility.
+                    MarketRuntimeService.start()
 
                     KotakSessionCoordinator.startIfEnabled()
 
@@ -210,8 +223,10 @@ class MarketForegroundService : Service() {
     override fun onDestroy() {
         Log.w(TAG, "Foreground service destroyed")
 
+        MarketRuntimeService.stop()
         stopApiServer()
         resetRuntimeState()
+        runtimeExecutor.shutdownNow()
 
         super.onDestroy()
     }

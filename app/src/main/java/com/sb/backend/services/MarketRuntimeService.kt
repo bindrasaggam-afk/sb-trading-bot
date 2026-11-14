@@ -167,7 +167,12 @@ object MarketRuntimeService {
         val key = normalize(tick.key)
         val id = key.key()
 
-        if (!tracked.containsKey(id)) return
+        // The foreground runtime observes every instrument that the broker
+        // feed actually delivers. This keeps candle persistence independent
+        // of whether a chart screen/ViewModel is currently open.
+        if (tracked.putIfAbsent(id, key) == null) {
+            seedFromStore(key)
+        }
 
         val result = try {
             engine.addTick(tick)
@@ -204,11 +209,15 @@ object MarketRuntimeService {
 
         executor.execute {
             try {
-                MarketFeedRepository.saveCandles(
+                val baseSaved = saveCandlesWithRetry(
                     key = key,
                     timeframe = BASE_TIMEFRAME_LABEL,
                     candles = snapshot
                 )
+                check(baseSaved == snapshot.size) {
+                    "Base candle persistence incomplete: saved " +
+                        baseSaved + " of " + snapshot.size
+                }
 
                 persistClosedTargets(key, latestBaseTimestamp)
 
@@ -229,8 +238,23 @@ object MarketRuntimeService {
 
         targetTimeframes.forEach { timeframe ->
             val savedKey = "$id|${timeframe.label}"
-            val lastSaved = lastSavedTarget[savedKey] ?: 0L
             val interval = timeframe.seconds * 1_000L
+            val lastSaved = lastSavedTarget[savedKey] ?: run {
+                // Resume from the latest stored bucket instead of rewriting
+                // the full historical series after every app restart.
+                val latestStored = MarketFeedRepository.loadStoredCandles(
+                    key = key,
+                    timeframe = timeframe.label,
+                    limit = 1
+                ).lastOrNull()?.timestamp ?: 0L
+                val resumeAfter = if (latestStored > 0L) {
+                    (latestStored - interval).coerceAtLeast(0L)
+                } else {
+                    0L
+                }
+                lastSavedTarget.putIfAbsent(savedKey, resumeAfter)
+                lastSavedTarget[savedKey] ?: resumeAfter
+            }
 
             val closed = engine.candles(key, timeframe)
                 .filter { candle ->
@@ -240,18 +264,60 @@ object MarketRuntimeService {
 
             if (closed.isEmpty()) return@forEach
 
-            val saved = MarketFeedRepository.saveCandles(
+            val saved = saveCandlesWithRetry(
                 key = key,
                 timeframe = timeframe.label,
                 candles = closed
             )
 
-            if (saved > 0) {
+            if (saved == closed.size) {
                 lastSavedTarget[savedKey] = closed.last().timestamp
             }
         }
     }
 
+    /**
+     * A candle batch is persisted only when every row is saved.
+     * Retry transient failures and never advance the timeframe cursor
+     * after a partial or failed write.
+     */
+    private fun saveCandlesWithRetry(
+        key: InstrumentKey,
+        timeframe: String,
+        candles: List<MarketCandle>
+    ): Int {
+        if (candles.isEmpty()) return 0
+
+        val delaysMs = longArrayOf(250L, 500L, 1_000L, 2_000L)
+        var lastSaved = 0
+
+        for (attempt in 0..delaysMs.size) {
+            // Finish already-enqueued persistence even if the feed is stopping.
+            lastSaved = MarketFeedRepository.saveCandles(
+                key = key,
+                timeframe = timeframe,
+                candles = candles
+            )
+
+            if (lastSaved == candles.size) return lastSaved
+
+            if (attempt < delaysMs.size) {
+                try {
+                    Thread.sleep(delaysMs[attempt])
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    return 0
+                }
+            }
+        }
+
+        throw IllegalStateException(
+            "Candle persistence incomplete for " +
+                key.exchange + ":" + key.symbol + "/" + timeframe +
+                ": saved " + lastSaved + " of " + candles.size +
+                " after " + (delaysMs.size + 1) + " attempts"
+        )
+    }
     private fun seedFromStore(key: InstrumentKey) {
         executor.execute {
             try {

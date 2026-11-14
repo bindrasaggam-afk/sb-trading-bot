@@ -3,12 +3,13 @@ package com.sb.ui.chart
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.sqrt
+import com.sb.backend.market.TimeframeBuckets
 
 object IndicatorMath {
 
     fun sma(values: List<Double>, period: Int): DoubleArray {
         val result = DoubleArray(values.size) { Double.NaN }
-        if (period <= 0 || values.size < period) return result
+        if (period <= 0 || values.size < period || values.any { !it.isFinite() }) return result
         var sum = 0.0
         for (i in values.indices) {
             sum += values[i]
@@ -24,7 +25,7 @@ object IndicatorMath {
 
     fun ema(values: List<Double>, period: Int): DoubleArray {
         val result = DoubleArray(values.size) { Double.NaN }
-        if (period <= 0 || values.isEmpty()) return result
+        if (period <= 0 || values.isEmpty() || values.any { !it.isFinite() }) return result
         val multiplier = 2.0 / (period + 1.0)
         var seed = 0.0
         var seedCount = 0
@@ -46,20 +47,43 @@ object IndicatorMath {
         return result
     }
 
+    /**
+     * Session VWAP using the exchange-local trading date (IST for supported
+     * Indian exchanges). Zero-volume candles do not fabricate a VWAP value.
+     */
     fun vwap(candles: List<ChartCandle>): DoubleArray {
         val result = DoubleArray(candles.size) { Double.NaN }
+        var activeSession = ""
         var cumulativePriceVolume = 0.0
         var cumulativeVolume = 0.0
         for (i in candles.indices) {
             val candle = candles[i]
-            val typical = (candle.high + candle.low + candle.close) / 3.0
-            val volume = candle.volume.coerceAtLeast(0L).toDouble()
-            cumulativePriceVolume += typical * volume
-            cumulativeVolume += volume
-            result[i] = if (cumulativeVolume > 0.0) {
-                cumulativePriceVolume / cumulativeVolume
+            val session = if (candle.timestamp > 0L) {
+                TimeframeBuckets.sessionKey(candle.timestamp)
             } else {
-                typical
+                ""
+            }
+            if (i == 0 || session != activeSession) {
+                activeSession = session
+                cumulativePriceVolume = 0.0
+                cumulativeVolume = 0.0
+            }
+            if (!candle.high.isFinite() || !candle.low.isFinite() ||
+                !candle.close.isFinite() || candle.volume < 0L
+            ) continue
+            if (candle.high < candle.low) continue
+            val typical = (candle.high / 3.0) + (candle.low / 3.0) + (candle.close / 3.0)
+            val volume = candle.volume.toDouble()
+            val priceVolume = typical * volume
+            if (!typical.isFinite() || !priceVolume.isFinite()) continue
+            val nextPriceVolume = cumulativePriceVolume + priceVolume
+            val nextVolume = cumulativeVolume + volume
+            if (!nextPriceVolume.isFinite() || !nextVolume.isFinite()) continue
+            cumulativePriceVolume = nextPriceVolume
+            cumulativeVolume = nextVolume
+            if (cumulativeVolume > 0.0) {
+                val value = cumulativePriceVolume / cumulativeVolume
+                if (value.isFinite()) result[i] = value
             }
         }
         return result
@@ -67,7 +91,7 @@ object IndicatorMath {
 
     fun rsi(values: List<Double>, period: Int = 14): DoubleArray {
         val result = DoubleArray(values.size) { Double.NaN }
-        if (period <= 0 || values.size <= period) return result
+        if (period <= 0 || values.size <= period || values.any { !it.isFinite() }) return result
 
         var gain = 0.0
         var loss = 0.0
@@ -91,6 +115,7 @@ object IndicatorMath {
     }
 
     private fun rsiValue(averageGain: Double, averageLoss: Double): Double {
+        if (averageGain == 0.0 && averageLoss == 0.0) return 50.0
         if (averageLoss == 0.0) return 100.0
         val relativeStrength = averageGain / averageLoss
         return 100.0 - (100.0 / (1.0 + relativeStrength))
@@ -108,14 +133,36 @@ object IndicatorMath {
         slowPeriod: Int = 26,
         signalPeriod: Int = 9
     ): MacdResult {
+        val macd = DoubleArray(values.size) { Double.NaN }
+        val signal = DoubleArray(values.size) { Double.NaN }
+        val histogram = DoubleArray(values.size) { Double.NaN }
+        if (fastPeriod <= 0 || slowPeriod <= fastPeriod || signalPeriod <= 0 ||
+            values.isEmpty() || values.any { !it.isFinite() }
+        ) {
+            return MacdResult(macd, signal, histogram)
+        }
+
         val fast = ema(values, fastPeriod)
         val slow = ema(values, slowPeriod)
-        val macd = DoubleArray(values.size) { i ->
-            if (fast[i].isFinite() && slow[i].isFinite()) fast[i] - slow[i] else Double.NaN
+        for (i in values.indices) {
+            if (fast[i].isFinite() && slow[i].isFinite()) {
+                macd[i] = fast[i] - slow[i]
+            }
         }
-        val signal = ema(macd.map { if (it.isFinite()) it else 0.0 }, signalPeriod)
-        val histogram = DoubleArray(values.size) { i ->
-            if (macd[i].isFinite() && signal[i].isFinite()) macd[i] - signal[i] else Double.NaN
+
+        // Seed the signal EMA from the first real MACD value. Replacing
+        // pre-warmup NaNs with zero biases the signal line toward zero.
+        val firstMacdIndex = macd.indexOfFirst { it.isFinite() }
+        if (firstMacdIndex >= 0) {
+            val validMacd = macd.copyOfRange(firstMacdIndex, macd.size).toList()
+            val alignedSignal = ema(validMacd, signalPeriod)
+            for (offset in alignedSignal.indices) {
+                val index = firstMacdIndex + offset
+                signal[index] = alignedSignal[offset]
+                if (macd[index].isFinite() && signal[index].isFinite()) {
+                    histogram[index] = macd[index] - signal[index]
+                }
+            }
         }
         return MacdResult(macd, signal, histogram)
     }
@@ -132,6 +179,10 @@ object IndicatorMath {
         multiplier: Double = 2.0
     ): BollingerResult {
         val middle = sma(values, period)
+        if (!multiplier.isFinite() || multiplier < 0.0 || period <= 1) {
+            val invalid = DoubleArray(values.size) { Double.NaN }
+            return BollingerResult(middle, invalid, invalid.copyOf())
+        }
         val deviation = standardDeviation(values, period)
         val upper = DoubleArray(values.size) { index ->
             if (middle[index].isFinite() && deviation[index].isFinite()) {
@@ -156,37 +207,48 @@ object IndicatorMath {
 
         var previousAtr = Double.NaN
         var seedSum = 0.0
+        var validCount = 0
+        var previousClose = Double.NaN
 
         for (index in candles.indices) {
             val candle = candles[index]
-            val trueRange = if (index == 0) {
-                candle.high - candle.low
-            } else {
-                val previousClose = candles[index - 1].close
-                max(
-                    candle.high - candle.low,
-                    max(
-                        abs(candle.high - previousClose),
-                        abs(candle.low - previousClose)
-                    )
-                )
+            val valid = candle.high.isFinite() && candle.low.isFinite() &&
+                candle.close.isFinite() && candle.high >= candle.low
+            if (!valid) {
+                previousAtr = Double.NaN
+                seedSum = 0.0
+                validCount = 0
+                previousClose = Double.NaN
+                continue
             }
 
-            when {
-                index < period - 1 -> seedSum += trueRange
-                index == period - 1 -> {
-                    seedSum += trueRange
+            val trueRange = if (previousClose.isFinite()) {
+                max(
+                    candle.high - candle.low,
+                    max(abs(candle.high - previousClose), abs(candle.low - previousClose))
+                )
+            } else {
+                candle.high - candle.low
+            }
+            if (!trueRange.isFinite() || trueRange < 0.0) {
+                previousAtr = Double.NaN
+                seedSum = 0.0
+                validCount = 0
+                previousClose = Double.NaN
+                continue
+            }
+
+            previousClose = candle.close
+            if (!previousAtr.isFinite()) {
+                seedSum += trueRange
+                validCount++
+                if (validCount == period) {
                     previousAtr = seedSum / period
                     result[index] = previousAtr
                 }
-                else -> {
-                    val current = (
-                        (if (previousAtr.isFinite()) previousAtr else trueRange) *
-                            (period - 1) + trueRange
-                        ) / period
-                    previousAtr = current
-                    result[index] = current
-                }
+            } else {
+                previousAtr = (previousAtr * (period - 1) + trueRange) / period
+                result[index] = previousAtr
             }
         }
         return result
@@ -204,7 +266,7 @@ object IndicatorMath {
     ): SupertrendResult {
         val line = DoubleArray(candles.size) { Double.NaN }
         val direction = IntArray(candles.size)
-        if (period <= 0 || multiplier <= 0.0 || candles.isEmpty()) {
+        if (period <= 0 || !multiplier.isFinite() || multiplier <= 0.0 || candles.isEmpty()) {
             return SupertrendResult(line, direction)
         }
 
@@ -215,10 +277,15 @@ object IndicatorMath {
 
         for (index in candles.indices) {
             val currentAtr = atrValues[index]
-            if (!currentAtr.isFinite()) continue
+            if (!currentAtr.isFinite()) {
+                finalUpper = Double.NaN
+                finalLower = Double.NaN
+                previousDirection = 1
+                continue
+            }
 
             val candle = candles[index]
-            val middle = (candle.high + candle.low) / 2.0
+            val middle = candle.high / 2.0 + candle.low / 2.0
             val basicUpper = middle + multiplier * currentAtr
             val basicLower = middle - multiplier * currentAtr
             val previousClose = if (index > 0) {

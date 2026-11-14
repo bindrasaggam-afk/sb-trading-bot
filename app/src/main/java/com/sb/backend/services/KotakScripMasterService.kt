@@ -75,9 +75,9 @@ class KotakScripMasterService(
         SegmentConfig(
             name = "nse_cm",
             exchange = "NSE",
-            // ETF को EQ के साथ map नहीं करें।
-            // ETF के लिए अलग master classification आवश्यक है।
-            databaseSegments = listOf("EQ"),
+            // NSE master contains equities and ETFs.
+            // INDEX rows are subscribed by feed name, not by token.
+            databaseSegments = listOf("EQ", "ETF"),
             cash = true
         ),
         SegmentConfig(
@@ -240,6 +240,8 @@ class KotakScripMasterService(
                 )
             }
         }
+
+        expandNseAliases(cashUpdates)
 
         // ------------------------------------------------------------
         // NSE / BSE CASH TOKEN UPDATE
@@ -676,11 +678,13 @@ class KotakScripMasterService(
                 val validGroup = when (config.name) {
 
                     "nse_cm" -> {
-                        group == "EQ" ||
-                            tradingSymbol.endsWith(
-                                "-EQ",
-                                ignoreCase = true
-                            )
+                        group in NSE_CASH_GROUPS ||
+                            NSE_CASH_GROUPS.any {
+                                tradingSymbol.endsWith(
+                                    "-$it",
+                                    ignoreCase = true
+                                )
+                            }
                     }
 
                     "bse_cm" -> {
@@ -748,6 +752,51 @@ class KotakScripMasterService(
         }
 
         return result
+    }
+
+    /**
+     * Legacy NSE symbols (e.g. ZOMATO, CADILAHC) are not present in the
+     * current master. Reuse the token of their renamed symbol so bundled
+     * master rows can still receive live ticks.
+     */
+    private fun expandNseAliases(
+        cashUpdates: LinkedHashMap<String, KotakScripToken>
+    ) {
+        if (cashUpdates.isEmpty()) return
+
+        val nseBySymbol = LinkedHashMap<String, KotakScripToken>()
+
+        cashUpdates.values.forEach { token ->
+            if (token.exchange.equals("NSE", ignoreCase = true)) {
+                val symbol = normalizeSymbol(token.symbol)
+                if (!nseBySymbol.containsKey(symbol)) {
+                    nseBySymbol[symbol] = token
+                }
+            }
+        }
+
+        if (nseBySymbol.isEmpty()) return
+
+        KotakSymbolAliases.map.forEach { (legacy, current) ->
+
+            val source = nseBySymbol[
+                normalizeSymbol(current)
+            ] ?: return@forEach
+
+            val identity = normalizeSymbol(legacy)
+
+            val key = buildString {
+                append(source.exchange)
+                append('|')
+                append(identity)
+                append('|')
+                append(source.segments.joinToString(","))
+            }
+
+            if (!cashUpdates.containsKey(key)) {
+                cashUpdates[key] = source.copy(symbol = legacy)
+            }
+        }
     }
 
     // =================================================================
@@ -1104,6 +1153,14 @@ class KotakScripMasterService(
 
         private const val FIVE_YEARS_MS =
             5L * 365L * 24L * 60L * 60L * 1000L
+
+        private val NSE_CASH_GROUPS = setOf(
+            "EQ",
+            "BE",
+            "BZ",
+            "ST",
+            "SM"
+        )
 
         private val BSE_CASH_GROUPS = setOf(
             "A",

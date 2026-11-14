@@ -5,6 +5,7 @@ import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import com.sb.backend.core.AppConfig
 import com.sb.backend.database.SBDatabaseHelper
+import com.sb.backend.database.DatabaseMaintenanceGate
 import com.sb.backend.models.OrderSide
 import com.sb.backend.models.OrderStatus
 import com.sb.backend.models.PaperOrder
@@ -23,10 +24,12 @@ data class PaperAccount(
 }
 
 class PaperRepository(
-    private val databaseHelper: SBDatabaseHelper
+    private val databaseHelper: SBDatabaseHelper,
+    private val maintenanceGate: DatabaseMaintenanceGate = DatabaseMaintenanceGate.shared
 ) {
 
     fun ensureAccount(startingBalance: Double): PaperAccount {
+        return maintenanceGate.withOperation {
         require(startingBalance.isFinite() && startingBalance > 0.0) {
             "Starting balance must be a valid positive amount."
         }
@@ -58,11 +61,14 @@ class PaperRepository(
             realizedPnl = 0.0,
             updatedAt = now
         )
+    
+        }
     }
 
-    fun hasAccount(): Boolean = getAccount() != null
+    fun hasAccount(): Boolean = maintenanceGate.withOperation { getAccount() != null }
 
     fun getAccount(): PaperAccount? {
+        return maintenanceGate.withOperation {
         databaseHelper.readableDatabase.query(
             SBDatabaseHelper.TABLE_PAPER_ACCOUNT,
             accountProjection,
@@ -74,9 +80,12 @@ class PaperRepository(
         ).use { cursor ->
             return if (cursor.moveToFirst()) readAccount(cursor) else null
         }
+    
+        }
     }
 
     fun setStartingBalance(startingBalance: Double): PaperAccount {
+        return maintenanceGate.withOperation {
         require(startingBalance.isFinite() && startingBalance > 0.0) {
             "Starting balance must be a valid positive amount."
         }
@@ -113,6 +122,8 @@ class PaperRepository(
         } finally {
             db.endTransaction()
         }
+    
+        }
     }
 
     fun saveOrder(
@@ -123,6 +134,7 @@ class PaperRepository(
         entryPrice: Double,
         note: String = ""
     ): PaperOrder {
+        return maintenanceGate.withOperation {
         require(symbol.isNotBlank()) { "Symbol cannot be empty." }
         require(quantity > 0) { "Quantity must be greater than zero." }
         require(entryPrice.isFinite() && entryPrice > 0.0) {
@@ -233,9 +245,12 @@ class PaperRepository(
         } finally {
             db.endTransaction()
         }
+    
+        }
     }
 
     fun closeOrder(orderId: Long, exitPrice: Double): PaperOrder? {
+        return maintenanceGate.withOperation {
         require(orderId > 0L) { "Invalid order ID." }
         require(exitPrice.isFinite() && exitPrice > 0.0) {
             "Exit price must be valid and positive."
@@ -326,13 +341,19 @@ class PaperRepository(
         } finally {
             db.endTransaction()
         }
+    
+        }
     }
 
     fun getOrder(orderId: Long): PaperOrder? {
+        return maintenanceGate.withOperation {
         return queryOrder(databaseHelper.readableDatabase, orderId)
+    
+        }
     }
 
     fun getOrders(status: String? = null): List<PaperOrder> {
+        return maintenanceGate.withOperation {
         val selection: String?
         val args: Array<String>?
         if (status == null) {
@@ -359,13 +380,19 @@ class PaperRepository(
             }
         }
         return result
+    
+        }
     }
 
     fun getOpenOrders(): List<PaperOrder> {
+        return maintenanceGate.withOperation {
         return getOrders(OrderStatus.OPEN.name)
+    
+        }
     }
 
     fun getPositions(openOnly: Boolean = true): List<Position> {
+        return maintenanceGate.withOperation {
         val selection = if (openOnly) "status = ?" else null
         val args = if (openOnly) {
             arrayOf(OrderStatus.OPEN.name)
@@ -388,9 +415,12 @@ class PaperRepository(
             }
         }
         return result
+    
+        }
     }
 
     fun updatePositionPrices(prices: Map<String, Double>): Int {
+        return maintenanceGate.withOperation {
         if (prices.isEmpty()) return 0
         val db = databaseHelper.writableDatabase
         var updated = 0
@@ -424,9 +454,12 @@ class PaperRepository(
             db.endTransaction()
         }
         return updated
+    
+        }
     }
 
     fun getReservedMargin(): Double {
+        return maintenanceGate.withOperation {
         return databaseHelper.readableDatabase.rawQuery(
             "SELECT COALESCE(SUM(reserved_margin), 0) " +
                 "FROM ${SBDatabaseHelper.TABLE_POSITIONS} WHERE status = ?",
@@ -434,9 +467,12 @@ class PaperRepository(
         ).use { cursor ->
             if (cursor.moveToFirst()) cursor.getDouble(0) else 0.0
         }
+    
+        }
     }
 
     fun getRealizedPnl(): Double {
+        return maintenanceGate.withOperation {
         return databaseHelper.readableDatabase.rawQuery(
             "SELECT COALESCE(SUM(realized_pnl), 0) " +
                 "FROM ${SBDatabaseHelper.TABLE_PAPER_ORDERS} " +
@@ -445,17 +481,23 @@ class PaperRepository(
         ).use { cursor ->
             if (cursor.moveToFirst()) cursor.getDouble(0) else 0.0
         }
+    
+        }
     }
 
     fun getUnrealizedPnl(): Double {
+        return maintenanceGate.withOperation {
         var total = 0.0
         getPositions(true).forEach { position ->
             total += position.unrealizedPnl
         }
         return total
+    
+        }
     }
 
     fun getOpenPositionCount(): Int {
+        return maintenanceGate.withOperation {
         databaseHelper.readableDatabase.rawQuery(
             "SELECT COUNT(*) FROM ${SBDatabaseHelper.TABLE_POSITIONS} " +
                 "WHERE status = ?",
@@ -463,9 +505,12 @@ class PaperRepository(
         ).use { cursor ->
             return if (cursor.moveToFirst()) cursor.getInt(0) else 0
         }
+    
+        }
     }
 
     fun reset(startingBalance: Double): PaperAccount {
+        return maintenanceGate.withOperation {
         require(startingBalance.isFinite() && startingBalance > 0.0) {
             "Starting balance must be a valid positive amount."
         }
@@ -503,6 +548,8 @@ class PaperRepository(
             realizedPnl = 0.0,
             updatedAt = now
         )
+    
+        }
     }
 
     private fun queryOrder(db: SQLiteDatabase, orderId: Long): PaperOrder? {

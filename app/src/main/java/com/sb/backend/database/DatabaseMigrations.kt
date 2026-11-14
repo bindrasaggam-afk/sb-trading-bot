@@ -39,6 +39,24 @@ object DatabaseMigrations {
                 tick_size REAL NOT NULL DEFAULT 0.05,
                 is_active INTEGER NOT NULL DEFAULT 1,
                 expiry_millis INTEGER,
+                exchange_segment TEXT NOT NULL DEFAULT '',
+                category TEXT NOT NULL DEFAULT '',
+                subcategory TEXT NOT NULL DEFAULT '',
+                raw_symbol TEXT NOT NULL DEFAULT '',
+                isin TEXT,
+                description TEXT,
+                group_code TEXT,
+                asset_code TEXT,
+                amc_code TEXT,
+                issue_millis INTEGER,
+                maturity_millis INTEGER,
+                case_eligible INTEGER NOT NULL DEFAULT 0,
+                source_tick_size REAL,
+                source TEXT NOT NULL DEFAULT 'LEGACY',
+                source_updated_at INTEGER,
+                is_alias INTEGER NOT NULL DEFAULT 0,
+                alias_of TEXT,
+                feed_name TEXT,
                 UNIQUE(exchange, symbol)
             )
             """.trimIndent()
@@ -48,6 +66,47 @@ object DatabaseMigrations {
             db, TABLE_INSTRUMENTS,
             "expiry_millis", "INTEGER"
         )
+        ensureColumn(
+            db, TABLE_INSTRUMENTS,
+            "exchange_segment", "TEXT NOT NULL DEFAULT ''"
+        )
+        ensureColumn(
+            db, TABLE_INSTRUMENTS,
+            "category", "TEXT NOT NULL DEFAULT ''"
+        )
+        ensureColumn(
+            db, TABLE_INSTRUMENTS,
+            "subcategory", "TEXT NOT NULL DEFAULT ''"
+        )
+        ensureColumn(
+            db, TABLE_INSTRUMENTS,
+            "raw_symbol", "TEXT NOT NULL DEFAULT ''"
+        )
+        ensureColumn(db, TABLE_INSTRUMENTS, "isin", "TEXT")
+        ensureColumn(db, TABLE_INSTRUMENTS, "description", "TEXT")
+        ensureColumn(db, TABLE_INSTRUMENTS, "group_code", "TEXT")
+        ensureColumn(db, TABLE_INSTRUMENTS, "asset_code", "TEXT")
+        ensureColumn(db, TABLE_INSTRUMENTS, "amc_code", "TEXT")
+        ensureColumn(db, TABLE_INSTRUMENTS, "issue_millis", "INTEGER")
+        ensureColumn(db, TABLE_INSTRUMENTS, "maturity_millis", "INTEGER")
+        ensureColumn(
+            db, TABLE_INSTRUMENTS,
+            "case_eligible", "INTEGER NOT NULL DEFAULT 0"
+        )
+        ensureColumn(db, TABLE_INSTRUMENTS, "source_tick_size", "REAL")
+        ensureColumn(
+            db, TABLE_INSTRUMENTS,
+            "source", "TEXT NOT NULL DEFAULT 'LEGACY'"
+        )
+        ensureColumn(db, TABLE_INSTRUMENTS, "source_updated_at", "INTEGER")
+        ensureColumn(
+            db, TABLE_INSTRUMENTS,
+            "is_alias", "INTEGER NOT NULL DEFAULT 0"
+        )
+        ensureColumn(db, TABLE_INSTRUMENTS, "alias_of", "TEXT")
+        ensureColumn(db, TABLE_INSTRUMENTS, "feed_name", "TEXT")
+
+        backfillInstrumentMetadata(db)
 
         // ---------------------------------------------------------
         // 2. QUOTES
@@ -382,6 +441,34 @@ object DatabaseMigrations {
 
         createIndex(
             db,
+            "idx_instruments_exchange_feed_token",
+            TABLE_INSTRUMENTS,
+            "exchange, exchange_segment, token"
+        )
+
+        createIndex(
+            db,
+            "idx_instruments_category",
+            TABLE_INSTRUMENTS,
+            "category, subcategory, exchange, symbol"
+        )
+
+        createIndex(
+            db,
+            "idx_instruments_isin",
+            TABLE_INSTRUMENTS,
+            "isin"
+        )
+
+        createIndex(
+            db,
+            "idx_instruments_alias",
+            TABLE_INSTRUMENTS,
+            "is_alias, alias_of"
+        )
+
+        createIndex(
+            db,
             "idx_candles_lookup",
             TABLE_CANDLES,
             "symbol, timeframe, timestamp"
@@ -441,6 +528,73 @@ object DatabaseMigrations {
         // ---------------------------------------------------------
 
         createCandleValidationTriggers(db)
+    }
+
+    private fun backfillInstrumentMetadata(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            UPDATE `$TABLE_INSTRUMENTS`
+            SET raw_symbol = symbol
+            WHERE raw_symbol IS NULL OR TRIM(raw_symbol) = ''
+            """.trimIndent()
+        )
+
+        db.execSQL(
+            """
+            UPDATE `$TABLE_INSTRUMENTS`
+            SET exchange_segment = CASE UPPER(exchange)
+                WHEN 'NSE' THEN
+                    CASE WHEN UPPER(segment) IN ('FO', 'FUT', 'OPT')
+                        THEN 'nse_fo' ELSE 'nse_cm' END
+                WHEN 'BSE' THEN
+                    CASE WHEN UPPER(segment) IN ('FO', 'FUT', 'OPT')
+                        THEN 'bse_fo' ELSE 'bse_cm' END
+                WHEN 'MCX' THEN 'mcx_fo'
+                ELSE ''
+            END
+            WHERE exchange_segment IS NULL OR TRIM(exchange_segment) = ''
+            """.trimIndent()
+        )
+
+        db.execSQL(
+            """
+            UPDATE `$TABLE_INSTRUMENTS`
+            SET category = CASE
+                WHEN UPPER(segment) = 'INDEX' THEN 'INDEX'
+                WHEN UPPER(segment) = 'ETF' THEN 'ETF'
+                WHEN UPPER(segment) = 'COMMODITY' THEN 'COMMODITY'
+                WHEN UPPER(segment) = 'BOND' THEN 'BOND'
+                WHEN UPPER(segment) = 'MF' THEN 'MUTUAL_FUND'
+                WHEN UPPER(segment) = 'OTHER' THEN 'OTHER'
+                ELSE 'EQUITY'
+            END
+            WHERE category IS NULL OR TRIM(category) = ''
+            """.trimIndent()
+        )
+
+        db.execSQL(
+            """
+            UPDATE `$TABLE_INSTRUMENTS`
+            SET subcategory = CASE
+                WHEN UPPER(category) = 'INDEX' THEN 'INDEX'
+                WHEN UPPER(category) = 'ETF' THEN 'NSE_ETF'
+                WHEN UPPER(category) = 'COMMODITY' THEN 'MCX_FUTURES'
+                WHEN UPPER(category) = 'EQUITY' AND UPPER(exchange) = 'BSE'
+                    THEN 'BSE_CASH'
+                WHEN UPPER(category) = 'EQUITY' THEN 'NSE_CASH'
+                ELSE ''
+            END
+            WHERE subcategory IS NULL OR TRIM(subcategory) = ''
+            """.trimIndent()
+        )
+
+        db.execSQL(
+            """
+            UPDATE `$TABLE_INSTRUMENTS`
+            SET source = 'LEGACY'
+            WHERE source IS NULL OR TRIM(source) = ''
+            """.trimIndent()
+        )
     }
 
     // -------------------------------------------------------------

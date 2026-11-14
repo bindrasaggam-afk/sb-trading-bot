@@ -48,7 +48,13 @@ object MarketFeedRepository {
     }
 
     fun unsubscribe(key: InstrumentKey) {
-        MarketDataManager.unsubscribe(key)
+        val removed = MarketDataManager.unsubscribe(key)
+        if (removed) {
+            KotakSessionCoordinator.requestUnsubscription(
+                symbol = key.symbol,
+                exchange = key.exchange
+            )
+        }
     }
 
     fun requestSubscription(key: InstrumentKey) {
