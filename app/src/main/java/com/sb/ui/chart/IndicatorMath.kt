@@ -277,10 +277,15 @@ object IndicatorMath {
 
         for (index in candles.indices) {
             val currentAtr = atrValues[index]
-            if (!currentAtr.isFinite()) continue
+            if (!currentAtr.isFinite()) {
+                finalUpper = Double.NaN
+                finalLower = Double.NaN
+                previousDirection = 1
+                continue
+            }
 
             val candle = candles[index]
-            val middle = (candle.high + candle.low) / 2.0
+            val middle = candle.high / 2.0 + candle.low / 2.0
             val basicUpper = middle + multiplier * currentAtr
             val basicLower = middle - multiplier * currentAtr
             val previousClose = if (index > 0) {
