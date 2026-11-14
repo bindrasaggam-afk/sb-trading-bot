@@ -71,12 +71,19 @@ object IndicatorMath {
             if (!candle.high.isFinite() || !candle.low.isFinite() ||
                 !candle.close.isFinite() || candle.volume < 0L
             ) continue
-            val typical = (candle.high + candle.low + candle.close) / 3.0
+            if (candle.high < candle.low) continue
+            val typical = (candle.high / 3.0) + (candle.low / 3.0) + (candle.close / 3.0)
             val volume = candle.volume.toDouble()
-            cumulativePriceVolume += typical * volume
-            cumulativeVolume += volume
+            val priceVolume = typical * volume
+            if (!typical.isFinite() || !priceVolume.isFinite()) continue
+            val nextPriceVolume = cumulativePriceVolume + priceVolume
+            val nextVolume = cumulativeVolume + volume
+            if (!nextPriceVolume.isFinite() || !nextVolume.isFinite()) continue
+            cumulativePriceVolume = nextPriceVolume
+            cumulativeVolume = nextVolume
             if (cumulativeVolume > 0.0) {
-                result[i] = cumulativePriceVolume / cumulativeVolume
+                val value = cumulativePriceVolume / cumulativeVolume
+                if (value.isFinite()) result[i] = value
             }
         }
         return result
@@ -84,7 +91,7 @@ object IndicatorMath {
 
     fun rsi(values: List<Double>, period: Int = 14): DoubleArray {
         val result = DoubleArray(values.size) { Double.NaN }
-        if (period <= 0 || values.size <= period) return result
+        if (period <= 0 || values.size <= period || values.any { !it.isFinite() }) return result
 
         var gain = 0.0
         var loss = 0.0
@@ -172,6 +179,10 @@ object IndicatorMath {
         multiplier: Double = 2.0
     ): BollingerResult {
         val middle = sma(values, period)
+        if (!multiplier.isFinite() || multiplier < 0.0 || period <= 1) {
+            val invalid = DoubleArray(values.size) { Double.NaN }
+            return BollingerResult(middle, invalid, invalid.copyOf())
+        }
         val deviation = standardDeviation(values, period)
         val upper = DoubleArray(values.size) { index ->
             if (middle[index].isFinite() && deviation[index].isFinite()) {
@@ -196,37 +207,48 @@ object IndicatorMath {
 
         var previousAtr = Double.NaN
         var seedSum = 0.0
+        var validCount = 0
+        var previousClose = Double.NaN
 
         for (index in candles.indices) {
             val candle = candles[index]
-            val trueRange = if (index == 0) {
-                candle.high - candle.low
-            } else {
-                val previousClose = candles[index - 1].close
-                max(
-                    candle.high - candle.low,
-                    max(
-                        abs(candle.high - previousClose),
-                        abs(candle.low - previousClose)
-                    )
-                )
+            val valid = candle.high.isFinite() && candle.low.isFinite() &&
+                candle.close.isFinite() && candle.high >= candle.low
+            if (!valid) {
+                previousAtr = Double.NaN
+                seedSum = 0.0
+                validCount = 0
+                previousClose = Double.NaN
+                continue
             }
 
-            when {
-                index < period - 1 -> seedSum += trueRange
-                index == period - 1 -> {
-                    seedSum += trueRange
+            val trueRange = if (previousClose.isFinite()) {
+                max(
+                    candle.high - candle.low,
+                    max(abs(candle.high - previousClose), abs(candle.low - previousClose))
+                )
+            } else {
+                candle.high - candle.low
+            }
+            if (!trueRange.isFinite() || trueRange < 0.0) {
+                previousAtr = Double.NaN
+                seedSum = 0.0
+                validCount = 0
+                previousClose = Double.NaN
+                continue
+            }
+
+            previousClose = candle.close
+            if (!previousAtr.isFinite()) {
+                seedSum += trueRange
+                validCount++
+                if (validCount == period) {
                     previousAtr = seedSum / period
                     result[index] = previousAtr
                 }
-                else -> {
-                    val current = (
-                        (if (previousAtr.isFinite()) previousAtr else trueRange) *
-                            (period - 1) + trueRange
-                        ) / period
-                    previousAtr = current
-                    result[index] = current
-                }
+            } else {
+                previousAtr = (previousAtr * (period - 1) + trueRange) / period
+                result[index] = previousAtr
             }
         }
         return result
@@ -244,7 +266,7 @@ object IndicatorMath {
     ): SupertrendResult {
         val line = DoubleArray(candles.size) { Double.NaN }
         val direction = IntArray(candles.size)
-        if (period <= 0 || multiplier <= 0.0 || candles.isEmpty()) {
+        if (period <= 0 || !multiplier.isFinite() || multiplier <= 0.0 || candles.isEmpty()) {
             return SupertrendResult(line, direction)
         }
 
