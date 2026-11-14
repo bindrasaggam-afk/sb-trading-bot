@@ -51,7 +51,7 @@ class ProfessionalChartView @JvmOverloads constructor(
     var indicators: Set<ChartIndicator> = emptySet()
         set(value) {
             field = value
-            indicatorSignature = 0
+            indicatorSignature = Long.MIN_VALUE
             invalidate()
         }
 
@@ -84,7 +84,8 @@ class ProfessionalChartView @JvmOverloads constructor(
     private var previewY = 0f
     private var lastGeometry: Geometry? = null
 
-    private var indicatorSignature = 0
+    private var sourceVersion = 0L
+    private var indicatorSignature = Long.MIN_VALUE
     private var ema20: DoubleArray = DoubleArray(0)
     private var sma50: DoubleArray = DoubleArray(0)
     private var vwap: DoubleArray = DoubleArray(0)
@@ -306,6 +307,8 @@ class ProfessionalChartView @JvmOverloads constructor(
         preserveViewport: Boolean = false
     ) {
         source = data
+        sourceVersion++
+        indicatorSignature = Long.MIN_VALUE
         chartStyle = style
         crosshairVisible = false
         crosshairIndex = -1
@@ -402,7 +405,7 @@ class ProfessionalChartView @JvmOverloads constructor(
     private fun ensureIndicators() {
         // Indicators must always use the original market OHLCV series.
         // "candles" is a presentation series and may contain Heikin-Ashi values.
-        val signature = System.identityHashCode(source) * 31 + indicators.hashCode()
+        val signature = sourceVersion * 31L + indicators.hashCode().toLong()
         if (signature == indicatorSignature) return
         indicatorSignature = signature
 
@@ -924,20 +927,23 @@ class ProfessionalChartView @JvmOverloads constructor(
     ) {
         var previousX = Float.NaN
         var previousY = Float.NaN
+        var previousDirection = 0
 
         for (index in geometry.start until geometry.end) {
             val value = result.line[index]
-            if (!value.isFinite()) {
+            val direction = result.direction[index]
+            if (!value.isFinite() || direction == 0) {
                 previousX = Float.NaN
                 previousY = Float.NaN
+                previousDirection = 0
                 continue
             }
 
             val x = xFor(index, geometry)
             val y = priceY(value, geometry)
-            val direction = result.direction[index]
 
-            if (previousX.isFinite() && previousY.isFinite()) {
+            // Do not connect opposite trend segments across a direction flip.
+            if (previousX.isFinite() && previousY.isFinite() && direction == previousDirection) {
                 val paint = if (direction >= 0) {
                     supertrendUpPaint
                 } else {
@@ -948,6 +954,7 @@ class ProfessionalChartView @JvmOverloads constructor(
 
             previousX = x
             previousY = y
+            previousDirection = direction
         }
     }
 
@@ -1046,6 +1053,11 @@ class ProfessionalChartView @JvmOverloads constructor(
                 if (it > maxValue) maxValue = it
             }
             result.signal.getOrNull(index)?.takeIf { it.isFinite() }?.let {
+                if (it < minValue) minValue = it
+                if (it > maxValue) maxValue = it
+            }
+            // Histogram bars share this axis; include them to prevent clipping.
+            result.histogram.getOrNull(index)?.takeIf { it.isFinite() }?.let {
                 if (it < minValue) minValue = it
                 if (it > maxValue) maxValue = it
             }
