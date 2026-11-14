@@ -127,4 +127,48 @@ class IndicatorMathTest {
         assertTrue(result.all { it.isNaN() })
     }
 
+
+    @Test
+    fun rsiRejectsNonFiniteInput() {
+        val result = IndicatorMath.rsi(listOf(1.0, 2.0, Double.NaN, 4.0), 2)
+        assertTrue(result.all { it.isNaN() })
+    }
+
+    @Test
+    fun atrResetsWarmupAfterInvalidOhlc() {
+        val candles = (1..8).map { index ->
+            if (index == 4) {
+                ChartCandle(open = 4.0, high = Double.NaN, low = 3.0, close = 4.0)
+            } else {
+                ChartCandle(open = index.toDouble(), high = index + 1.0, low = index - 1.0, close = index.toDouble())
+            }
+        }
+        val result = IndicatorMath.atr(candles, period = 3)
+        assertTrue(result[2].isFinite())
+        assertTrue(result[3].isNaN())
+        assertTrue(result[4].isNaN())
+        assertTrue(result[5].isNaN())
+        assertTrue(result[6].isFinite())
+    }
+
+    @Test
+    fun bollingerRejectsInvalidMultiplier() {
+        val result = IndicatorMath.bollinger((1..30).map { it.toDouble() }, 20, Double.NaN)
+        assertTrue(result.upper.all { it.isNaN() })
+        assertTrue(result.lower.all { it.isNaN() })
+    }
+
+    @Test
+    fun vwapSkipsInvalidTypicalPriceWithoutPoisoningNextCandle() {
+        val candles = listOf(
+            ChartCandle(open = 10.0, high = 10.0, low = 10.0, close = 10.0, volume = 10),
+            ChartCandle(open = 20.0, high = Double.POSITIVE_INFINITY, low = 20.0, close = 20.0, volume = 10),
+            ChartCandle(open = 30.0, high = 30.0, low = 30.0, close = 30.0, volume = 10)
+        )
+        val result = IndicatorMath.vwap(candles)
+        assertEquals(10.0, result[0], 0.000001)
+        assertTrue(result[1].isNaN())
+        assertEquals(20.0, result[2], 0.000001)
+    }
+
 }
