@@ -55,6 +55,12 @@ class ProfessionalChartView @JvmOverloads constructor(
             invalidate()
         }
 
+    var priceScaleMode: PriceScaleMode = PriceScaleMode.ABSOLUTE
+        set(value) {
+            field = value
+            invalidate()
+        }
+
     var onCrosshairChanged: ((ChartCandle?, Int) -> Unit)? = null
     var onTextDrawingRequested: ((Int, Double) -> Unit)? = null
 
@@ -1205,7 +1211,7 @@ class ProfessionalChartView @JvmOverloads constructor(
             labelPaint.color = Color.argb(210, 255, 213, 79)
             val percent = (level * 100).toInt()
             canvas.drawText(
-                "$percent%  ${formatPrice(price)}",
+                "$percent%  ${formatAbsolutePrice(price)}",
                 right + dp(3f),
                 y + dp(3f),
                 labelPaint
@@ -1240,7 +1246,7 @@ class ProfessionalChartView @JvmOverloads constructor(
         val delta = points[1].price - points[0].price
         val percent = if (points[0].price != 0.0) delta / points[0].price * 100.0 else 0.0
         labelPaint.color = drawingPaint.color
-        val text = "${formatPrice(delta)}  (${String.format(Locale.US, "%.2f", percent)}%)"
+        val text = "${formatAbsolutePrice(delta)}  (${String.format(Locale.US, "%.2f", percent)}%)"
         canvas.drawText(text, min(x1, x2) + dp(4f), min(y1, y2) - dp(4f), labelPaint)
     }
 
@@ -1377,10 +1383,10 @@ class ProfessionalChartView @JvmOverloads constructor(
             tooltipTextPaint
         )
 
-        val info = "O ${formatPrice(candle.open)} " +
-            "H ${formatPrice(candle.high)} " +
-            "L ${formatPrice(candle.low)} " +
-            "C ${formatPrice(candle.close)} " +
+        val info = "O ${formatAbsolutePrice(candle.open)} " +
+            "H ${formatAbsolutePrice(candle.high)} " +
+            "L ${formatAbsolutePrice(candle.low)} " +
+            "C ${formatAbsolutePrice(candle.close)} " +
             "V ${formatQuantity(candle.volume)}"
         val infoWidth = min(
             geometry.right - geometry.left - dp(8f),
@@ -1627,6 +1633,19 @@ class ProfessionalChartView @JvmOverloads constructor(
     }
 
     private fun formatPrice(value: Double): String {
+        if (!value.isFinite()) return "—"
+        if (priceScaleMode == PriceScaleMode.RELATIVE) {
+            val reference = source.firstOrNull { candidate ->
+                candidate.close.isFinite() && candidate.close > 0.0
+            }?.close ?: return "—"
+            val percent = (value - reference) / reference * 100.0
+            val sign = if (percent > 0.0) "+" else ""
+            return String.format(Locale.US, "%s%.2f%%", sign, percent)
+        }
+        return formatAbsolutePrice(value)
+    }
+
+    private fun formatAbsolutePrice(value: Double): String {
         if (!value.isFinite()) return "—"
         val decimals = when {
             abs(value) >= 1000.0 -> 2

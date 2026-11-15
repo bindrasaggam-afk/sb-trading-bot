@@ -216,7 +216,7 @@ object PaperTradingScreen {
                 addCard(
                     "Total Equity",
                     rupees(snapshot.totalEquity),
-                    "Cash plus unrealized P&L"
+                    "Starting balance plus realized and unrealized P&L"
                 )
                 addCard(
                     "Paper Cash Balance",
@@ -722,7 +722,8 @@ object PaperTradingScreen {
             makeText(
                 context,
                 "Quantity: ${order.quantity}  |  " +
-                    "Entry: ${rupees(order.entryPrice)}",
+                    "Entry: ${rupees(order.entryPrice)}  |  " +
+                    "Source: ${order.entrySource}",
                 13, TEXT, false
             ).apply {
                 setPadding(0, dp(context, 7), 0, 0)

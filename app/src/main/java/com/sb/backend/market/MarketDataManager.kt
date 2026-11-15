@@ -7,6 +7,7 @@ import com.sb.backend.market.model.InstrumentKey
 import com.sb.backend.market.model.MarketTick
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
@@ -111,13 +112,34 @@ object MarketDataManager {
     private val scope =
         CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
+    private val snapshotLock = Any()
+
+    @Volatile
+    private var snapshotJob: Job? = null
+
     init {
-        scope.launch {
-            while (true) {
-                delay(SNAPSHOT_INTERVAL_MS)
-                publishLatestSnapshot()
+        start()
+    }
+
+    fun start() {
+        synchronized(snapshotLock) {
+            if (snapshotJob?.isActive == true) return
+            snapshotJob = scope.launch {
+                while (true) {
+                    delay(SNAPSHOT_INTERVAL_MS)
+                    publishLatestSnapshot()
+                }
             }
         }
+    }
+
+    fun shutdown() {
+        val job = synchronized(snapshotLock) {
+            val current = snapshotJob
+            snapshotJob = null
+            current
+        }
+        job?.cancel()
     }
 
     fun getCandles(

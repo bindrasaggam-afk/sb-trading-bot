@@ -23,6 +23,13 @@ data class PaperAccount(
         get() = balance - reservedMargin
 }
 
+data class PaperSnapshotData(
+    val account: PaperAccount,
+    val positions: List<Position>,
+    val realizedPnl: Double,
+    val unrealizedPnl: Double
+)
+
 class PaperRepository(
     private val databaseHelper: SBDatabaseHelper,
     private val maintenanceGate: DatabaseMaintenanceGate = DatabaseMaintenanceGate.shared
@@ -134,7 +141,9 @@ class PaperRepository(
         entryPrice: Double,
         note: String = "",
         stopLoss: Double? = null,
-        target: Double? = null
+        target: Double? = null,
+        entrySource: String = "MARKET",
+        entryTimestamp: Long? = null
     ): PaperOrder {
         return maintenanceGate.withOperation {
         require(symbol.isNotBlank()) { "Symbol cannot be empty." }
@@ -145,6 +154,13 @@ class PaperRepository(
         }
         require(entryPrice.isFinite() && entryPrice > 0.0) {
             "Entry price must be valid and positive."
+        }
+        val normalizedEntrySource = entrySource.trim().uppercase(Locale.ROOT)
+        require(normalizedEntrySource in setOf("MARKET", "MANUAL", "LEGACY")) {
+            "Entry source must be MARKET, MANUAL or LEGACY."
+        }
+        require(entryTimestamp == null || entryTimestamp > 0L) {
+            "Entry timestamp must be positive."
         }
 
         val normalizedSide = normalizeSide(side)
@@ -228,6 +244,8 @@ class PaperRepository(
                 put("note", note.trim())
                 put("stop_loss", stopLoss)
                 put("target", target)
+                put("entry_source", normalizedEntrySource)
+                put("entry_timestamp", entryTimestamp)
                 put("created_at", now)
                 put("updated_at", now)
             }
@@ -286,7 +304,9 @@ class PaperRepository(
                 createdAt = now,
                 updatedAt = now,
                 stopLoss = stopLoss,
-                target = target
+                target = target,
+                entrySource = normalizedEntrySource,
+                entryTimestamp = entryTimestamp
             )
         } finally {
             db.endTransaction()
@@ -559,6 +579,34 @@ class PaperRepository(
         }
     }
 
+    fun getSnapshotData(): PaperSnapshotData? {
+        return maintenanceGate.withOperation {
+            val db = databaseHelper.writableDatabase
+            db.beginTransaction()
+            try {
+                val account = queryAccount(db)
+                if (account == null) {
+                    null
+                } else {
+                    val positions = queryPositions(db, true)
+                    val realized = queryRealizedPnl(db)
+                    val unrealized = positions.fold(0.0) { total, position ->
+                        total + position.unrealizedPnl
+                    }
+                    db.setTransactionSuccessful()
+                    PaperSnapshotData(
+                        account = account,
+                        positions = positions,
+                        realizedPnl = realized,
+                        unrealizedPnl = unrealized
+                    )
+                }
+            } finally {
+                db.endTransaction()
+            }
+        }
+    }
+
     fun getOpenPositionCount(): Int {
         return maintenanceGate.withOperation {
         databaseHelper.readableDatabase.rawQuery(
@@ -644,6 +692,45 @@ class PaperRepository(
         }
     }
 
+    private fun queryPositions(
+        db: SQLiteDatabase,
+        openOnly: Boolean
+    ): List<Position> {
+        val selection = if (openOnly) "status = ?" else null
+        val args = if (openOnly) {
+            arrayOf(OrderStatus.OPEN.name)
+        } else {
+            null
+        }
+
+        val result = ArrayList<Position>()
+        db.query(
+            SBDatabaseHelper.TABLE_POSITIONS,
+            positionProjection,
+            selection,
+            args,
+            null,
+            null,
+            "opened_at DESC"
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                result.add(readPosition(cursor))
+            }
+        }
+        return result
+    }
+
+    private fun queryRealizedPnl(db: SQLiteDatabase): Double {
+        db.rawQuery(
+            "SELECT COALESCE(SUM(realized_pnl), 0) " +
+                "FROM ${SBDatabaseHelper.TABLE_PAPER_ORDERS} " +
+                "WHERE status = ?",
+            arrayOf(OrderStatus.CLOSED.name)
+        ).use { cursor ->
+            return if (cursor.moveToFirst()) cursor.getDouble(0) else 0.0
+        }
+    }
+
     private fun queryReserved(db: SQLiteDatabase): Double {
         db.rawQuery(
             "SELECT COALESCE(SUM(reserved_margin), 0) " +
@@ -699,7 +786,9 @@ class PaperRepository(
             createdAt = cursor.getLong(11),
             updatedAt = cursor.getLong(12),
             stopLoss = if (cursor.isNull(13)) null else cursor.getDouble(13),
-            target = if (cursor.isNull(14)) null else cursor.getDouble(14)
+            target = if (cursor.isNull(14)) null else cursor.getDouble(14),
+            entrySource = cursor.getString(15),
+            entryTimestamp = if (cursor.isNull(16)) null else cursor.getLong(16)
         )
     }
 
@@ -770,7 +859,9 @@ class PaperRepository(
             "created_at",
             "updated_at",
             "stop_loss",
-            "target"
+            "target",
+            "entry_source",
+            "entry_timestamp"
         )
 
         private val positionProjection = arrayOf(

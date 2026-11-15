@@ -14,6 +14,8 @@ import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
@@ -60,9 +62,19 @@ object MarketRuntimeService {
     @Volatile
     private var lastError: String? = null
 
-    private val executor: ExecutorService by lazy {
-        Executors.newSingleThreadExecutor()
-    }
+    private val executorLock = Any()
+
+    @Volatile
+    private var executorRef: ExecutorService? = null
+
+    private val executor: ExecutorService
+        get() = synchronized(executorLock) {
+            executorRef ?: Executors.newSingleThreadExecutor { runnable ->
+                Thread(runnable, "market-runtime-persistence").apply {
+                    isDaemon = true
+                }
+            }.also { executorRef = it }
+        }
 
     private val _status = MutableStateFlow(RuntimeStatus())
     val status: StateFlow<RuntimeStatus> = _status.asStateFlow()
@@ -73,6 +85,7 @@ object MarketRuntimeService {
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
+        MarketDataManager.start()
         MarketDataManager.addTickListener(tickListener)
         publishStatus(force = true)
     }
@@ -81,6 +94,25 @@ object MarketRuntimeService {
         if (!running.compareAndSet(true, false)) return
         MarketDataManager.removeTickListener(tickListener)
         publishStatus(force = true)
+    }
+
+    fun shutdown() {
+        stop()
+        val current = synchronized(executorLock) {
+            val existing = executorRef
+            executorRef = null
+            existing
+        } ?: return
+
+        current.shutdown()
+        try {
+            if (!current.awaitTermination(10, TimeUnit.SECONDS)) {
+                current.shutdownNow()
+            }
+        } catch (_: InterruptedException) {
+            current.shutdownNow()
+            Thread.currentThread().interrupt()
+        }
     }
 
     fun isRunning(): Boolean = running.get()
@@ -207,24 +239,27 @@ object MarketRuntimeService {
 
         val snapshot = ArrayList(finalizedBase)
 
-        executor.execute {
-            try {
-                val baseSaved = saveCandlesWithRetry(
-                    key = key,
-                    timeframe = BASE_TIMEFRAME_LABEL,
-                    candles = snapshot
-                )
-                check(baseSaved == snapshot.size) {
-                    "Base candle persistence incomplete: saved " +
-                        baseSaved + " of " + snapshot.size
+        try {
+            executor.execute {
+                try {
+                    val baseSaved = saveCandlesWithRetry(
+                        key = key,
+                        timeframe = BASE_TIMEFRAME_LABEL,
+                        candles = snapshot
+                    )
+                    check(baseSaved == snapshot.size) {
+                        "Base candle persistence incomplete: saved " +
+                            baseSaved + " of " + snapshot.size
+                    }
+
+                    persistClosedTargets(key, latestBaseTimestamp)
+
+                    SignalScanCoordinator.scan(key)
+                } catch (e: Exception) {
+                    recordError(e)
                 }
-
-                persistClosedTargets(key, latestBaseTimestamp)
-
-                SignalScanCoordinator.scan(key)
-            } catch (e: Exception) {
-                recordError(e)
             }
+        } catch (_: RejectedExecutionException) {
         }
     }
 
@@ -319,20 +354,23 @@ object MarketRuntimeService {
         )
     }
     private fun seedFromStore(key: InstrumentKey) {
-        executor.execute {
-            try {
-                val stored = MarketFeedRepository.loadStoredCandles(
-                    key = key,
-                    timeframe = BASE_TIMEFRAME_LABEL,
-                    limit = SEED_LIMIT
-                )
+        try {
+            executor.execute {
+                try {
+                    val stored = MarketFeedRepository.loadStoredCandles(
+                        key = key,
+                        timeframe = BASE_TIMEFRAME_LABEL,
+                        limit = SEED_LIMIT
+                    )
 
-                if (stored.isNotEmpty()) {
-                    engine.seedBase(key, stored)
+                    if (stored.isNotEmpty()) {
+                        engine.seedBase(key, stored)
+                    }
+                } catch (e: Exception) {
+                    recordError(e)
                 }
-            } catch (e: Exception) {
-                recordError(e)
             }
+        } catch (_: RejectedExecutionException) {
         }
     }
 

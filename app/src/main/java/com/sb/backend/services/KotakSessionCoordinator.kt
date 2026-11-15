@@ -11,6 +11,7 @@ import com.sb.backend.models.Instrument
 import com.sb.backend.security.KotakNeoSecureStore
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import org.json.JSONArray
 import org.json.JSONObject
@@ -20,13 +21,28 @@ object KotakSessionCoordinator {
     private const val TAG = "KotakSession"
 
     private val lock = Any()
+    private val executorLock = Any()
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val executor: ExecutorService by lazy {
-        Executors.newSingleThreadExecutor()
-    }
-    private val historicalExecutor: ExecutorService by lazy {
-        Executors.newSingleThreadExecutor()
-    }
+    private var executorRef: ExecutorService? = null
+    private var historicalExecutorRef: ExecutorService? = null
+
+    private val executor: ExecutorService
+        get() = synchronized(executorLock) {
+            executorRef ?: Executors.newSingleThreadExecutor { runnable ->
+                Thread(runnable, "kotak-session").apply {
+                    isDaemon = true
+                }
+            }.also { executorRef = it }
+        }
+
+    private val historicalExecutor: ExecutorService
+        get() = synchronized(executorLock) {
+            historicalExecutorRef ?: Executors.newSingleThreadExecutor { runnable ->
+                Thread(runnable, "kotak-history").apply {
+                    isDaemon = true
+                }
+            }.also { historicalExecutorRef = it }
+        }
 
     private var appContext: Context? = null
     private var secureStore: KotakNeoSecureStore? = null
@@ -597,6 +613,47 @@ object KotakSessionCoordinator {
         store().clear()
 
         updateStatus("ERROR | Kotak credentials cleared")
+    }
+
+    fun shutdown() {
+        val service: KotakNeoLiveFeedService?
+        val manager: KotakAutoLoginManager?
+
+        synchronized(lock) {
+            started = false
+            service = liveFeedService
+            liveFeedService = null
+            manager = autoLoginManager
+            autoLoginManager = null
+        }
+
+        manager?.stopAutoLogin()
+        manager?.close()
+        service?.close()
+
+        val executors = synchronized(executorLock) {
+            val current = executorRef to historicalExecutorRef
+            executorRef = null
+            historicalExecutorRef = null
+            current
+        }
+        shutdownExecutor(executors.first)
+        shutdownExecutor(executors.second)
+
+        updateStatus("Kotak runtime stopped")
+    }
+
+    private fun shutdownExecutor(executor: ExecutorService?) {
+        executor ?: return
+        executor.shutdown()
+        try {
+            if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                executor.shutdownNow()
+            }
+        } catch (_: InterruptedException) {
+            executor.shutdownNow()
+            Thread.currentThread().interrupt()
+        }
     }
 
     private fun closeFeed() {

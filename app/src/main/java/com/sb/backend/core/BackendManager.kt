@@ -20,6 +20,7 @@ import com.sb.backend.services.KotakNeoLiveFeedService
 import com.sb.backend.services.KotakNeoWebSocketClient
 import com.sb.backend.services.KotakSessionCoordinator
 import com.sb.backend.services.MarketDataService
+import com.sb.backend.services.MarketRuntimeService
 import com.sb.backend.services.PaperTradeMonitor
 import com.sb.backend.services.PaperTradingEngine
 import com.sb.backend.services.RiskManager
@@ -31,6 +32,7 @@ import java.nio.charset.StandardCharsets
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeUnit
 
 object BackendManager {
 
@@ -96,7 +98,8 @@ object BackendManager {
 
     fun start(
         seedBuiltInMasters: Boolean = true,
-        onReady: (() -> Unit)? = null
+        onReady: (() -> Unit)? = null,
+        onError: ((Throwable) -> Unit)? = null
     ) {
         checkInitialized()
 
@@ -207,6 +210,16 @@ object BackendManager {
                             "Backend initialization failed.",
                             error
                         )
+
+                        try {
+                            onError?.invoke(error)
+                        } catch (callbackError: Exception) {
+                            Log.e(
+                                TAG,
+                                "Backend error callback failed.",
+                                callbackError
+                            )
+                        }
                     }
                 }
             } catch (error: RejectedExecutionException) {
@@ -218,6 +231,16 @@ object BackendManager {
                     "Backend startup rejected by executor.",
                     error
                 )
+
+                try {
+                    onError?.invoke(error)
+                } catch (callbackError: Exception) {
+                    Log.e(
+                        TAG,
+                        "Backend error callback failed.",
+                        callbackError
+                    )
+                }
             }
         }
     }
@@ -460,11 +483,56 @@ object BackendManager {
     }
 
     fun restore(file: File): Boolean {
-        synchronized(lock) {
-            val context = appContext ?: return false
-            dbHelper.close()
-            return DatabaseBackup(context).restore(file)
+        val context = synchronized(lock) {
+            appContext ?: return false
         }
+        if (!file.exists() || file.length() == 0L) return false
+
+        KotakSessionCoordinator.shutdown()
+        MarketRuntimeService.shutdown()
+
+        synchronized(lock) {
+            if (!initialized) {
+                return DatabaseBackup(context).restore(file)
+            }
+            if (::paperTradeMonitor.isInitialized) {
+                paperTradeMonitor.stop()
+            }
+            val worker = executor
+            executor = null
+            worker?.shutdown()
+            if (worker != null) {
+                try {
+                    if (!worker.awaitTermination(10, TimeUnit.SECONDS)) {
+                        worker.shutdownNow()
+                    }
+                } catch (_: InterruptedException) {
+                    worker.shutdownNow()
+                    Thread.currentThread().interrupt()
+                }
+            }
+            if (::marketDataService.isInitialized) {
+                marketDataService.shutdown()
+            }
+            if (::dbHelper.isInitialized) {
+                dbHelper.close()
+            }
+            initialized = false
+            started = false
+            ready = false
+        }
+
+        val restored = DatabaseBackup(context).restore(file)
+        initialize(context)
+        start(
+            seedBuiltInMasters = false,
+            onReady = {
+                KotakSessionCoordinator.initialize(context)
+                MarketRuntimeService.start()
+                KotakSessionCoordinator.startIfEnabled()
+            }
+        )
+        return restored
     }
 
     fun stop() {
@@ -473,10 +541,25 @@ object BackendManager {
             if (::paperTradeMonitor.isInitialized) {
                 paperTradeMonitor.stop()
             }
-            executor?.shutdown()
+            val worker = executor
             executor = null
-            marketDataService.shutdown()
-            dbHelper.close()
+            worker?.shutdown()
+            if (worker != null) {
+                try {
+                    if (!worker.awaitTermination(10, TimeUnit.SECONDS)) {
+                        worker.shutdownNow()
+                    }
+                } catch (_: InterruptedException) {
+                    worker.shutdownNow()
+                    Thread.currentThread().interrupt()
+                }
+            }
+            if (::marketDataService.isInitialized) {
+                marketDataService.shutdown()
+            }
+            if (::dbHelper.isInitialized) {
+                dbHelper.close()
+            }
             initialized = false
             started = false
             ready = false

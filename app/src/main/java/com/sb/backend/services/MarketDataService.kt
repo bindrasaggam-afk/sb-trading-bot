@@ -19,6 +19,7 @@ import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeUnit
 
 data class RemoteResult<T>(
     val success: Boolean,
@@ -399,6 +400,14 @@ class MarketDataService(
     fun shutdown() {
         isShutdown = true
         executor.shutdown()
+        try {
+            if (!executor.awaitTermination(10, TimeUnit.SECONDS)) {
+                executor.shutdownNow()
+            }
+        } catch (_: InterruptedException) {
+            executor.shutdownNow()
+            Thread.currentThread().interrupt()
+        }
     }
 
     private fun <T> executeRequest(

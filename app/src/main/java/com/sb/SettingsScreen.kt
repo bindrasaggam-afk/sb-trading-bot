@@ -2,10 +2,13 @@
 package com.sb
 
 import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Color
 import android.widget.*
 import com.sb.backend.security.KotakNeoSecureStore
+import com.sb.backend.security.LocalApiToken
 import com.sb.backend.services.KotakNeoAuthClient
 import com.sb.backend.services.KotakNeoMarketDataService
 import com.sb.backend.services.KotakSessionCoordinator
@@ -262,6 +265,33 @@ class SettingsScreen(private val context: Context) {
                     AppDesign.styleDialog(dialog)
                     dialog.show()
                 }
+        })
+
+        label(body, "Local API Server", 18f, yellow, true)
+        label(
+            body,
+            "Authenticated requests to 127.0.0.1:10000 must send the X-SB-Token header.",
+            11f,
+            grey
+        )
+        val localApiToken = LocalApiToken.get(context)
+        body.addView(TextView(context).apply {
+            text = localApiToken
+            textSize = 12f
+            setTextColor(white)
+            setTextIsSelectable(true)
+            setPadding(dp(12), dp(9), dp(12), dp(9))
+            background = AppDesign.fieldBackground(context, 9)
+        })
+        body.addView(actionButton("Copy Local API Token") {
+            val clipboard = context.getSystemService(
+                Context.CLIPBOARD_SERVICE
+            ) as ClipboardManager
+            clipboard.setPrimaryClip(
+                ClipData.newPlainText("SB Local API Token", localApiToken)
+            )
+            statusText.text = "Local API token copied."
+            statusText.setTextColor(Color.GREEN)
         })
 
         return scroll

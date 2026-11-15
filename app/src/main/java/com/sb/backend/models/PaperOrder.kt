@@ -25,7 +25,9 @@ data class PaperOrder(
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis(),
     val stopLoss: Double? = null,
-    val target: Double? = null
+    val target: Double? = null,
+    val entrySource: String = "MARKET",
+    val entryTimestamp: Long? = null
 ) {
     val orderValue: Double
         get() = quantity.toDouble() * entryPrice

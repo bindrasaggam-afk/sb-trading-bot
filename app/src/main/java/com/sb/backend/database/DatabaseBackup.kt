@@ -1,46 +1,77 @@
 package com.sb.backend.database
 
 import android.content.Context
+import android.database.sqlite.SQLiteDatabase
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 
 class DatabaseBackup(
     context: Context,
-    private val databaseHelper: SBDatabaseHelper? = null
+    private val databaseHelper: SBDatabaseHelper? = null,
+    private val maintenanceGate: DatabaseMaintenanceGate =
+        DatabaseMaintenanceGate.shared
 ) {
 
     private val appContext = context.applicationContext
 
     fun backup(prefix: String = "sb_backend"): File? {
         return try {
-            checkpoint()
-            val source = appContext.getDatabasePath(
-                SBDatabaseHelper.DATABASE_NAME
-            )
-            if (!source.exists() || source.length() == 0L) return null
-
-            val target = File(
-                backupDirectory(),
-                "${prefix}_${System.currentTimeMillis()}.db"
-            )
-            copyFile(source, target)
-            target
+            maintenanceGate.withMaintenance {
+                checkpoint()
+                val source = appContext.getDatabasePath(
+                    SBDatabaseHelper.DATABASE_NAME
+                )
+                if (!source.exists() || source.length() == 0L) {
+                    null
+                } else {
+                    val target = File(
+                        backupDirectory(),
+                        "${prefix}_${System.currentTimeMillis()}.db"
+                    )
+                    copyFile(source, target)
+                    if (isValidDatabase(target)) {
+                        target
+                    } else {
+                        target.delete()
+                        null
+                    }
+                }
+            }
         } catch (e: Exception) {
             null
         }
     }
 
     fun restore(file: File): Boolean {
+        if (!file.exists() || file.length() == 0L) return false
+
         return try {
-            if (!file.exists() || file.length() == 0L) return false
-            val target = appContext.getDatabasePath(
-                SBDatabaseHelper.DATABASE_NAME
-            )
-            target.parentFile?.mkdirs()
-            copyFile(file, target)
-            deleteSidecarFiles(target)
-            true
+            maintenanceGate.withMaintenance {
+                if (!isValidDatabase(file)) return@withMaintenance false
+                val target = appContext.getDatabasePath(
+                    SBDatabaseHelper.DATABASE_NAME
+                )
+                target.parentFile?.mkdirs()
+                val temp = File(
+                    target.parentFile,
+                    ".${target.name}.restore.tmp"
+                )
+                try {
+                    copyFile(file, temp)
+                    if (!isValidDatabase(temp)) return@withMaintenance false
+
+                    databaseHelper?.close()
+                    deleteSidecarFiles(target)
+                    if (!replaceFile(temp, target)) return@withMaintenance false
+                    deleteSidecarFiles(target)
+                    true
+                } finally {
+                    temp.delete()
+                }
+            }
         } catch (e: Exception) {
             false
         }
@@ -86,6 +117,44 @@ class DatabaseBackup(
                     cursor.getInt(0)
                 }
             }
+    }
+
+    private fun isValidDatabase(file: File): Boolean {
+        if (!file.exists() || file.length() == 0L) return false
+        return try {
+            SQLiteDatabase.openDatabase(
+                file.path,
+                null,
+                SQLiteDatabase.OPEN_READONLY
+            ).use { db ->
+                db.rawQuery("PRAGMA integrity_check", null).use { cursor ->
+                    cursor.moveToFirst() &&
+                        cursor.getString(0)
+                            .equals("ok", ignoreCase = true)
+                }
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun replaceFile(source: File, target: File): Boolean {
+        return try {
+            Files.move(
+                source.toPath(),
+                target.toPath(),
+                StandardCopyOption.REPLACE_EXISTING,
+                StandardCopyOption.ATOMIC_MOVE
+            )
+            true
+        } catch (_: Exception) {
+            try {
+                copyFile(source, target)
+                true
+            } catch (_: Exception) {
+                false
+            }
+        }
     }
 
     private fun copyFile(source: File, target: File) {

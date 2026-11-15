@@ -29,6 +29,7 @@ import com.sb.ui.chart.ChartIndicator
 import com.sb.ui.chart.ChartStyle
 import com.sb.ui.chart.ChartTool
 import com.sb.ui.chart.MarketDepthAdapter
+import com.sb.ui.chart.PriceScaleMode
 import com.sb.ui.chart.ProfessionalChartView
 import com.sb.ui.market.InstrumentLiveViewModel
 import com.sb.ui.theme.AppDesign
@@ -77,6 +78,7 @@ class HeikinAshiChartScreen(
     private var selectedSymbol = initialSymbol
     private var selectedTimeframe = "1m"
     private var chartStyle = ChartStyle.CANDLE
+    private var priceScaleMode = PriceScaleMode.ABSOLUTE
     private val activeIndicators = linkedSetOf<ChartIndicator>()
     private var activeTool = ChartTool.CROSSHAIR
     private var magnetEnabled = false
@@ -103,6 +105,7 @@ class HeikinAshiChartScreen(
     private lateinit var leftToolbar: LinearLayout
     private lateinit var symbolInfo: TextView
     private lateinit var modeButton: Button
+    private lateinit var priceScaleButton: TextView
     private lateinit var timeframeButton: TextView
     private lateinit var drawingToolsButton: TextView
     private lateinit var fullscreenButton: TextView
@@ -247,6 +250,40 @@ class HeikinAshiChartScreen(
             }
         )
 
+        priceScaleButton = AppDesign.text(
+            context,
+            "ABS",
+            9f,
+            accentColor,
+            bold = true
+        ).apply {
+            gravity = Gravity.CENTER
+            background = AppDesign.fieldBackground(context, 8)
+            isClickable = true
+            contentDescription = "Toggle absolute and relative price scale"
+            setOnClickListener {
+                priceScaleMode = if (priceScaleMode == PriceScaleMode.ABSOLUTE) {
+                    PriceScaleMode.RELATIVE
+                } else {
+                    PriceScaleMode.ABSOLUTE
+                }
+                text = if (priceScaleMode == PriceScaleMode.RELATIVE) {
+                    "%"
+                } else {
+                    "ABS"
+                }
+                if (::chartView.isInitialized) {
+                    chartView.priceScaleMode = priceScaleMode
+                }
+            }
+        }
+        header.addView(
+            priceScaleButton,
+            LinearLayout.LayoutParams(dp(36), dp(32)).apply {
+                setMargins(0, 0, dp(4), 0)
+            }
+        )
+
         val indicatorButton = AppDesign.text(
             context,
             "ƒx",
@@ -372,6 +409,7 @@ class HeikinAshiChartScreen(
 
         chartView = ProfessionalChartView(context).apply {
             chartStyle = this@HeikinAshiChartScreen.chartStyle
+            priceScaleMode = this@HeikinAshiChartScreen.priceScaleMode
             activeTool = this@HeikinAshiChartScreen.activeTool
             magnetEnabled = this@HeikinAshiChartScreen.magnetEnabled
             indicators = activeIndicators.toSet()
@@ -1160,12 +1198,12 @@ class HeikinAshiChartScreen(
                     BackendManager.paperEngine().getOpenOrders()
                 }.getOrDefault(emptyList())
             }
-            val order = openOrders.firstOrNull { candidate ->
+            val order = openOrders.filter { candidate ->
                 candidate.symbol.equals(selectedSymbol, ignoreCase = true) &&
                     candidate.exchange.equals(exchangeHint, ignoreCase = true) &&
                     candidate.stopLoss != null &&
                     candidate.target != null
-            } ?: return@launch
+            }.singleOrNull() ?: return@launch
             val stopLoss = order.stopLoss ?: return@launch
             val target = order.target ?: return@launch
             if (!quickTrade.hasActiveTrade()) {

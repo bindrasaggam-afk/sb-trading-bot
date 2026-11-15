@@ -166,7 +166,9 @@ class PaperTradingEngine(
                 entryPrice = price,
                 note = note,
                 stopLoss = stopLoss,
-                target = target
+                target = target,
+                entrySource = if (manualEntry) "MANUAL" else "MARKET",
+                entryTimestamp = quoteReceivedAt
             )
 
             TradeResult(
@@ -187,7 +189,8 @@ class PaperTradingEngine(
         orderId: Long,
         exitPrice: Double? = null,
         @Suppress("UNUSED_PARAMETER")
-        exchange: String = AppConfig.get().defaultExchange
+        exchange: String = AppConfig.get().defaultExchange,
+        exitTimestamp: Long? = null
     ): TradeResult {
         return try {
             val order = paperRepository.getOrder(orderId)
@@ -206,10 +209,12 @@ class PaperTradingEngine(
                 )
             }
 
-            val price = exitPrice ?: marketRepository.getQuote(
-                order.symbol,
-                order.exchange
-            )?.ltp
+            val quote = if (exitPrice == null) {
+                marketRepository.getQuote(order.symbol, order.exchange)
+            } else {
+                null
+            }
+            val price = exitPrice ?: quote?.ltp
 
             if (price == null || !price.isFinite() || price <= 0.0) {
                 return TradeResult(
@@ -218,11 +223,35 @@ class PaperTradingEngine(
                 )
             }
 
+            val quoteTimestamp = exitTimestamp
+                ?: quote?.receivedAt
+                ?: if (exitPrice != null) System.currentTimeMillis() else null
+            if (quoteTimestamp == null ||
+                !riskManager.isQuoteFresh(quoteTimestamp)
+            ) {
+                return TradeResult(
+                    success = false,
+                    message = "Exit quote is stale. Wait for a fresh tick."
+                )
+            }
+
             val closed = paperRepository.closeOrder(orderId, price)
-                ?: return TradeResult(
+            if (closed == null) {
+                val latest = paperRepository.getOrder(orderId)
+                if (latest != null && !latest.isOpen) {
+                    return TradeResult(
+                        success = true,
+                        message = "Paper order is already closed.",
+                        order = latest,
+                        pnl = latest.realizedPnl,
+                        snapshot = snapshot()
+                    )
+                }
+                return TradeResult(
                     success = false,
                     message = "Could not close paper order."
                 )
+            }
 
             TradeResult(
                 success = true,
@@ -300,23 +329,27 @@ class PaperTradingEngine(
             val targetHit = if (isBuy) ltp >= target else ltp <= target
             if (!stopHit && !targetHit) return@forEach
 
-            val result = closeOrder(order.id, ltp, order.exchange)
+            val result = closeOrder(
+                orderId = order.id,
+                exitPrice = ltp,
+                exchange = order.exchange,
+                exitTimestamp = quote.receivedAt
+            )
             if (result.success) closed++
         }
         return closed
     }
 
     fun snapshot(): PaperSnapshot? {
-        val account = paperRepository.getAccount() ?: return null
-        val positions = paperRepository.getPositions(true)
-        val realized = paperRepository.getRealizedPnl()
-        val unrealized = paperRepository.getUnrealizedPnl()
+        val data = paperRepository.getSnapshotData() ?: return null
         return PaperSnapshot(
-            account = account,
-            openPositions = positions,
-            realizedPnl = realized,
-            unrealizedPnl = unrealized,
-            totalEquity = account.balance + unrealized
+            account = data.account,
+            openPositions = data.positions,
+            realizedPnl = data.realizedPnl,
+            unrealizedPnl = data.unrealizedPnl,
+            totalEquity = data.account.startingBalance +
+                data.realizedPnl +
+                data.unrealizedPnl
         )
     }
 

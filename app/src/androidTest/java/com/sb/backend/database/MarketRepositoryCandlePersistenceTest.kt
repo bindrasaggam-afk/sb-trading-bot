@@ -12,10 +12,14 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class MarketRepositoryCandlePersistenceTest {
 
+    private companion object {
+        const val TEST_DATABASE_NAME = "sb_backend_candle_test.db"
+    }
+
     @Test
     fun saveReloadPreservesCandlesInAscendingTimestampOrder() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        context.deleteDatabase(SBDatabaseHelper.DATABASE_NAME)
+        context.deleteDatabase(TEST_DATABASE_NAME)
 
         val expected = listOf(
             Candle("SB_PERSIST_TEST", "1m", 1_700_000_060_000L, 101.0, 103.0, 100.0, 102.0, 150L),
@@ -23,7 +27,7 @@ class MarketRepositoryCandlePersistenceTest {
         )
 
         try {
-            val firstHelper = SBDatabaseHelper(context)
+            val firstHelper = SBDatabaseHelper(context, TEST_DATABASE_NAME)
             val firstRepository = MarketRepository(firstHelper)
             assertEquals(
                 2,
@@ -36,12 +40,12 @@ class MarketRepositoryCandlePersistenceTest {
             )
             firstHelper.close()
 
-            val reopenedHelper = SBDatabaseHelper(context)
+            val reopenedHelper = SBDatabaseHelper(context, TEST_DATABASE_NAME)
             try {
                 val reloaded = MarketRepository(reopenedHelper).getCandles(
                     symbol = "SB_PERSIST_TEST",
-                    exchange = "1m",
-                    timeframe = "NSE",
+                    timeframe = "1m",
+                    exchange = "NSE",
                     limit = 10
                 )
 
@@ -58,7 +62,7 @@ class MarketRepositoryCandlePersistenceTest {
                 reopenedHelper.close()
             }
         } finally {
-            context.deleteDatabase(SBDatabaseHelper.DATABASE_NAME)
+            context.deleteDatabase(TEST_DATABASE_NAME)
         }
     }
 }

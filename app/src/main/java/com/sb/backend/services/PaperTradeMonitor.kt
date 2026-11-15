@@ -37,9 +37,20 @@ class PaperTradeMonitor(
     }
 
     fun stop() {
-        synchronized(lock) {
-            executor?.shutdownNow()
+        val scheduled = synchronized(lock) {
+            val current = executor
             executor = null
+            current
+        } ?: return
+
+        scheduled.shutdown()
+        try {
+            if (!scheduled.awaitTermination(5, TimeUnit.SECONDS)) {
+                scheduled.shutdownNow()
+            }
+        } catch (_: InterruptedException) {
+            scheduled.shutdownNow()
+            Thread.currentThread().interrupt()
         }
     }
 

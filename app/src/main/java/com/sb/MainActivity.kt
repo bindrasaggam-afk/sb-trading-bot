@@ -34,6 +34,7 @@ import com.sb.backend.market.model.InstrumentKey
 import com.sb.backend.market.repo.MarketFeedRepository
 import com.sb.backend.models.Instrument
 import com.sb.backend.repositories.InstrumentRepository
+import com.sb.signals.presentation.SignalsScreen
 import com.sb.ui.market.InstrumentLiveViewModel
 import com.sb.ui.market.MarketListAdapter
 import com.sb.ui.market.MarketListItem
@@ -851,92 +852,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showSignals(body: LinearLayout) {
-        addLabel(body, "Signals", 22f, white, true)
-        addLabel(body, "Live signal engine output", 12f, yellow)
-
-        val signals = try {
-            if (BackendManager.isInitialized()) {
-                BackendManager.signals().getActive()
-            } else {
-                emptyList()
+        SignalsScreen.show(
+            context = this,
+            container = body,
+            onOpenChart = { symbol, exchange ->
+                openChart(symbol, exchange, "Market")
             }
-        } catch (_: Exception) {
-            emptyList()
-        }
-
-        if (signals.isEmpty()) {
-            addLabel(body, "No active signals right now.", 13f, grey)
-            return
-        }
-
-        signals.forEach { signal ->
-            val card = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                background = AppDesign.cardBackground(this@MainActivity, 10)
-                setPadding(dp(14), dp(10), dp(14), dp(10))
-                layoutParams = LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    setMargins(0, 0, 0, dp(8))
-                }
-            }
-
-            val sideColor = when (signal.signal.name) {
-                "BUY" -> green
-                "SELL" -> red
-                else -> yellow
-            }
-
-            card.addView(
-                makeText(
-                    "${signal.symbol}  •  ${signal.signal.name}",
-                    16f,
-                    sideColor,
-                    true
-                )
-            )
-            card.addView(
-                makeText(
-                    "${signal.exchange}  •  ${signal.timeframe}  •  " +
-                        "${signal.tradingStyle.name}",
-                    11f,
-                    grey,
-                    false
-                )
-            )
-            card.addView(
-                makeText(
-                    buildString {
-                        append("Entry ").append(formatPrice(signal.entryPrice))
-                        append("   SL ").append(formatPrice(signal.stopLoss))
-                        append("   T1 ").append(formatPrice(signal.target1))
-                        append("   T2 ").append(formatPrice(signal.target2))
-                    },
-                    12f,
-                    white,
-                    false
-                ).apply { setPadding(0, dp(5), 0, 0) }
-            )
-            card.addView(
-                makeText(
-                    String.format(
-                        Locale.US,
-                        "Confidence %.0f%%  •  %s",
-                        signal.confidence,
-                        signal.status.name
-                    ),
-                    10f,
-                    grey,
-                    false
-                ).apply { setPadding(0, dp(3), 0, 0) }
-            )
-
-            body.addView(card)
-            card.setOnClickListener {
-                openChart(signal.symbol, signal.exchange, "Market")
-            }
-        }
+        )
     }
 
     private fun showPositions(body: LinearLayout) {

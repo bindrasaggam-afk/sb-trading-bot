@@ -2,7 +2,10 @@
 package com.sb.backend.server
 
 import com.sb.backend.core.BackendManager
+import com.sb.backend.database.DatabaseMaintenanceGate
+import com.sb.backend.database.DatabaseMaintenanceTimeoutException
 import com.sb.backend.database.SBDatabaseHelper
+import com.sb.backend.security.LocalApiToken
 import com.sb.backend.services.KotakSessionCoordinator
 import android.database.sqlite.SQLiteDatabase
 import java.io.BufferedInputStream
@@ -11,13 +14,17 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.InetAddress
 import java.net.URLDecoder
+import java.security.MessageDigest
+import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import org.json.JSONArray
 import org.json.JSONObject
 
 class EmbeddedApiServer(
-    private val port: Int = 10000
+    private val port: Int = 10000,
+    private val accessToken: String
 ) {
     private var serverSocket: ServerSocket? = null
     private val running = AtomicBoolean(false)
@@ -78,130 +85,206 @@ class EmbeddedApiServer(
                         URLDecoder.decode(pair.getOrElse(1) { "" }, "UTF-8")
                 }
 
+                val headers = HashMap<String, String>()
                 while (true) {
                     val header = readLine(input) ?: break
                     if (header.isEmpty()) break
+                    val separator = header.indexOf(':')
+                    if (separator > 0) {
+                        headers[header.substring(0, separator)
+                            .trim()
+                            .lowercase(Locale.US)] =
+                            header.substring(separator + 1).trim()
+                    }
                 }
 
-                val authenticated =
-                    KotakSessionCoordinator.isFeedAuthenticated()
-
-                val connected =
-                    KotakSessionCoordinator.isFeedConnected()
-
-                val brokerStatus = when {
-                    authenticated -> "authenticated"
-                    connected -> "connected"
-                    else -> "disconnected"
+                val providedToken = headers[
+                    LocalApiToken.HEADER_NAME.lowercase(Locale.US)
+                ] ?: headers["authorization"]?.let { raw ->
+                    if (raw.startsWith("Bearer ", ignoreCase = true)) {
+                        raw.substring(7).trim()
+                    } else {
+                        raw.trim()
+                    }
                 }
 
-                val brokerMessage = jsonEscape(
-                    KotakSessionCoordinator.currentStatus()
-                )
+                val authFailed = method != "OPTIONS" &&
+                    !tokenMatches(providedToken)
 
-                val response = when {
-                    method == "GET" && path == "/api/health" ->
-                        """{"status":"ok","service":"SB Bot Android Backend","server":"running"}"""
+                val response: String
+                val status: String
 
-                    method == "GET" && path == "/api/broker/status" ->
-                        """
-                        {
-                            "status": "$brokerStatus",
-                            "broker": "Kotak Neo",
-                            "connected": $connected,
-                            "authenticated": $authenticated,
-                            "message": "$brokerMessage"
+                if (authFailed) {
+                    response = JSONObject()
+                        .put("status", "error")
+                        .put("message", "Unauthorized")
+                        .toString()
+                    status = "401 Unauthorized"
+                } else {
+                    val authenticated =
+                        KotakSessionCoordinator.isFeedAuthenticated()
+
+                    val connected =
+                        KotakSessionCoordinator.isFeedConnected()
+
+                    val brokerStatus = when {
+                        authenticated -> "authenticated"
+                        connected -> "connected"
+                        else -> "disconnected"
+                    }
+
+                    val brokerMessage = jsonEscape(
+                        KotakSessionCoordinator.currentStatus()
+                    )
+
+                    val result = try {
+                        val body = dispatchGuarded(path) {
+                            when {
+                                method == "GET" && path == "/api/health" ->
+                                    """{"status":"ok","service":"SB Bot Android Backend","server":"running"}"""
+
+                                method == "GET" && path == "/api/broker/status" ->
+                                    """
+                                    {
+                                        "status": "$brokerStatus",
+                                        "broker": "Kotak Neo",
+                                        "connected": $connected,
+                                        "authenticated": $authenticated,
+                                        "message": "$brokerMessage"
+                                    }
+                                    """.trimIndent()
+
+                                method == "GET" && path == "/api/system/status" ->
+                                    """{"app":"SB Bot","backend":"running","mode":"LOCAL_ANDROID"}"""
+
+                                method == "GET" && path == "/api/database/diagnostics" ->
+                                    databaseDiagnostics()
+
+                                method == "GET" && path == "/api/database/candle-audit" ->
+                                    databaseCandleAudit(
+                                        symbol = queryParams["symbol"] ?: "",
+                                        exchange = queryParams["exchange"] ?: "MCX",
+                                        timeframe = queryParams["timeframe"] ?: "1m",
+                                        limit = queryParams["limit"]?.toIntOrNull() ?: 500
+                                    )
+
+                                method == "GET" && path == "/api/database/capital-month-audit" ->
+                                    databaseCapitalMonthAudit()
+
+                                method == "GET" && path == "/api/database/integrity-audit" ->
+                                    databaseIntegrityAudit(
+                                        exchange = queryParams["exchange"] ?: "",
+                                        timeframe = queryParams["timeframe"] ?: ""
+                                    )
+
+                                method == "GET" && path == "/api/history/validation" ->
+                                    databaseHistoryValidation()
+
+                                method == "POST" && path == "/api/database/capital-month-backup" ->
+                                    databaseCapitalMonthBackup()
+
+                                method == "POST" && path == "/api/database/capital-month-migrate" ->
+                                    databaseCapitalMonthMigrate()
+
+                                method == "POST" && path == "/api/history/equities/start" ->
+                                    KotakSessionCoordinator.startEquityHistoricalBackfill().toString()
+
+                                method == "GET" && path == "/api/history/equities/status" ->
+                                    KotakSessionCoordinator.historicalImportSnapshot().toString()
+
+                                method == "POST" && path == "/api/history/mcx/start" ->
+                                    KotakSessionCoordinator.startMcxThreeMonthBackfill().toString()
+
+                                method == "GET" && path == "/api/history/mcx/status" ->
+                                    KotakSessionCoordinator.mcxHistoricalBackfillSnapshot().toString()
+
+                                method == "OPTIONS" ->
+                                    """{"status":"ok"}"""
+
+                                else ->
+                                    """{"status":"error","message":"Endpoint not found"}"""
+                            }
                         }
-                        """.trimIndent()
+                        body to endpointStatus(method, path)
+                    } catch (error: DatabaseMaintenanceTimeoutException) {
+                        JSONObject()
+                            .put("status", "unavailable")
+                            .put("message", error.message ?: "Database is busy")
+                            .toString() to "503 Service Unavailable"
+                    }
 
-                    method == "GET" && path == "/api/system/status" ->
-                        """{"app":"SB Bot","backend":"running","mode":"LOCAL_ANDROID"}"""
-
-                    method == "GET" && path == "/api/database/diagnostics" ->
-                        databaseDiagnostics()
-
-                    method == "GET" && path == "/api/database/candle-audit" ->
-                        databaseCandleAudit(
-                            symbol = queryParams["symbol"] ?: "",
-                            exchange = queryParams["exchange"] ?: "MCX",
-                            timeframe = queryParams["timeframe"] ?: "1m",
-                            limit = queryParams["limit"]?.toIntOrNull() ?: 500
-                        )
-
-                    method == "GET" && path == "/api/database/capital-month-audit" ->
-                        databaseCapitalMonthAudit()
-
-                    method == "GET" && path == "/api/database/integrity-audit" ->
-                        databaseIntegrityAudit(
-                            exchange = queryParams["exchange"] ?: "",
-                            timeframe = queryParams["timeframe"] ?: ""
-                        )
-
-                    method == "GET" && path == "/api/history/validation" ->
-                        databaseHistoryValidation()
-
-                    method == "POST" && path == "/api/database/capital-month-backup" ->
-                        databaseCapitalMonthBackup()
-
-                    method == "POST" && path == "/api/database/capital-month-migrate" ->
-                        databaseCapitalMonthMigrate()
-
-                    method == "POST" && path == "/api/history/equities/start" ->
-                        KotakSessionCoordinator.startEquityHistoricalBackfill().toString()
-
-                    method == "GET" && path == "/api/history/equities/status" ->
-                        KotakSessionCoordinator.historicalImportSnapshot().toString()
-
-                    method == "POST" && path == "/api/history/mcx/start" ->
-                        KotakSessionCoordinator.startMcxThreeMonthBackfill().toString()
-
-                    method == "GET" && path == "/api/history/mcx/status" ->
-                        KotakSessionCoordinator.mcxHistoricalBackfillSnapshot().toString()
-
-                    method == "OPTIONS" ->
-                        """{"status":"ok"}"""
-
-                    else ->
-                        """{"status":"error","message":"Endpoint not found"}"""
+                    response = result.first
+                    status = result.second
                 }
-
-                val status = if (
-                    path == "/api/health" ||
-                    path == "/api/broker/status" ||
-                    path == "/api/system/status" ||
-                    path == "/api/database/diagnostics" ||
-                    path == "/api/database/candle-audit" ||
-                    path == "/api/database/capital-month-audit" ||
-                    path == "/api/database/integrity-audit" ||
-                    path == "/api/history/validation" ||
-                    path == "/api/database/capital-month-backup" ||
-                    path == "/api/database/capital-month-migrate" ||
-                    path == "/api/history/equities/start" ||
-                    path == "/api/history/equities/status" ||
-                    path == "/api/history/mcx/start" ||
-                    path == "/api/history/mcx/status" ||
-                    method == "OPTIONS"
-                ) "200 OK" else "404 Not Found"
 
                 val body = response.toByteArray(Charsets.UTF_8)
+                val authHeader = if (authFailed) {
+                    "WWW-Authenticate: Bearer realm=\"SB Local API\"\r\n"
+                } else {
+                    ""
+                }
 
-                val headers = (
+                val responseHeaders = (
                     "HTTP/1.1 $status\r\n" +
                         "Content-Type: application/json; charset=utf-8\r\n" +
                         "Content-Length: ${body.size}\r\n" +
                         "Connection: close\r\n" +
-                        "Access-Control-Allow-Origin: *\r\n" +
-                        "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n" +
-                        "Access-Control-Allow-Headers: Content-Type, Authorization\r\n" +
+                        "Cache-Control: no-store\r\n" +
+                        "X-Content-Type-Options: nosniff\r\n" +
+                        authHeader +
                         "\r\n"
                     )
 
-                output.write(headers.toByteArray(Charsets.UTF_8))
+                output.write(responseHeaders.toByteArray(Charsets.UTF_8))
                 output.write(body)
                 output.flush()
             }
         } catch (e: Exception) {
             e.printStackTrace()
+        }
+    }
+
+    private fun tokenMatches(provided: String?): Boolean {
+        if (provided.isNullOrBlank() || accessToken.isBlank()) return false
+        return MessageDigest.isEqual(
+            provided.toByteArray(Charsets.UTF_8),
+            accessToken.toByteArray(Charsets.UTF_8)
+        )
+    }
+
+    private fun dispatchGuarded(path: String, dispatch: () -> String): String {
+        val gate = DatabaseMaintenanceGate.shared
+        return if (
+            path == "/api/database/capital-month-backup" ||
+            path == "/api/database/capital-month-migrate"
+        ) {
+            gate.withMaintenance { dispatch() }
+        } else {
+            gate.withOperation { dispatch() }
+        }
+    }
+
+    private fun endpointStatus(method: String, path: String): String {
+        return if (
+            path == "/api/health" ||
+            path == "/api/broker/status" ||
+            path == "/api/system/status" ||
+            path == "/api/database/diagnostics" ||
+            path == "/api/database/candle-audit" ||
+            path == "/api/database/capital-month-audit" ||
+            path == "/api/database/integrity-audit" ||
+            path == "/api/history/validation" ||
+            path == "/api/database/capital-month-backup" ||
+            path == "/api/database/capital-month-migrate" ||
+            path == "/api/history/equities/start" ||
+            path == "/api/history/equities/status" ||
+            path == "/api/history/mcx/start" ||
+            path == "/api/history/mcx/status" ||
+            method == "OPTIONS"
+        ) {
+            "200 OK"
+        } else {
+            "404 Not Found"
         }
     }
 
@@ -1260,5 +1343,14 @@ class EmbeddedApiServer(
         }
 
         serverSocket = null
+        executor.shutdown()
+        try {
+            if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                executor.shutdownNow()
+            }
+        } catch (_: InterruptedException) {
+            executor.shutdownNow()
+            Thread.currentThread().interrupt()
+        }
     }
 }

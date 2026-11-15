@@ -338,6 +338,8 @@ object DatabaseMigrations {
                 stop_loss REAL,
                 target REAL,
                 legacy_order_id INTEGER,
+                entry_source TEXT NOT NULL DEFAULT 'MARKET',
+                entry_timestamp INTEGER,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             )
@@ -347,6 +349,13 @@ object DatabaseMigrations {
         ensureColumn(db, "paper_orders", "stop_loss", "REAL")
         ensureColumn(db, "paper_orders", "target", "REAL")
         ensureColumn(db, "paper_orders", "legacy_order_id", "INTEGER")
+        ensureColumn(
+            db,
+            "paper_orders",
+            "entry_source",
+            "TEXT NOT NULL DEFAULT 'MARKET'"
+        )
+        ensureColumn(db, "paper_orders", "entry_timestamp", "INTEGER")
 
         // ---------------------------------------------------------
         // 10. POSITIONS

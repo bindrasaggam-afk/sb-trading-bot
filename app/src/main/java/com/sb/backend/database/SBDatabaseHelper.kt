@@ -4,9 +4,12 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 
-class SBDatabaseHelper(context: Context) : SQLiteOpenHelper(
+class SBDatabaseHelper(
+    context: Context,
+    databaseName: String = DATABASE_NAME
+) : SQLiteOpenHelper(
     context.applicationContext,
-    DATABASE_NAME,
+    databaseName,
     null,
     DATABASE_VERSION
 ) {
@@ -46,7 +49,7 @@ class SBDatabaseHelper(context: Context) : SQLiteOpenHelper(
         const val DATABASE_NAME = "sb_backend.db"
 
         // Must match the latest DatabaseMigrations version.
-        const val DATABASE_VERSION = 8
+        const val DATABASE_VERSION = 9
 
         // Core market tables
         const val TABLE_INSTRUMENTS = "instruments"

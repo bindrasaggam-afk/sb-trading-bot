@@ -16,6 +16,11 @@ enum class ChartStyle(val label: String) {
     BAR("BAR")
 }
 
+enum class PriceScaleMode {
+    ABSOLUTE,
+    RELATIVE
+}
+
 enum class ChartTool(val label: String, val shortLabel: String) {
     CROSSHAIR("Crosshair", "+"),
     TRENDLINE("Trendline", "/"),

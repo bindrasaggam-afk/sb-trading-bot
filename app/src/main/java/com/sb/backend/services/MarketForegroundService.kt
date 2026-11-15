@@ -11,7 +11,10 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.sb.backend.core.BackendManager
+import com.sb.backend.market.MarketDataManager
+import com.sb.backend.security.LocalApiToken
 import com.sb.backend.server.EmbeddedApiServer
+import com.sb.signals.services.SignalsPlatform
 import java.util.concurrent.Executors
 
 class MarketForegroundService : Service() {
@@ -27,8 +30,14 @@ class MarketForegroundService : Service() {
 
         private const val NOTIFICATION_ID = 7101
 
+        private enum class RuntimeState {
+            STOPPED,
+            STARTING,
+            STARTED
+        }
+
         @Volatile
-        private var runtimeStarted = false
+        private var runtimeState = RuntimeState.STOPPED
 
         fun start(context: Context) {
             val appContext = context.applicationContext
@@ -53,7 +62,7 @@ class MarketForegroundService : Service() {
 
         private fun resetRuntimeState() {
             synchronized(MarketForegroundService::class.java) {
-                runtimeStarted = false
+                runtimeState = RuntimeState.STOPPED
             }
         }
     }
@@ -102,51 +111,68 @@ class MarketForegroundService : Service() {
     }
 
     private fun startBackendRuntime() {
-
         synchronized(MarketForegroundService::class.java) {
-            if (runtimeStarted) {
-                Log.d(TAG, "Runtime already started")
+            if (runtimeState != RuntimeState.STOPPED) {
+                Log.d(TAG, "Runtime already starting or started")
                 return
             }
-            runtimeStarted = true
+            runtimeState = RuntimeState.STARTING
         }
 
         try {
-            // Start local API server on port 10000.
             startApiServer()
 
-            // Initialize the main backend.
             BackendManager.initialize(applicationContext)
 
             BackendManager.start(
-                seedBuiltInMasters = true
-            ) {
-                try {
-                    KotakSessionCoordinator.initialize(
-                        applicationContext
-                    )
+                seedBuiltInMasters = true,
+                onReady = {
+                    val proceed = synchronized(MarketForegroundService::class.java) {
+                        if (runtimeState == RuntimeState.STARTING) {
+                            runtimeState = RuntimeState.STARTED
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    if (proceed) {
+                        try {
+                            KotakSessionCoordinator.initialize(
+                                applicationContext
+                            )
 
-                    // Persist finalized candles independently of chart visibility.
-                    MarketRuntimeService.start()
+                            MarketRuntimeService.start()
+                            SignalsPlatform.start(applicationContext)
 
-                    KotakSessionCoordinator.startIfEnabled()
+                            KotakSessionCoordinator.startIfEnabled()
 
-                    Log.d(
-                        TAG,
-                        "Backend ready; Kotak feed startup requested"
-                    )
-
-                } catch (error: Exception) {
-                    Log.e(TAG, "Kotak feed startup failed", error)
+                            Log.d(
+                                TAG,
+                                "Backend ready; Kotak feed startup requested"
+                            )
+                        } catch (error: Exception) {
+                            Log.e(TAG, "Kotak feed startup failed", error)
+                        }
+                    }
+                },
+                onError = { error ->
+                    Log.e(TAG, "Backend initialization failed", error)
+                    synchronized(MarketForegroundService::class.java) {
+                        if (runtimeState == RuntimeState.STARTING) {
+                            runtimeState = RuntimeState.STOPPED
+                        }
+                    }
+                    stopApiServer()
                 }
-            }
-
+            )
         } catch (error: Exception) {
             Log.e(TAG, "Backend initialization failed", error)
-
             synchronized(MarketForegroundService::class.java) {
-                runtimeStarted = false
+                if (runtimeState == RuntimeState.STARTING) {
+                    runtimeState = RuntimeState.STOPPED
+                }
             }
+            stopApiServer()
         }
     }
 
@@ -157,7 +183,10 @@ class MarketForegroundService : Service() {
                 return
             }
 
-            val server = EmbeddedApiServer(10000)
+            val server = EmbeddedApiServer(
+                port = 10000,
+                accessToken = LocalApiToken.get(this)
+            )
             embeddedApiServer = server
 
             val started = server.start()
@@ -223,8 +252,12 @@ class MarketForegroundService : Service() {
     override fun onDestroy() {
         Log.w(TAG, "Foreground service destroyed")
 
-        MarketRuntimeService.stop()
         stopApiServer()
+        SignalsPlatform.stop()
+        KotakSessionCoordinator.shutdown()
+        MarketRuntimeService.shutdown()
+        BackendManager.stop()
+        MarketDataManager.shutdown()
         resetRuntimeState()
         runtimeExecutor.shutdownNow()
 
