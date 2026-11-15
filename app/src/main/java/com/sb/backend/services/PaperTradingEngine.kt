@@ -56,7 +56,10 @@ class PaperTradingEngine(
         quantity: Int,
         entryPrice: Double? = null,
         exchange: String = AppConfig.get().defaultExchange,
-        note: String = ""
+        note: String = "",
+        stopLoss: Double? = null,
+        target: Double? = null,
+        entryTimestamp: Long? = null
     ): TradeResult {
         return try {
             val account = paperRepository.getAccount()
@@ -76,16 +79,68 @@ class PaperTradingEngine(
                 "Exchange cannot be empty."
             }
 
-            val price = entryPrice ?: marketRepository.getQuote(
-                normalizedSymbol,
-                normalizedExchange
-            )?.ltp
+            val manualEntry = entryPrice != null
+            val quote = if (!manualEntry) {
+                marketRepository.getQuote(
+                    normalizedSymbol,
+                    normalizedExchange
+                )
+            } else {
+                null
+            }
+            val price = entryPrice ?: quote?.ltp
 
             if (price == null || !price.isFinite() || price <= 0.0) {
                 return TradeResult(
                     success = false,
                     message = "Valid entry price is unavailable."
                 )
+            }
+
+            if (!manualEntry && !AppConfig.get().liveMarketDataEnabled) {
+                return TradeResult(
+                    success = false,
+                    message = "Live market data is disabled."
+                )
+            }
+
+            val quoteReceivedAt = entryTimestamp ?: quote?.receivedAt
+                ?: if (manualEntry) System.currentTimeMillis() else null
+            if (quoteReceivedAt == null ||
+                !riskManager.isQuoteFresh(quoteReceivedAt)
+            ) {
+                return TradeResult(
+                    success = false,
+                    message = "Quote is stale. Wait for a fresh tick."
+                )
+            }
+
+            if (stopLoss != null || target != null) {
+                if (stopLoss == null || target == null) {
+                    return TradeResult(
+                        success = false,
+                        message = "Stop loss and target must be provided together."
+                    )
+                }
+                if (!stopLoss.isFinite() || stopLoss <= 0.0 ||
+                    !target.isFinite() || target <= 0.0
+                ) {
+                    return TradeResult(
+                        success = false,
+                        message = "Stop loss and target must be valid and positive."
+                    )
+                }
+                val validLevels = if (normalizedSide == OrderSide.BUY.name) {
+                    stopLoss < price && target > price
+                } else {
+                    stopLoss > price && target < price
+                }
+                if (!validLevels) {
+                    return TradeResult(
+                        success = false,
+                        message = "Invalid stop loss or target level."
+                    )
+                }
             }
 
             val decision = riskManager.validateOrder(
@@ -109,7 +164,9 @@ class PaperTradingEngine(
                 side = normalizedSide,
                 quantity = quantity,
                 entryPrice = price,
-                note = note
+                note = note,
+                stopLoss = stopLoss,
+                target = target
             )
 
             TradeResult(
@@ -141,8 +198,11 @@ class PaperTradingEngine(
 
             if (!order.isOpen) {
                 return TradeResult(
-                    success = false,
-                    message = "Paper order is already closed."
+                    success = true,
+                    message = "Paper order is already closed.",
+                    order = order,
+                    pnl = order.realizedPnl,
+                    snapshot = snapshot()
                 )
             }
 
@@ -179,23 +239,71 @@ class PaperTradingEngine(
         }
     }
 
-    fun markToMarket(
-        symbols: List<String>? = null,
-        exchange: String = AppConfig.get().defaultExchange
-    ): Int {
+    fun markToMarket(symbols: List<String>? = null): Int {
         val positions = paperRepository.getPositions(true)
         if (positions.isEmpty()) return 0
 
-        val targets = symbols?.takeIf { it.isNotEmpty() }
-            ?: positions.map { it.symbol }.distinct()
-        val quotes = marketRepository.getQuotes(targets, exchange)
-        if (quotes.isEmpty()) return 0
+        val symbolFilter = symbols
+            ?.map { it.trim().uppercase(Locale.ROOT) }
+            ?.filter { it.isNotBlank() }
+            ?.toSet()
+            ?.takeIf { it.isNotEmpty() }
 
-        val prices = HashMap<String, Double>()
-        quotes.forEach { quote ->
-            prices[quote.symbol] = quote.ltp
+        var updated = 0
+        positions
+            .filter { symbolFilter == null || it.symbol.uppercase(Locale.ROOT) in symbolFilter }
+            .groupBy { it.exchange }
+            .forEach { (exchange, exchangePositions) ->
+                val quotes = marketRepository.getQuotes(
+                    exchangePositions.map { it.symbol }.distinct(),
+                    exchange
+                )
+                val prices = HashMap<String, Double>()
+                quotes.forEach { quote ->
+                    if (riskManager.isQuoteFresh(quote)) {
+                        prices[quote.symbol] = quote.ltp
+                    }
+                }
+                if (prices.isNotEmpty()) {
+                    updated += paperRepository.updatePositionPrices(
+                        prices,
+                        exchange
+                    )
+                }
+            }
+        return updated
+    }
+
+    fun monitorOpenTrades(): Int {
+        markToMarket()
+        var closed = 0
+        paperRepository.getOpenOrders().forEach { order ->
+            val stopLoss = order.stopLoss ?: return@forEach
+            val target = order.target ?: return@forEach
+            if (!stopLoss.isFinite() || stopLoss <= 0.0 ||
+                !target.isFinite() || target <= 0.0
+            ) {
+                return@forEach
+            }
+
+            val quote = marketRepository.getQuote(
+                order.symbol,
+                order.exchange
+            ) ?: return@forEach
+            if (!riskManager.isQuoteFresh(quote)) return@forEach
+
+            val ltp = quote.ltp
+            if (!ltp.isFinite() || ltp <= 0.0) return@forEach
+
+            val isBuy = order.side == OrderSide.BUY.name
+            val stopHit = if (isBuy) ltp <= stopLoss else ltp >= stopLoss
+            val targetHit = if (isBuy) ltp >= target else ltp <= target
+            if (!stopHit && !targetHit) return@forEach
+
+            val result = closeOrder(order.id, ltp, order.exchange)
+            if (result.success) closed++
         }
-        return paperRepository.updatePositionPrices(prices)
+        return closed
     }
 
     fun snapshot(): PaperSnapshot? {
@@ -214,6 +322,19 @@ class PaperTradingEngine(
 
     fun getOpenOrders(): List<PaperOrder> {
         return paperRepository.getOpenOrders()
+    }
+
+    fun getOrder(orderId: Long): PaperOrder? {
+        return paperRepository.getOrder(orderId)
+    }
+
+    fun getOpenOrder(symbol: String, exchange: String): PaperOrder? {
+        val normalizedSymbol = symbol.trim()
+        val normalizedExchange = exchange.trim()
+        return paperRepository.getOpenOrders().firstOrNull { order ->
+            order.symbol.equals(normalizedSymbol, ignoreCase = true) &&
+                order.exchange.equals(normalizedExchange, ignoreCase = true)
+        }
     }
 
     fun getOrders(status: String? = null): List<PaperOrder> {

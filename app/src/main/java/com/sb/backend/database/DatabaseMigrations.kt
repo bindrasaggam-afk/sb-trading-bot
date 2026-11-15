@@ -335,11 +335,18 @@ object DatabaseMigrations {
                 reserved_margin REAL NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'OPEN',
                 note TEXT NOT NULL DEFAULT '',
+                stop_loss REAL,
+                target REAL,
+                legacy_order_id INTEGER,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             )
             """.trimIndent()
         )
+
+        ensureColumn(db, "paper_orders", "stop_loss", "REAL")
+        ensureColumn(db, "paper_orders", "target", "REAL")
+        ensureColumn(db, "paper_orders", "legacy_order_id", "INTEGER")
 
         // ---------------------------------------------------------
         // 10. POSITIONS
@@ -514,6 +521,14 @@ object DatabaseMigrations {
             "idx_orders_status",
             "paper_orders",
             "status, created_at"
+        )
+
+        db.execSQL(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_orders_legacy_order
+            ON `paper_orders` (`legacy_order_id`)
+            """.trimIndent()
         )
 
         createIndex(

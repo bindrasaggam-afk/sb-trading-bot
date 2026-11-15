@@ -23,7 +23,9 @@ data class PaperOrder(
     val status: String = OrderStatus.OPEN.name,
     val note: String = "",
     val createdAt: Long = System.currentTimeMillis(),
-    val updatedAt: Long = System.currentTimeMillis()
+    val updatedAt: Long = System.currentTimeMillis(),
+    val stopLoss: Double? = null,
+    val target: Double? = null
 ) {
     val orderValue: Double
         get() = quantity.toDouble() * entryPrice

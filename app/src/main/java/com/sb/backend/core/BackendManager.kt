@@ -7,6 +7,7 @@ import android.os.Build
 import android.provider.MediaStore
 import android.util.Log
 import com.sb.backend.database.DatabaseBackup
+import com.sb.backend.database.LegacyPaperMigration
 import com.sb.backend.database.SBDatabaseHelper
 import com.sb.backend.market.repo.MarketFeedRepository
 import com.sb.backend.repositories.InstrumentRepository
@@ -19,6 +20,7 @@ import com.sb.backend.services.KotakNeoLiveFeedService
 import com.sb.backend.services.KotakNeoWebSocketClient
 import com.sb.backend.services.KotakSessionCoordinator
 import com.sb.backend.services.MarketDataService
+import com.sb.backend.services.PaperTradeMonitor
 import com.sb.backend.services.PaperTradingEngine
 import com.sb.backend.services.RiskManager
 import com.sb.backend.services.SignalEngine
@@ -56,6 +58,7 @@ object BackendManager {
     private lateinit var marketDataService: MarketDataService
     private lateinit var signalEngine: SignalEngine
     private lateinit var paperTradingEngine: PaperTradingEngine
+    private lateinit var paperTradeMonitor: PaperTradeMonitor
     private lateinit var riskManager: RiskManager
 
     fun initialize(context: Context) {
@@ -85,6 +88,7 @@ object BackendManager {
                 marketRepository,
                 riskManager
             )
+            paperTradeMonitor = PaperTradeMonitor(paperTradingEngine)
             executor = Executors.newSingleThreadExecutor()
             initialized = true
         }
@@ -146,6 +150,29 @@ object BackendManager {
 
                         signalRepository.expireOld()
 
+                        try {
+                            val migration = LegacyPaperMigration.migrate(
+                                context = appContext ?: throw IllegalStateException(
+                                    "Backend context is unavailable."
+                                ),
+                                mainDb = dbHelper.writableDatabase
+                            )
+                            Log.i(
+                                TAG,
+                                "Legacy paper migration: ${migration.message} " +
+                                    "legacyOrders=${migration.legacyOrders}, " +
+                                    "inserted=${migration.insertedOrders}, " +
+                                    "positions=${migration.ensuredPositions}"
+                            )
+                        } catch (migrationError: Exception) {
+                            Log.e(
+                                TAG,
+                                "Legacy paper migration failed; " +
+                                    "legacy database was left untouched.",
+                                migrationError
+                            )
+                        }
+
                         synchronized(lock) {
                             if (!initialized) {
                                 Log.w(TAG, "Backend stopped before startup completed.")
@@ -154,6 +181,8 @@ object BackendManager {
 
                             ready = true
                         }
+
+                        paperTradeMonitor.start()
 
                         Log.i(TAG, "Backend initialization completed successfully.")
 
@@ -441,6 +470,9 @@ object BackendManager {
     fun stop() {
         synchronized(lock) {
             if (!initialized) return
+            if (::paperTradeMonitor.isInitialized) {
+                paperTradeMonitor.stop()
+            }
             executor?.shutdown()
             executor = null
             marketDataService.shutdown()

@@ -19,6 +19,7 @@ import android.widget.TextView
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStoreOwner
 import com.sb.backend.core.BackendManager
+import com.sb.backend.market.MarketDataManager
 import com.sb.backend.market.model.MarketCandle
 import com.sb.backend.market.model.MarketTick
 import com.sb.backend.market.model.MarketUiState
@@ -38,6 +39,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -971,7 +973,10 @@ class HeikinAshiChartScreen(
                         quantity = request.quantity,
                         entryPrice = request.entryPrice,
                         exchange = request.exchange,
-                        note = "Quick trade ${request.side}"
+                        note = "Quick trade ${request.side}",
+                        stopLoss = request.stopLoss,
+                        target = request.target,
+                        entryTimestamp = request.entryTimestamp
                     )
                 } catch (e: Exception) {
                     TradeResult(
@@ -983,7 +988,7 @@ class HeikinAshiChartScreen(
 
             val order = result.order
             if (!result.success || order == null) {
-                quickTrade.onOrderRejected(result.message)
+                quickTrade.onOrderRejected(result.message, request.requestId)
                 return@launch
             }
 
@@ -995,9 +1000,10 @@ class HeikinAshiChartScreen(
                     side = order.side,
                     quantity = order.quantity,
                     entryPrice = order.entryPrice,
-                    stopLoss = request.stopLoss,
-                    target = request.target
-                )
+                    stopLoss = order.stopLoss ?: request.stopLoss,
+                    target = order.target ?: request.target
+                ),
+                request.requestId
             )
         }
     }
@@ -1029,7 +1035,9 @@ class HeikinAshiChartScreen(
             if (result.success) {
                 quickTrade.onTradeClosed(reason, result.pnl)
             } else {
-                quickTrade.showMessage("$reason • Exit failed: ${result.message}")
+                quickTrade.onExitFailed(
+                    "$reason • Exit failed: ${result.message}"
+                )
             }
         }
     }
@@ -1130,6 +1138,9 @@ class HeikinAshiChartScreen(
             }
         }
 
+        restoreOpenQuickTrade(scope)
+        reconcileQuickTrade(scope)
+
         root.addOnAttachStateChangeListener(
             object : View.OnAttachStateChangeListener {
                 override fun onViewAttachedToWindow(v: View) {
@@ -1142,9 +1153,68 @@ class HeikinAshiChartScreen(
         )
     }
 
+    private fun restoreOpenQuickTrade(scope: CoroutineScope) {
+        scope.launch {
+            val openOrders = withContext(Dispatchers.IO) {
+                runCatching {
+                    BackendManager.paperEngine().getOpenOrders()
+                }.getOrDefault(emptyList())
+            }
+            val order = openOrders.firstOrNull { candidate ->
+                candidate.symbol.equals(selectedSymbol, ignoreCase = true) &&
+                    candidate.exchange.equals(exchangeHint, ignoreCase = true) &&
+                    candidate.stopLoss != null &&
+                    candidate.target != null
+            } ?: return@launch
+            val stopLoss = order.stopLoss ?: return@launch
+            val target = order.target ?: return@launch
+            if (!quickTrade.hasActiveTrade()) {
+                quickTrade.restoreTrade(
+                    QuickTradeTracking(
+                        orderId = order.id,
+                        symbol = order.symbol,
+                        exchange = order.exchange,
+                        side = order.side,
+                        quantity = order.quantity,
+                        entryPrice = order.entryPrice,
+                        stopLoss = stopLoss,
+                        target = target
+                    )
+                )
+            }
+        }
+    }
+
+    private fun reconcileQuickTrade(scope: CoroutineScope) {
+        scope.launch {
+            while (true) {
+                delay(5_000L)
+                val orderId = if (::quickTrade.isInitialized) {
+                    quickTrade.activeOrderId()
+                } else {
+                    null
+                } ?: continue
+                val order = withContext(Dispatchers.IO) {
+                    runCatching {
+                        BackendManager.paperEngine().getOrder(orderId)
+                    }.getOrNull()
+                } ?: continue
+                if (!order.isOpen && ::quickTrade.isInitialized) {
+                    quickTrade.onTradeClosed(
+                        "Paper order closed.",
+                        order.realizedPnl
+                    )
+                }
+            }
+        }
+    }
+
     private fun stopLiveUpdates() {
         liveScope?.cancel()
         liveScope = null
+        if (::quickTrade.isInitialized) {
+            quickTrade.setConnectionAvailable(false)
+        }
         liveViewModel?.releaseInstrument()
     }
 
@@ -1158,6 +1228,13 @@ class HeikinAshiChartScreen(
             tick.key.key() != activeKey.key()
         ) {
             return
+        }
+
+        val connectionLive =
+            state.connectionState == MarketDataManager.ConnectionState.CONNECTED ||
+                state.connectionState == MarketDataManager.ConnectionState.AUTHENTICATED
+        if (::quickTrade.isInitialized) {
+            quickTrade.setConnectionAvailable(connectionLive && tick != null)
         }
 
         if (tick == null) {
@@ -1224,7 +1301,7 @@ class HeikinAshiChartScreen(
         }
 
         renderDepth(tick)
-        if (::quickTrade.isInitialized) {
+        if (::quickTrade.isInitialized && connectionLive) {
             quickTrade.onTick(tick)
         }
     }

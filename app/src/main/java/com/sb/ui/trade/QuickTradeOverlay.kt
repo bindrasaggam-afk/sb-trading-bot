@@ -13,6 +13,7 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.sb.backend.core.AppConfig
 import com.sb.backend.market.model.MarketTick
 import com.sb.ui.theme.AppDesign
 import java.util.Locale
@@ -25,7 +26,9 @@ data class QuickTradeRequest(
     val quantity: Int,
     val entryPrice: Double,
     val stopLoss: Double,
-    val target: Double
+    val target: Double,
+    val entryTimestamp: Long,
+    val requestId: Long
 )
 
 data class QuickTradeTracking(
@@ -56,6 +59,12 @@ class QuickTradeOverlay(
     private var lastTick: MarketTick? = null
     private var lastLtp = 0.0
     private var activeTrade: QuickTradeTracking? = null
+    private var connectionAvailable = false
+    private var isSubmitting = false
+    private var exitPending = false
+    private var exitRetryNotBefore = 0L
+    private var nextRequestId = 1L
+    private var pendingRequestId = 0L
 
     private lateinit var bodyContainer: LinearLayout
     private lateinit var collapseButton: TextView
@@ -65,6 +74,8 @@ class QuickTradeOverlay(
     private lateinit var stopLossInput: EditText
     private lateinit var targetInput: EditText
     private lateinit var statusText: TextView
+    private lateinit var buyButton: Button
+    private lateinit var sellButton: Button
 
     private var dragStartX = 0f
     private var dragStartY = 0f
@@ -84,6 +95,11 @@ class QuickTradeOverlay(
         activeTrade = null
         lastTick = null
         lastLtp = 0.0
+        connectionAvailable = false
+        isSubmitting = false
+        exitPending = false
+        exitRetryNotBefore = 0L
+        pendingRequestId = 0L
         symbolText.text = newSymbol.ifBlank { "—" }
         ltpText.text = "—"
         ltpText.setTextColor(mutedColor)
@@ -91,6 +107,7 @@ class QuickTradeOverlay(
         targetInput.setText("")
         statusText.text = "Live price ka wait... "
         statusText.setTextColor(mutedColor)
+        updateActionState()
     }
 
     fun onTick(tick: MarketTick) {
@@ -99,9 +116,15 @@ class QuickTradeOverlay(
         ) {
             return
         }
+        if (exchange.isNotBlank() &&
+            !exchange.equals(tick.key.exchange, ignoreCase = true)
+        ) {
+            return
+        }
 
         if (tick.ltp <= 0.0 || !tick.ltp.isFinite()) return
 
+        connectionAvailable = true
         lastTick = tick
         ltpText.text = String.format(Locale.US, "₹%.2f", tick.ltp)
         ltpText.setTextColor(
@@ -114,7 +137,10 @@ class QuickTradeOverlay(
         )
         lastLtp = tick.ltp
 
-        val trade = activeTrade ?: return
+        val trade = activeTrade ?: run {
+            updateActionState()
+            return
+        }
         val direction = if (trade.side == "BUY") 1.0 else -1.0
         val pnl = (tick.ltp - trade.entryPrice) * trade.quantity * direction
         statusText.setTextColor(if (pnl >= 0.0) greenColor else redColor)
@@ -127,6 +153,16 @@ class QuickTradeOverlay(
             append("  •  SL ").append(formatPrice(trade.stopLoss))
             append("  •  TGT ").append(formatPrice(trade.target))
         }
+
+        if (!isTickFresh(tick)) {
+            statusText.setTextColor(mutedColor)
+            statusText.text = "Quote stale. Waiting for a fresh tick..."
+            return
+        }
+
+        if (exitPending) return
+        val now = System.currentTimeMillis()
+        if (now < exitRetryNotBefore) return
 
         val stopLossHit = if (direction > 0.0) {
             tick.ltp <= trade.stopLoss
@@ -142,7 +178,7 @@ class QuickTradeOverlay(
         if (!stopLossHit && !targetHit) return
 
         val reason = if (stopLossHit) "STOP LOSS HIT" else "TARGET HIT"
-        activeTrade = null
+        exitPending = true
         statusText.setTextColor(if (pnl >= 0.0) greenColor else redColor)
         statusText.text = buildString {
             append(reason)
@@ -151,10 +187,15 @@ class QuickTradeOverlay(
             append('\n')
             append("P&L ₹").append(formatPrice(pnl))
         }
+        updateActionState()
         onExitRequest(trade, tick.ltp, reason)
     }
 
-    fun onOrderPlaced(trade: QuickTradeTracking) {
+    fun onOrderPlaced(trade: QuickTradeTracking, requestId: Long) {
+        if (requestId != pendingRequestId) return
+        pendingRequestId = 0L
+        isSubmitting = false
+        exitPending = false
         activeTrade = trade
         statusText.setTextColor(accentColor)
         statusText.text = buildString {
@@ -163,16 +204,25 @@ class QuickTradeOverlay(
             append("  •  SL ").append(formatPrice(trade.stopLoss))
             append("  •  TGT ").append(formatPrice(trade.target))
         }
+        updateActionState()
         lastTick?.let { onTick(it) }
     }
 
-    fun onOrderRejected(message: String) {
-        activeTrade = null
+    fun onOrderRejected(message: String, requestId: Long) {
+        if (requestId != pendingRequestId) return
+        pendingRequestId = 0L
+        isSubmitting = false
         statusText.setTextColor(redColor)
         statusText.text = message
+        updateActionState()
     }
 
     fun onTradeClosed(message: String, pnl: Double?) {
+        activeTrade = null
+        exitPending = false
+        exitRetryNotBefore = 0L
+        isSubmitting = false
+        pendingRequestId = 0L
         statusText.setTextColor(
             if (pnl != null && pnl >= 0.0) greenColor else redColor
         )
@@ -181,7 +231,56 @@ class QuickTradeOverlay(
         } else {
             message
         }
+        updateActionState()
     }
+
+    fun onExitFailed(message: String) {
+        exitPending = false
+        exitRetryNotBefore = System.currentTimeMillis() + 5_000L
+        statusText.setTextColor(redColor)
+        statusText.text = message
+        updateActionState()
+    }
+
+    fun restoreTrade(trade: QuickTradeTracking) {
+        if (activeTrade != null || isSubmitting) return
+        activeTrade = trade
+        exitPending = false
+        exitRetryNotBefore = 0L
+        pendingRequestId = 0L
+        stopLossInput.setText(String.format(Locale.US, "%.2f", trade.stopLoss))
+        targetInput.setText(String.format(Locale.US, "%.2f", trade.target))
+        statusText.setTextColor(accentColor)
+        statusText.text = buildString {
+            append("RECOVERED ").append(trade.side).append(' ')
+            append(trade.quantity)
+            append(" @ ").append(formatPrice(trade.entryPrice))
+            append("  •  SL ").append(formatPrice(trade.stopLoss))
+            append("  •  TGT ").append(formatPrice(trade.target))
+        }
+        updateActionState()
+        lastTick?.let { onTick(it) }
+    }
+
+    fun setConnectionAvailable(available: Boolean) {
+        if (connectionAvailable == available) return
+        connectionAvailable = available
+        if (!available) {
+            lastTick = null
+            lastLtp = 0.0
+            ltpText.text = "—"
+            ltpText.setTextColor(mutedColor)
+            if (activeTrade != null && !exitPending) {
+                statusText.setTextColor(mutedColor)
+                statusText.text = "Live price unavailable. SL/TGT monitoring paused."
+            }
+        }
+        updateActionState()
+    }
+
+    fun hasActiveTrade(): Boolean = activeTrade != null
+
+    fun activeOrderId(): Long? = activeTrade?.orderId
 
     fun showMessage(message: String) {
         statusText.setTextColor(mutedColor)
@@ -355,7 +454,7 @@ class QuickTradeOverlay(
         val actionRow = LinearLayout(context)
         actionRow.orientation = LinearLayout.HORIZONTAL
 
-        val buyButton = Button(context).apply {
+        buyButton = Button(context).apply {
             text = "BUY"
             textSize = 12f
             typeface = Typeface.DEFAULT_BOLD
@@ -373,7 +472,7 @@ class QuickTradeOverlay(
             }
         )
 
-        val sellButton = Button(context).apply {
+        sellButton = Button(context).apply {
             text = "SELL"
             textSize = 12f
             typeface = Typeface.DEFAULT_BOLD
@@ -402,6 +501,7 @@ class QuickTradeOverlay(
             setPadding(0, dp(4), 0, 0)
         }
         bodyContainer.addView(statusText)
+        updateActionState()
 
         header.setOnTouchListener { _, event ->
             when (event.actionMasked) {
@@ -442,22 +542,67 @@ class QuickTradeOverlay(
             showMessage("Ek trade pehle se open hai. Exit ka wait karo.")
             return
         }
+        if (isSubmitting) {
+            showMessage("Order submit ho raha hai. Wait karo.")
+            return
+        }
+        if (exitPending) {
+            showMessage("Exit process chal raha hai. Wait karo.")
+            return
+        }
+        if (!connectionAvailable) {
+            showMessage("Live feed connected nahi hai. Wait karo.")
+            return
+        }
 
         val tick = lastTick
         if (tick == null || tick.ltp <= 0.0 || !tick.ltp.isFinite()) {
             showMessage("Live price available nahi hai. Feed ka wait karo.")
             return
         }
+        if (!isTickFresh(tick)) {
+            showMessage("Quote stale hai. Fresh tick ka wait karo.")
+            return
+        }
 
-        val quantity = qtyInput.text.toString().toIntOrNull()?.coerceAtLeast(1) ?: 1
+        val rawQuantity = qtyInput.text.toString().trim()
+        val quantity = rawQuantity.toIntOrNull()
+        if (quantity == null || quantity <= 0) {
+            showMessage("QTY valid positive number honi chahiye.")
+            return
+        }
+        val maxQuantity = AppConfig.get().maxOrderQuantity
+        if (maxQuantity > 0 && quantity > maxQuantity) {
+            showMessage("QTY maximum $maxQuantity tak allowed hai.")
+            return
+        }
         qtyInput.setText(quantity.toString())
 
-        val enteredStopLoss = stopLossInput.text.toString().toDoubleOrNull()
-        val enteredTarget = targetInput.text.toString().toDoubleOrNull()
+        val stopLossRaw = stopLossInput.text.toString().trim()
+        val targetRaw = targetInput.text.toString().trim()
+        val enteredStopLoss = stopLossRaw.toDoubleOrNull()
+        val enteredTarget = targetRaw.toDoubleOrNull()
 
-        val stopLoss = enteredStopLoss?.takeIf { it > 0.0 && it.isFinite() }
+        if (stopLossRaw.isNotBlank() &&
+            (enteredStopLoss == null ||
+                !enteredStopLoss.isFinite() ||
+                enteredStopLoss <= 0.0)
+        ) {
+            showMessage("SL valid positive price hona chahiye.")
+            return
+        }
+        if (targetRaw.isNotBlank() &&
+            (enteredTarget == null ||
+                !enteredTarget.isFinite() ||
+                enteredTarget <= 0.0)
+        ) {
+            showMessage("Target valid positive price hona chahiye.")
+            return
+        }
+
+        val stopLoss = enteredStopLoss
             ?: defaultStopLoss(side, tick.ltp)
-        val target = enteredTarget?.takeIf { it > 0.0 && it.isFinite() }
+        val target = enteredTarget
             ?: defaultTarget(side, tick.ltp)
 
         val validLevels = if (side == "BUY") {
@@ -480,6 +625,9 @@ class QuickTradeOverlay(
         stopLossInput.setText(String.format(Locale.US, "%.2f", stopLoss))
         targetInput.setText(String.format(Locale.US, "%.2f", target))
 
+        isSubmitting = true
+        pendingRequestId = nextRequestId++
+        updateActionState()
         statusText.setTextColor(accentColor)
         statusText.text = "Sending $side $quantity @ ${formatPrice(tick.ltp)}..."
         onOrderRequest(
@@ -490,9 +638,27 @@ class QuickTradeOverlay(
                 quantity = quantity,
                 entryPrice = tick.ltp,
                 stopLoss = stopLoss,
-                target = target
+                target = target,
+                entryTimestamp = tick.receivedAt,
+                requestId = pendingRequestId
             )
         )
+    }
+
+    private fun updateActionState() {
+        if (!::buyButton.isInitialized || !::sellButton.isInitialized) return
+        val enabled = !isSubmitting && !exitPending && activeTrade == null
+        buyButton.isEnabled = enabled
+        sellButton.isEnabled = enabled
+        buyButton.alpha = if (enabled) 1f else 0.55f
+        sellButton.alpha = if (enabled) 1f else 0.55f
+    }
+
+    private fun isTickFresh(tick: MarketTick): Boolean {
+        val receivedAt = tick.receivedAt
+        if (receivedAt <= 0L) return false
+        val age = System.currentTimeMillis() - receivedAt
+        return age >= 0L && age <= AppConfig.get().quoteMaxAgeMs
     }
 
     private fun defaultStopLoss(side: String, ltp: Double): Double {

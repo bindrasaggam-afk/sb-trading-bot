@@ -310,8 +310,10 @@ class ProfessionalChartView @JvmOverloads constructor(
         sourceVersion++
         indicatorSignature = Long.MIN_VALUE
         chartStyle = style
-        crosshairVisible = false
-        crosshairIndex = -1
+        if (!preserveViewport || crosshairIndex !in candles.indices) {
+            crosshairVisible = false
+            crosshairIndex = -1
+        }
 
         if (!preserveViewport) {
             visibleCount = 40f
@@ -1406,6 +1408,8 @@ class ProfessionalChartView @JvmOverloads constructor(
 
         if (scaleDetector.isInProgress) {
             isPanning = false
+            lastTouchX = event.x
+            touchStartX = event.x
             crosshairVisible = false
             onCrosshairChanged?.invoke(null, -1)
             invalidate()
@@ -1456,33 +1460,64 @@ class ProfessionalChartView @JvmOverloads constructor(
                 previewY = event.y
 
                 if (activeTool == ChartTool.CROSSHAIR) {
-                    // CROSSHAIR mode: move crosshair only.
-                    // Never pan the chart in this mode.
-                    val geometry = computeGeometry()
+                    // Crosshair follows the finger until the drag clears
+                    // the touch slop. After that, the same drag pans.
+                    val totalDrag = abs(event.x - touchStartX)
 
-                    if (geometry != null && crosshairVisible) {
-                        crosshairX = event.x.coerceIn(
-                            geometry.left,
-                            geometry.right
-                        )
+                    if (!isPanning && totalDrag > touchSlop) {
+                        isPanning = true
+                        lastTouchX = event.x
+                        crosshairVisible = false
+                        crosshairIndex = -1
+                        onCrosshairChanged?.invoke(null, -1)
+                    }
 
-                        crosshairY = event.y.coerceIn(
-                            geometry.priceTop,
-                            geometry.priceBottom
-                        )
+                    if (isPanning) {
+                        val deltaX = event.x - lastTouchX
+                        val geometry = lastGeometry ?: computeGeometry()
 
-                        crosshairIndex = indexAt(crosshairX, geometry)
+                        if (geometry != null && geometry.slot > 0f) {
+                            val maxScroll = max(
+                                0f,
+                                candles.size.toFloat() - visibleCount
+                            )
 
-                        onCrosshairChanged?.invoke(
-                            source.getOrNull(crosshairIndex),
-                            crosshairIndex
-                        )
+                            scrollOffset = (
+                                scrollOffset - deltaX / geometry.slot
+                            ).coerceIn(0f, maxScroll)
+
+                            followLatest = scrollOffset >= maxScroll - 0.01f
+                        }
+                    } else if (crosshairVisible) {
+                        val geometry = computeGeometry()
+
+                        if (geometry != null) {
+                            crosshairX = event.x.coerceIn(
+                                geometry.left,
+                                geometry.right
+                            )
+
+                            crosshairY = event.y.coerceIn(
+                                geometry.priceTop,
+                                geometry.priceBottom
+                            )
+
+                            crosshairIndex = indexAt(crosshairX, geometry)
+
+                            onCrosshairChanged?.invoke(
+                                source.getOrNull(crosshairIndex),
+                                crosshairIndex
+                            )
+                        }
                     }
                 } else {
                     // Other tool modes: horizontal chart pan.
                     val totalDrag = abs(event.x - touchStartX)
 
                     if (totalDrag > touchSlop) {
+                        if (!isPanning) {
+                            lastTouchX = event.x
+                        }
                         isPanning = true
                     }
 
@@ -1511,7 +1546,7 @@ class ProfessionalChartView @JvmOverloads constructor(
             }
 
             MotionEvent.ACTION_UP -> {
-                if (activeTool != ChartTool.CROSSHAIR) {
+                if (activeTool != ChartTool.CROSSHAIR && !isPanning) {
                     handleDrawingTap(event.x, event.y)
                 }
 

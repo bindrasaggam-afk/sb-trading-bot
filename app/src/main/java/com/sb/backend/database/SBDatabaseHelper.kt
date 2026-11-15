@@ -46,7 +46,7 @@ class SBDatabaseHelper(context: Context) : SQLiteOpenHelper(
         const val DATABASE_NAME = "sb_backend.db"
 
         // Must match the latest DatabaseMigrations version.
-        const val DATABASE_VERSION = 6
+        const val DATABASE_VERSION = 8
 
         // Core market tables
         const val TABLE_INSTRUMENTS = "instruments"

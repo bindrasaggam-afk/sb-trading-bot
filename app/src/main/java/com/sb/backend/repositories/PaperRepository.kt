@@ -132,11 +132,17 @@ class PaperRepository(
         side: String,
         quantity: Int,
         entryPrice: Double,
-        note: String = ""
+        note: String = "",
+        stopLoss: Double? = null,
+        target: Double? = null
     ): PaperOrder {
         return maintenanceGate.withOperation {
         require(symbol.isNotBlank()) { "Symbol cannot be empty." }
         require(quantity > 0) { "Quantity must be greater than zero." }
+        val maxOrderQuantity = AppConfig.get().maxOrderQuantity
+        require(maxOrderQuantity <= 0 || quantity <= maxOrderQuantity) {
+            "Quantity exceeds the maximum allowed of $maxOrderQuantity."
+        }
         require(entryPrice.isFinite() && entryPrice > 0.0) {
             "Entry price must be valid and positive."
         }
@@ -146,6 +152,35 @@ class PaperRepository(
         val normalizedExchange = exchange.trim().toUpperCase(Locale.ROOT)
         val orderValue = quantity.toDouble() * entryPrice
         require(orderValue.isFinite()) { "Order value is too large." }
+
+        if (stopLoss != null || target != null) {
+            if (stopLoss == null || target == null) {
+                throw IllegalArgumentException(
+                    "Stop loss and target must be provided together."
+                )
+            }
+            require(stopLoss.isFinite() && stopLoss > 0.0) {
+                "Stop loss must be valid and positive."
+            }
+            require(target.isFinite() && target > 0.0) {
+                "Target must be valid and positive."
+            }
+            if (normalizedSide == OrderSide.BUY.name) {
+                require(stopLoss < entryPrice) {
+                    "BUY stop loss must be below entry price."
+                }
+                require(target > entryPrice) {
+                    "BUY target must be above entry price."
+                }
+            } else {
+                require(stopLoss > entryPrice) {
+                    "SELL stop loss must be above entry price."
+                }
+                require(target < entryPrice) {
+                    "SELL target must be below entry price."
+                }
+            }
+        }
 
         val marginRate = AppConfig.get().shortMarginRate
         val reserved = if (normalizedSide == OrderSide.SELL.name) {
@@ -174,6 +209,13 @@ class PaperRepository(
                 }"
             }
 
+            val maxOpenPositions = AppConfig.get().maxOpenPositions
+            if (maxOpenPositions > 0) {
+                check(countOpenPositions(db) < maxOpenPositions) {
+                    "Maximum open positions reached."
+                }
+            }
+
             val now = System.currentTimeMillis()
             val orderValues = ContentValues().apply {
                 put("symbol", normalizedSymbol)
@@ -184,6 +226,8 @@ class PaperRepository(
                 put("reserved_margin", reserved)
                 put("status", OrderStatus.OPEN.name)
                 put("note", note.trim())
+                put("stop_loss", stopLoss)
+                put("target", target)
                 put("created_at", now)
                 put("updated_at", now)
             }
@@ -240,7 +284,9 @@ class PaperRepository(
                 status = OrderStatus.OPEN.name,
                 note = note.trim(),
                 createdAt = now,
-                updatedAt = now
+                updatedAt = now,
+                stopLoss = stopLoss,
+                target = target
             )
         } finally {
             db.endTransaction()
@@ -419,12 +465,16 @@ class PaperRepository(
         }
     }
 
-    fun updatePositionPrices(prices: Map<String, Double>): Int {
+    fun updatePositionPrices(
+        prices: Map<String, Double>,
+        exchange: String? = null
+    ): Int {
         return maintenanceGate.withOperation {
         if (prices.isEmpty()) return 0
         val db = databaseHelper.writableDatabase
         var updated = 0
         val now = System.currentTimeMillis()
+        val normalizedExchange = exchange?.trim()?.toUpperCase(Locale.ROOT)
 
         db.beginTransaction()
         try {
@@ -442,12 +492,25 @@ class PaperRepository(
                     put("last_price", price)
                     put("updated_at", now)
                 }
-                updated += db.update(
-                    SBDatabaseHelper.TABLE_POSITIONS,
-                    values,
-                    "UPPER(symbol) = ? AND status = ?",
-                    arrayOf(symbol, OrderStatus.OPEN.name)
-                )
+                if (normalizedExchange.isNullOrBlank()) {
+                    updated += db.update(
+                        SBDatabaseHelper.TABLE_POSITIONS,
+                        values,
+                        "UPPER(symbol) = ? AND status = ?",
+                        arrayOf(symbol, OrderStatus.OPEN.name)
+                    )
+                } else {
+                    updated += db.update(
+                        SBDatabaseHelper.TABLE_POSITIONS,
+                        values,
+                        "UPPER(symbol) = ? AND UPPER(exchange) = ? AND status = ?",
+                        arrayOf(
+                            symbol,
+                            normalizedExchange,
+                            OrderStatus.OPEN.name
+                        )
+                    )
+                }
             }
             db.setTransactionSuccessful()
         } finally {
@@ -600,6 +663,16 @@ class PaperRepository(
         }
     }
 
+    private fun countOpenPositions(db: SQLiteDatabase): Int {
+        db.rawQuery(
+            "SELECT COUNT(*) FROM ${SBDatabaseHelper.TABLE_POSITIONS} " +
+                "WHERE status = ?",
+            arrayOf(OrderStatus.OPEN.name)
+        ).use { cursor ->
+            return if (cursor.moveToFirst()) cursor.getInt(0) else 0
+        }
+    }
+
     private fun readAccount(cursor: Cursor): PaperAccount {
         return PaperAccount(
             startingBalance = cursor.getDouble(0),
@@ -624,7 +697,9 @@ class PaperRepository(
             status = cursor.getString(9),
             note = cursor.getString(10),
             createdAt = cursor.getLong(11),
-            updatedAt = cursor.getLong(12)
+            updatedAt = cursor.getLong(12),
+            stopLoss = if (cursor.isNull(13)) null else cursor.getDouble(13),
+            target = if (cursor.isNull(14)) null else cursor.getDouble(14)
         )
     }
 
@@ -693,7 +768,9 @@ class PaperRepository(
             "status",
             "note",
             "created_at",
-            "updated_at"
+            "updated_at",
+            "stop_loss",
+            "target"
         )
 
         private val positionProjection = arrayOf(
