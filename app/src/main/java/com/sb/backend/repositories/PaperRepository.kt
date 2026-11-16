@@ -4,12 +4,17 @@ import android.content.ContentValues
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import com.sb.backend.core.AppConfig
-import com.sb.backend.database.SBDatabaseHelper
 import com.sb.backend.database.DatabaseMaintenanceGate
+import com.sb.backend.database.SBDatabaseHelper
 import com.sb.backend.models.OrderSide
 import com.sb.backend.models.OrderStatus
+import com.sb.backend.models.PaperExecution
+import com.sb.backend.models.PaperExecutionKind
 import com.sb.backend.models.PaperOrder
+import com.sb.backend.models.PaperTradeEvent
 import com.sb.backend.models.Position
+import com.sb.backend.trading.PaperSignalCandidate
+import com.sb.backend.trading.PaperSignalPolicy
 import java.util.Locale
 
 data class PaperAccount(
@@ -32,77 +37,19 @@ data class PaperSnapshotData(
 
 class PaperRepository(
     private val databaseHelper: SBDatabaseHelper,
-    private val maintenanceGate: DatabaseMaintenanceGate = DatabaseMaintenanceGate.shared
+    private val maintenanceGate: DatabaseMaintenanceGate =
+        DatabaseMaintenanceGate.shared
 ) {
 
     fun ensureAccount(startingBalance: Double): PaperAccount {
         return maintenanceGate.withOperation {
-        require(startingBalance.isFinite() && startingBalance > 0.0) {
-            "Starting balance must be a valid positive amount."
-        }
-
-        val existing = getAccount()
-        if (existing != null) return existing
-
-        val now = System.currentTimeMillis()
-        val values = ContentValues().apply {
-            put("id", 1)
-            put("starting_balance", startingBalance)
-            put("balance", startingBalance)
-            put("reserved_margin", 0.0)
-            put("realized_pnl", 0.0)
-            put("updated_at", now)
-        }
-
-        databaseHelper.writableDatabase.insertWithOnConflict(
-            SBDatabaseHelper.TABLE_PAPER_ACCOUNT,
-            null,
-            values,
-            SQLiteDatabase.CONFLICT_REPLACE
-        )
-
-        return PaperAccount(
-            startingBalance = startingBalance,
-            balance = startingBalance,
-            reservedMargin = 0.0,
-            realizedPnl = 0.0,
-            updatedAt = now
-        )
-    
-        }
-    }
-
-    fun hasAccount(): Boolean = maintenanceGate.withOperation { getAccount() != null }
-
-    fun getAccount(): PaperAccount? {
-        return maintenanceGate.withOperation {
-        databaseHelper.readableDatabase.query(
-            SBDatabaseHelper.TABLE_PAPER_ACCOUNT,
-            accountProjection,
-            "id = ?",
-            arrayOf("1"),
-            null,
-            null,
-            null
-        ).use { cursor ->
-            return if (cursor.moveToFirst()) readAccount(cursor) else null
-        }
-    
-        }
-    }
-
-    fun setStartingBalance(startingBalance: Double): PaperAccount {
-        return maintenanceGate.withOperation {
-        require(startingBalance.isFinite() && startingBalance > 0.0) {
-            "Starting balance must be a valid positive amount."
-        }
-
-        val db = databaseHelper.writableDatabase
-        db.beginTransaction()
-        try {
-            check(countOrders(db) == 0) {
-                "Starting balance cannot be changed after paper orders exist."
+            require(startingBalance.isFinite() && startingBalance > 0.0) {
+                "Starting balance must be a valid positive amount."
             }
+
+            val existing = getAccount()
+            if (existing != null) return existing
+
             val now = System.currentTimeMillis()
             val values = ContentValues().apply {
                 put("id", 1)
@@ -112,24 +59,634 @@ class PaperRepository(
                 put("realized_pnl", 0.0)
                 put("updated_at", now)
             }
-            db.insertWithOnConflict(
+
+            databaseHelper.writableDatabase.insertWithOnConflict(
                 SBDatabaseHelper.TABLE_PAPER_ACCOUNT,
                 null,
                 values,
                 SQLiteDatabase.CONFLICT_REPLACE
             )
-            db.setTransactionSuccessful()
-            return PaperAccount(
+
+            PaperAccount(
                 startingBalance = startingBalance,
                 balance = startingBalance,
                 reservedMargin = 0.0,
                 realizedPnl = 0.0,
                 updatedAt = now
             )
-        } finally {
-            db.endTransaction()
         }
-    
+    }
+
+    fun hasAccount(): Boolean = maintenanceGate.withOperation {
+        getAccount() != null
+    }
+
+    fun getAccount(): PaperAccount? {
+        return maintenanceGate.withOperation {
+            databaseHelper.readableDatabase.query(
+                SBDatabaseHelper.TABLE_PAPER_ACCOUNT,
+                accountProjection,
+                "id = ?",
+                arrayOf("1"),
+                null,
+                null,
+                null
+            ).use { cursor ->
+                if (cursor.moveToFirst()) readAccount(cursor) else null
+            }
+        }
+    }
+
+    fun setStartingBalance(startingBalance: Double): PaperAccount {
+        return maintenanceGate.withOperation {
+            require(startingBalance.isFinite() && startingBalance > 0.0) {
+                "Starting balance must be a valid positive amount."
+            }
+
+            val db = databaseHelper.writableDatabase
+            db.beginTransaction()
+            try {
+                check(countOrders(db) == 0) {
+                    "Starting balance cannot be changed after paper orders exist."
+                }
+                val now = System.currentTimeMillis()
+                val values = ContentValues().apply {
+                    put("id", 1)
+                    put("starting_balance", startingBalance)
+                    put("balance", startingBalance)
+                    put("reserved_margin", 0.0)
+                    put("realized_pnl", 0.0)
+                    put("updated_at", now)
+                }
+                db.insertWithOnConflict(
+                    SBDatabaseHelper.TABLE_PAPER_ACCOUNT,
+                    null,
+                    values,
+                    SQLiteDatabase.CONFLICT_REPLACE
+                )
+                db.setTransactionSuccessful()
+                PaperAccount(
+                    startingBalance = startingBalance,
+                    balance = startingBalance,
+                    reservedMargin = 0.0,
+                    realizedPnl = 0.0,
+                    updatedAt = now
+                )
+            } finally {
+                db.endTransaction()
+            }
+        }
+    }
+
+    fun saveSignalOrder(
+        candidate: PaperSignalCandidate,
+        quantity: Int
+    ): PaperOrder {
+        return maintenanceGate.withOperation {
+            require(candidate.signalId > 0L) {
+                "Signal ID must be positive."
+            }
+            require(quantity > 0) {
+                "Quantity must be greater than zero."
+            }
+            val normalizedSide = normalizeSide(candidate.side)
+            val normalizedSymbol = candidate.symbol
+                .trim().uppercase(Locale.ROOT)
+            val normalizedExchange = candidate.exchange
+                .trim().uppercase(Locale.ROOT)
+            require(normalizedSymbol.isNotBlank()) {
+                "Symbol cannot be empty."
+            }
+            require(normalizedExchange.isNotBlank()) {
+                "Exchange cannot be empty."
+            }
+            require(candidate.referencePrice.isFinite() &&
+                candidate.referencePrice > 0.0) {
+                "Reference price must be valid and positive."
+            }
+            validateSignalLevels(candidate)
+
+            val db = databaseHelper.writableDatabase
+            db.beginTransaction()
+            try {
+                val existing = queryOrderBySignalId(
+                    db,
+                    candidate.signalId
+                )
+                if (existing != null) {
+                    db.setTransactionSuccessful()
+                    return@withOperation existing
+                }
+
+                queryAccount(db)
+                    ?: throw IllegalStateException(
+                        "Set starting balance first."
+                    )
+
+                val now = System.currentTimeMillis()
+                val values = ContentValues().apply {
+                    put("symbol", normalizedSymbol)
+                    put("exchange", normalizedExchange)
+                    put("side", normalizedSide)
+                    put("quantity", quantity)
+                    put("entry_price", candidate.referencePrice)
+                    put("reserved_margin", 0.0)
+                    put("status", OrderStatus.PENDING.name)
+                    put("note", "Signal #${candidate.signalId} " +
+                        "${candidate.strategyId} v" +
+                        candidate.strategyVersion)
+                    put("stop_loss", candidate.stopLoss)
+                    put("target", candidate.target3)
+                    put("entry_source", "SIGNAL")
+                    putNull("entry_timestamp")
+                    put("signal_id", candidate.signalId)
+                    put("signal_category", candidate.category)
+                    put("signal_timeframe", candidate.timeframe)
+                    put("strategy_id", candidate.strategyId)
+                    put("strategy_version", candidate.strategyVersion)
+                    put(
+                        "signal_generated_at",
+                        candidate.generatedAt
+                    )
+                    put("signal_expires_at", candidate.expiresAt)
+                    put("entry_low", candidate.entryLow)
+                    put("entry_high", candidate.entryHigh)
+                    put("cost_bps_per_side", candidate.costBpsPerSide)
+                    put(
+                        "slippage_bps_per_side",
+                        candidate.slippageBpsPerSide
+                    )
+                    put("target1", candidate.target1)
+                    put("target2", candidate.target2)
+                    put("target3", candidate.target3)
+                    put("remaining_quantity", quantity)
+                    put("last_price", candidate.referencePrice)
+                    put("entry_charges", 0.0)
+                    put("charges", 0.0)
+                    put("exit_reason", "")
+                    put("created_at", now)
+                    put("updated_at", now)
+                }
+
+                val orderId = db.insertOrThrow(
+                    SBDatabaseHelper.TABLE_PAPER_ORDERS,
+                    null,
+                    values
+                )
+                insertEvent(
+                    db = db,
+                    orderId = orderId,
+                    signalId = candidate.signalId,
+                    type = "SIGNAL_FORWARDED",
+                    message = "Genuine signal forwarded to paper trading",
+                    now = now
+                )
+                db.setTransactionSuccessful()
+                queryOrder(db, orderId)
+                    ?: throw IllegalStateException(
+                        "Could not read forwarded paper order."
+                    )
+            } finally {
+                db.endTransaction()
+            }
+        }
+    }
+
+    fun fillSignalOrder(
+        orderId: Long,
+        executionPrice: Double,
+        executedAt: Long
+    ): PaperOrder? {
+        return maintenanceGate.withOperation {
+            require(orderId > 0L) { "Invalid order ID." }
+            require(executionPrice.isFinite() && executionPrice > 0.0) {
+                "Entry price must be valid and positive."
+            }
+            require(executedAt > 0L) {
+                "Execution timestamp must be positive."
+            }
+
+            val db = databaseHelper.writableDatabase
+            db.beginTransaction()
+            try {
+                val order = queryOrder(db, orderId)
+                if (order == null ||
+                    !order.isPending ||
+                    order.signalId == null
+                ) {
+                    db.setTransactionSuccessful()
+                    return@withOperation order
+                }
+
+                val account = queryAccount(db)
+                    ?: throw IllegalStateException(
+                        "Paper account is missing."
+                    )
+                val quantity = order.quantity
+                val entryValue = executionPrice * quantity
+                val marginRate = AppConfig.get().shortMarginRate
+                val reserved = if (order.side == OrderSide.SELL.name) {
+                    entryValue * marginRate
+                } else {
+                    0.0
+                }
+                val cashDebit = if (order.side == OrderSide.BUY.name) {
+                    entryValue
+                } else {
+                    0.0
+                }
+                val entryCharge = PaperSignalPolicy.entryCharge(
+                    price = executionPrice,
+                    quantity = quantity,
+                    costBps = order.costBpsPerSide
+                )
+                val required = cashDebit + reserved + entryCharge
+                val available = account.balance - account.reservedMargin
+                check(available + 0.000001 >= required) {
+                    "Insufficient available funds at entry. Required: ${
+                        formatAmount(required)
+                    }"
+                }
+
+                val maxOpenPositions = AppConfig.get().maxOpenPositions
+                if (maxOpenPositions > 0) {
+                    check(countOpenPositions(db) < maxOpenPositions) {
+                        "Maximum open positions reached at entry."
+                    }
+                }
+
+                val orderValues = ContentValues().apply {
+                    put("entry_price", executionPrice)
+                    put("entry_timestamp", executedAt)
+                    put("reserved_margin", reserved)
+                    put("status", OrderStatus.OPEN.name)
+                    put("remaining_quantity", quantity)
+                    put("last_price", executionPrice)
+                    put("entry_charges", entryCharge)
+                    put("charges", entryCharge)
+                    put("updated_at", executedAt)
+                }
+                check(
+                    db.update(
+                        SBDatabaseHelper.TABLE_PAPER_ORDERS,
+                        orderValues,
+                        "id = ? AND status = ?",
+                        arrayOf(
+                            orderId.toString(),
+                            OrderStatus.PENDING.name
+                        )
+                    ) == 1
+                ) { "Could not open paper signal order." }
+
+                val positionValues = ContentValues().apply {
+                    put("order_id", orderId)
+                    put("symbol", order.symbol)
+                    put("exchange", order.exchange)
+                    put("side", order.side)
+                    put("quantity", quantity)
+                    put("entry_price", executionPrice)
+                    put("last_price", executionPrice)
+                    put("reserved_margin", reserved)
+                    put("status", OrderStatus.OPEN.name)
+                    put("opened_at", executedAt)
+                    put("updated_at", executedAt)
+                }
+                db.insertOrThrow(
+                    SBDatabaseHelper.TABLE_POSITIONS,
+                    null,
+                    positionValues
+                )
+
+                val accountValues = ContentValues().apply {
+                    put("balance", account.balance - cashDebit - entryCharge)
+                    put(
+                        "reserved_margin",
+                        account.reservedMargin + reserved
+                    )
+                    put(
+                        "realized_pnl",
+                        account.realizedPnl - entryCharge
+                    )
+                    put("updated_at", executedAt)
+                }
+                check(
+                    db.update(
+                        SBDatabaseHelper.TABLE_PAPER_ACCOUNT,
+                        accountValues,
+                        "id = ?",
+                        arrayOf("1")
+                    ) == 1
+                ) { "Could not update paper account at entry." }
+
+                insertExecution(
+                    db = db,
+                    order = order,
+                    kind = PaperExecutionKind.ENTRY,
+                    quantity = quantity,
+                    price = executionPrice,
+                    grossPnl = 0.0,
+                    charges = entryCharge,
+                    netPnl = -entryCharge,
+                    executedAt = executedAt,
+                    eventKey = "$orderId:ENTRY",
+                    note = "Signal entry filled"
+                )
+                insertEvent(
+                    db = db,
+                    orderId = orderId,
+                    signalId = order.signalId,
+                    type = "ENTRY_FILLED",
+                    message = "Entry filled at ${formatAmount(executionPrice)}",
+                    now = executedAt
+                )
+
+                db.setTransactionSuccessful()
+                queryOrder(db, orderId)
+            } finally {
+                db.endTransaction()
+            }
+        }
+    }
+
+    fun exitSignalOrder(
+        orderId: Long,
+        kind: PaperExecutionKind,
+        quantity: Int,
+        executionPrice: Double,
+        executedAt: Long,
+        note: String = ""
+    ): PaperOrder? {
+        return maintenanceGate.withOperation {
+            require(orderId > 0L) { "Invalid order ID." }
+            require(quantity > 0) {
+                "Exit quantity must be greater than zero."
+            }
+            require(executionPrice.isFinite() && executionPrice > 0.0) {
+                "Exit price must be valid and positive."
+            }
+            require(executedAt > 0L) {
+                "Execution timestamp must be positive."
+            }
+
+            val db = databaseHelper.writableDatabase
+            db.beginTransaction()
+            try {
+                val order = queryOrder(db, orderId)
+                if (order == null || !order.isOpen) {
+                    db.setTransactionSuccessful()
+                    return@withOperation order
+                }
+                val eventKey = "$orderId:${kind.name}"
+                if (executionExists(db, eventKey)) {
+                    db.setTransactionSuccessful()
+                    return@withOperation order
+                }
+
+                val exitQuantity = quantity.coerceAtMost(
+                    order.remainingQuantity
+                )
+                if (exitQuantity <= 0) {
+                    db.setTransactionSuccessful()
+                    return@withOperation order
+                }
+                val position = queryPositionByOrderId(db, orderId)
+                    ?: throw IllegalStateException(
+                        "Open paper position is missing."
+                    )
+
+                val grossPnl = PaperSignalPolicy.grossPnl(
+                    side = order.side,
+                    entryPrice = order.entryPrice,
+                    exitPrice = executionPrice,
+                    quantity = exitQuantity
+                )
+                val entryCharge = PaperSignalPolicy.allocatedEntryCharge(
+                    totalEntryCharge = order.entryCharges,
+                    originalQuantity = order.quantity,
+                    exitQuantity = exitQuantity
+                )
+                val exitCharge = PaperSignalPolicy.exitCharge(
+                    price = executionPrice,
+                    quantity = exitQuantity,
+                    costBps = order.costBpsPerSide
+                )
+                val netPnl = grossPnl - entryCharge - exitCharge
+                val releaseReserved = if (position.quantity > 0) {
+                    position.reservedMargin * exitQuantity /
+                        position.quantity
+                } else {
+                    0.0
+                }
+                val remainingQuantity =
+                    order.remainingQuantity - exitQuantity
+                val remainingReserved =
+                    (order.reservedMargin - releaseReserved)
+                        .coerceAtLeast(0.0)
+
+                val account = queryAccount(db)
+                    ?: throw IllegalStateException(
+                        "Paper account is missing."
+                    )
+
+                val positionValues = ContentValues().apply {
+                    put("quantity", remainingQuantity)
+                    put("last_price", executionPrice)
+                    put("reserved_margin", remainingReserved)
+                    put(
+                        "status",
+                        if (remainingQuantity <= 0) {
+                            OrderStatus.CLOSED.name
+                        } else {
+                            OrderStatus.OPEN.name
+                        }
+                    )
+                    put("updated_at", executedAt)
+                }
+                check(
+                    db.update(
+                        SBDatabaseHelper.TABLE_POSITIONS,
+                        positionValues,
+                        "id = ? AND status = ?",
+                        arrayOf(
+                            position.id.toString(),
+                            OrderStatus.OPEN.name
+                        )
+                    ) == 1
+                ) { "Could not update paper position." }
+
+                val nowTargetAt = if (kind == PaperExecutionKind.TARGET_1 ||
+                    kind == PaperExecutionKind.TARGET_2 ||
+                    kind == PaperExecutionKind.TARGET_3
+                ) {
+                    executedAt
+                } else {
+                    null
+                }
+                val orderValues = ContentValues().apply {
+                    put("remaining_quantity", remainingQuantity)
+                    put(
+                        "status",
+                        if (remainingQuantity <= 0) {
+                            OrderStatus.CLOSED.name
+                        } else {
+                            OrderStatus.OPEN.name
+                        }
+                    )
+                    put("exit_price", executionPrice)
+                    put(
+                        "realized_pnl",
+                        (order.realizedPnl ?: 0.0) + netPnl
+                    )
+                    put("reserved_margin", remainingReserved)
+                    put("last_price", executionPrice)
+                    put("charges", order.charges + exitCharge)
+                    put(
+                        "exit_reason",
+                        if (remainingQuantity <= 0) {
+                            if (note.isBlank()) kind.name else note
+                        } else {
+                            order.exitReason
+                        }
+                    )
+                    when (kind) {
+                        PaperExecutionKind.TARGET_1 ->
+                            put("target1_at", executedAt)
+                        PaperExecutionKind.TARGET_2 ->
+                            put("target2_at", executedAt)
+                        PaperExecutionKind.TARGET_3 ->
+                            put("target3_at", executedAt)
+                        PaperExecutionKind.STOP_LOSS ->
+                            put("stopped_at", executedAt)
+                        else -> Unit
+                    }
+                    put("updated_at", executedAt)
+                }
+                check(
+                    db.update(
+                        SBDatabaseHelper.TABLE_PAPER_ORDERS,
+                        orderValues,
+                        "id = ? AND status = ?",
+                        arrayOf(
+                            orderId.toString(),
+                            OrderStatus.OPEN.name
+                        )
+                    ) == 1
+                ) { "Could not update paper order." }
+
+                val cashChange = when (order.side) {
+                    OrderSide.BUY.name ->
+                        executionPrice * exitQuantity - exitCharge
+                    else -> grossPnl - exitCharge
+                }
+                val newReserved = (account.reservedMargin -
+                    releaseReserved).coerceAtLeast(0.0)
+                val accountValues = ContentValues().apply {
+                    put("balance", account.balance + cashChange)
+                    put("reserved_margin", newReserved)
+                    put(
+                        "realized_pnl",
+                        account.realizedPnl + grossPnl - exitCharge
+                    )
+                    put("updated_at", executedAt)
+                }
+                check(
+                    db.update(
+                        SBDatabaseHelper.TABLE_PAPER_ACCOUNT,
+                        accountValues,
+                        "id = ?",
+                        arrayOf("1")
+                    ) == 1
+                ) { "Could not update paper account at exit." }
+
+                insertExecution(
+                    db = db,
+                    order = order,
+                    kind = kind,
+                    quantity = exitQuantity,
+                    price = executionPrice,
+                    grossPnl = grossPnl,
+                    charges = entryCharge + exitCharge,
+                    netPnl = netPnl,
+                    executedAt = executedAt,
+                    eventKey = eventKey,
+                    note = note.ifBlank { kind.name }
+                )
+                insertEvent(
+                    db = db,
+                    orderId = orderId,
+                    signalId = order.signalId,
+                    type = kind.name,
+                    message = note.ifBlank {
+                        "${kind.name} at ${formatAmount(executionPrice)}"
+                    },
+                    now = executedAt
+                )
+                if (nowTargetAt != null) {
+                    insertEvent(
+                        db = db,
+                        orderId = orderId,
+                        signalId = order.signalId,
+                        type = "PARTIAL_EXIT",
+                        message = "Remaining quantity $remainingQuantity",
+                        now = executedAt
+                    )
+                }
+
+                db.setTransactionSuccessful()
+                queryOrder(db, orderId)
+            } finally {
+                db.endTransaction()
+            }
+        }
+    }
+
+    fun cancelSignalOrder(
+        orderId: Long,
+        reason: String,
+        createdAt: Long = System.currentTimeMillis()
+    ): PaperOrder? {
+        return maintenanceGate.withOperation {
+            require(orderId > 0L) { "Invalid order ID." }
+            val db = databaseHelper.writableDatabase
+            db.beginTransaction()
+            try {
+                val order = queryOrder(db, orderId)
+                if (order == null ||
+                    !order.isPending ||
+                    order.signalId == null
+                ) {
+                    db.setTransactionSuccessful()
+                    return@withOperation order
+                }
+                val values = ContentValues().apply {
+                    put("status", OrderStatus.CANCELLED.name)
+                    put("exit_reason", reason.trim())
+                    put("updated_at", createdAt)
+                }
+                check(
+                    db.update(
+                        SBDatabaseHelper.TABLE_PAPER_ORDERS,
+                        values,
+                        "id = ? AND status = ?",
+                        arrayOf(
+                            orderId.toString(),
+                            OrderStatus.PENDING.name
+                        )
+                    ) == 1
+                ) { "Could not cancel paper order." }
+                insertEvent(
+                    db = db,
+                    orderId = orderId,
+                    signalId = order.signalId,
+                    type = "ENTRY_CANCELLED",
+                    message = reason.trim(),
+                    now = createdAt
+                )
+                db.setTransactionSuccessful()
+                queryOrder(db, orderId)
+            } finally {
+                db.endTransaction()
+            }
         }
     }
 
@@ -146,436 +703,485 @@ class PaperRepository(
         entryTimestamp: Long? = null
     ): PaperOrder {
         return maintenanceGate.withOperation {
-        require(symbol.isNotBlank()) { "Symbol cannot be empty." }
-        require(quantity > 0) { "Quantity must be greater than zero." }
-        val maxOrderQuantity = AppConfig.get().maxOrderQuantity
-        require(maxOrderQuantity <= 0 || quantity <= maxOrderQuantity) {
-            "Quantity exceeds the maximum allowed of $maxOrderQuantity."
-        }
-        require(entryPrice.isFinite() && entryPrice > 0.0) {
-            "Entry price must be valid and positive."
-        }
-        val normalizedEntrySource = entrySource.trim().uppercase(Locale.ROOT)
-        require(normalizedEntrySource in setOf("MARKET", "MANUAL", "LEGACY")) {
-            "Entry source must be MARKET, MANUAL or LEGACY."
-        }
-        require(entryTimestamp == null || entryTimestamp > 0L) {
-            "Entry timestamp must be positive."
-        }
+            require(symbol.isNotBlank()) { "Symbol cannot be empty." }
+            require(quantity > 0) {
+                "Quantity must be greater than zero."
+            }
+            val maxOrderQuantity = AppConfig.get().maxOrderQuantity
+            require(maxOrderQuantity <= 0 ||
+                quantity <= maxOrderQuantity) {
+                "Quantity exceeds the maximum allowed of $maxOrderQuantity."
+            }
+            require(entryPrice.isFinite() && entryPrice > 0.0) {
+                "Entry price must be valid and positive."
+            }
+            val normalizedEntrySource =
+                entrySource.trim().uppercase(Locale.ROOT)
+            require(normalizedEntrySource in setOf(
+                "MARKET", "MANUAL", "LEGACY"
+            )) {
+                "Entry source must be MARKET, MANUAL or LEGACY."
+            }
+            require(entryTimestamp == null || entryTimestamp > 0L) {
+                "Entry timestamp must be positive."
+            }
 
-        val normalizedSide = normalizeSide(side)
-        val normalizedSymbol = symbol.trim().toUpperCase(Locale.ROOT)
-        val normalizedExchange = exchange.trim().toUpperCase(Locale.ROOT)
-        val orderValue = quantity.toDouble() * entryPrice
-        require(orderValue.isFinite()) { "Order value is too large." }
+            val normalizedSide = normalizeSide(side)
+            val normalizedSymbol = symbol.trim().uppercase(Locale.ROOT)
+            val normalizedExchange = exchange.trim()
+                .uppercase(Locale.ROOT)
+            val orderValue = quantity.toDouble() * entryPrice
+            require(orderValue.isFinite()) { "Order value is too large." }
 
-        if (stopLoss != null || target != null) {
-            if (stopLoss == null || target == null) {
-                throw IllegalArgumentException(
-                    "Stop loss and target must be provided together."
-                )
-            }
-            require(stopLoss.isFinite() && stopLoss > 0.0) {
-                "Stop loss must be valid and positive."
-            }
-            require(target.isFinite() && target > 0.0) {
-                "Target must be valid and positive."
-            }
-            if (normalizedSide == OrderSide.BUY.name) {
-                require(stopLoss < entryPrice) {
-                    "BUY stop loss must be below entry price."
+            if (stopLoss != null || target != null) {
+                if (stopLoss == null || target == null) {
+                    throw IllegalArgumentException(
+                        "Stop loss and target must be provided together."
+                    )
                 }
-                require(target > entryPrice) {
-                    "BUY target must be above entry price."
+                require(stopLoss.isFinite() && stopLoss > 0.0) {
+                    "Stop loss must be valid and positive."
                 }
+                require(target.isFinite() && target > 0.0) {
+                    "Target must be valid and positive."
+                }
+                if (normalizedSide == OrderSide.BUY.name) {
+                    require(stopLoss < entryPrice) {
+                        "BUY stop loss must be below entry price."
+                    }
+                    require(target > entryPrice) {
+                        "BUY target must be above entry price."
+                    }
+                } else {
+                    require(stopLoss > entryPrice) {
+                        "SELL stop loss must be above entry price."
+                    }
+                    require(target < entryPrice) {
+                        "SELL target must be below entry price."
+                    }
+                }
+            }
+
+            val marginRate = AppConfig.get().shortMarginRate
+            val reserved = if (normalizedSide == OrderSide.SELL.name) {
+                orderValue * marginRate
             } else {
-                require(stopLoss > entryPrice) {
-                    "SELL stop loss must be above entry price."
+                0.0
+            }
+            val cashDebit = if (normalizedSide == OrderSide.BUY.name) {
+                orderValue
+            } else {
+                0.0
+            }
+
+            val db = databaseHelper.writableDatabase
+            db.beginTransaction()
+            try {
+                val account = queryAccount(db)
+                    ?: throw IllegalStateException(
+                        "Set starting balance first."
+                    )
+                val available = account.balance - account.reservedMargin
+                val required = cashDebit + reserved
+                check(available + 0.000001 >= required) {
+                    "Insufficient available funds. Required: ${
+                        formatAmount(required)
+                    }"
                 }
-                require(target < entryPrice) {
-                    "SELL target must be below entry price."
+
+                val maxOpenPositions = AppConfig.get().maxOpenPositions
+                if (maxOpenPositions > 0) {
+                    check(countOpenPositions(db) < maxOpenPositions) {
+                        "Maximum open positions reached."
+                    }
                 }
-            }
-        }
 
-        val marginRate = AppConfig.get().shortMarginRate
-        val reserved = if (normalizedSide == OrderSide.SELL.name) {
-            orderValue * marginRate
-        } else {
-            0.0
-        }
-        val cashDebit = if (normalizedSide == OrderSide.BUY.name) {
-            orderValue
-        } else {
-            0.0
-        }
-
-        val db = databaseHelper.writableDatabase
-        db.beginTransaction()
-        try {
-            val account = queryAccount(db)
-                ?: throw IllegalStateException("Set starting balance first.")
-            val currentReserved = queryReserved(db)
-            val available = account.balance - currentReserved
-            val required = cashDebit + reserved
-
-            check(available + 0.000001 >= required) {
-                "Insufficient available funds. Required: ${
-                    formatAmount(required)
-                }"
-            }
-
-            val maxOpenPositions = AppConfig.get().maxOpenPositions
-            if (maxOpenPositions > 0) {
-                check(countOpenPositions(db) < maxOpenPositions) {
-                    "Maximum open positions reached."
+                val now = System.currentTimeMillis()
+                val orderValues = ContentValues().apply {
+                    put("symbol", normalizedSymbol)
+                    put("exchange", normalizedExchange)
+                    put("side", normalizedSide)
+                    put("quantity", quantity)
+                    put("entry_price", entryPrice)
+                    put("reserved_margin", reserved)
+                    put("status", OrderStatus.OPEN.name)
+                    put("note", note.trim())
+                    put("stop_loss", stopLoss)
+                    put("target", target)
+                    put("entry_source", normalizedEntrySource)
+                    put("entry_timestamp", entryTimestamp)
+                    put("remaining_quantity", quantity)
+                    put("last_price", entryPrice)
+                    put("created_at", now)
+                    put("updated_at", now)
                 }
+
+                val orderId = db.insertOrThrow(
+                    SBDatabaseHelper.TABLE_PAPER_ORDERS,
+                    null,
+                    orderValues
+                )
+
+                val positionValues = ContentValues().apply {
+                    put("order_id", orderId)
+                    put("symbol", normalizedSymbol)
+                    put("exchange", normalizedExchange)
+                    put("side", normalizedSide)
+                    put("quantity", quantity)
+                    put("entry_price", entryPrice)
+                    put("last_price", entryPrice)
+                    put("reserved_margin", reserved)
+                    put("status", OrderStatus.OPEN.name)
+                    put("opened_at", now)
+                    put("updated_at", now)
+                }
+                db.insertOrThrow(
+                    SBDatabaseHelper.TABLE_POSITIONS,
+                    null,
+                    positionValues
+                )
+
+                val accountValues = ContentValues().apply {
+                    put("balance", account.balance - cashDebit)
+                    put(
+                        "reserved_margin",
+                        account.reservedMargin + reserved
+                    )
+                    put("updated_at", now)
+                }
+                check(
+                    db.update(
+                        SBDatabaseHelper.TABLE_PAPER_ACCOUNT,
+                        accountValues,
+                        "id = ?",
+                        arrayOf("1")
+                    ) == 1
+                ) { "Could not update paper account." }
+
+                db.setTransactionSuccessful()
+                queryOrder(db, orderId)
+                    ?: throw IllegalStateException(
+                        "Could not read paper order."
+                    )
+            } finally {
+                db.endTransaction()
             }
-
-            val now = System.currentTimeMillis()
-            val orderValues = ContentValues().apply {
-                put("symbol", normalizedSymbol)
-                put("exchange", normalizedExchange)
-                put("side", normalizedSide)
-                put("quantity", quantity)
-                put("entry_price", entryPrice)
-                put("reserved_margin", reserved)
-                put("status", OrderStatus.OPEN.name)
-                put("note", note.trim())
-                put("stop_loss", stopLoss)
-                put("target", target)
-                put("entry_source", normalizedEntrySource)
-                put("entry_timestamp", entryTimestamp)
-                put("created_at", now)
-                put("updated_at", now)
-            }
-
-            val orderId = db.insertOrThrow(
-                SBDatabaseHelper.TABLE_PAPER_ORDERS,
-                null,
-                orderValues
-            )
-
-            val positionValues = ContentValues().apply {
-                put("order_id", orderId)
-                put("symbol", normalizedSymbol)
-                put("exchange", normalizedExchange)
-                put("side", normalizedSide)
-                put("quantity", quantity)
-                put("entry_price", entryPrice)
-                put("last_price", entryPrice)
-                put("reserved_margin", reserved)
-                put("status", OrderStatus.OPEN.name)
-                put("opened_at", now)
-                put("updated_at", now)
-            }
-            db.insertOrThrow(
-                SBDatabaseHelper.TABLE_POSITIONS,
-                null,
-                positionValues
-            )
-
-            val accountValues = ContentValues().apply {
-                put("balance", account.balance - cashDebit)
-                put("reserved_margin", currentReserved + reserved)
-                put("updated_at", now)
-            }
-            check(
-                db.update(
-                    SBDatabaseHelper.TABLE_PAPER_ACCOUNT,
-                    accountValues,
-                    "id = ?",
-                    arrayOf("1")
-                ) == 1
-            ) { "Could not update paper account." }
-
-            db.setTransactionSuccessful()
-
-            return PaperOrder(
-                id = orderId,
-                symbol = normalizedSymbol,
-                exchange = normalizedExchange,
-                side = normalizedSide,
-                quantity = quantity,
-                entryPrice = entryPrice,
-                reservedMargin = reserved,
-                status = OrderStatus.OPEN.name,
-                note = note.trim(),
-                createdAt = now,
-                updatedAt = now,
-                stopLoss = stopLoss,
-                target = target,
-                entrySource = normalizedEntrySource,
-                entryTimestamp = entryTimestamp
-            )
-        } finally {
-            db.endTransaction()
-        }
-    
         }
     }
 
     fun closeOrder(orderId: Long, exitPrice: Double): PaperOrder? {
-        return maintenanceGate.withOperation {
-        require(orderId > 0L) { "Invalid order ID." }
-        require(exitPrice.isFinite() && exitPrice > 0.0) {
-            "Exit price must be valid and positive."
-        }
-
-        val db = databaseHelper.writableDatabase
-        db.beginTransaction()
-        try {
-            val order = queryOrder(db, orderId) ?: return null
-            if (!order.isOpen) return null
-
-            val orderValue = order.quantity.toDouble() * order.entryPrice
-            val exitValue = order.quantity.toDouble() * exitPrice
-            val pnl = if (order.side == OrderSide.BUY.name) {
-                exitValue - orderValue
-            } else {
-                orderValue - exitValue
-            }
-            require(pnl.isFinite() && exitValue.isFinite()) {
-                "Calculated trade result is invalid."
-            }
-
-            val account = queryAccount(db)
-                ?: throw IllegalStateException("Paper account is missing.")
-
-            val cashChange = if (order.side == OrderSide.BUY.name) {
-                exitValue
-            } else {
-                pnl
-            }
-            val newCash = account.balance + cashChange
-            check(newCash.isFinite()) { "Calculated cash balance is invalid." }
-
-            val now = System.currentTimeMillis()
-            val orderValues = ContentValues().apply {
-                put("exit_price", exitPrice)
-                put("realized_pnl", pnl)
-                put("status", OrderStatus.CLOSED.name)
-                put("reserved_margin", 0.0)
-                put("updated_at", now)
-            }
-            val updated = db.update(
-                SBDatabaseHelper.TABLE_PAPER_ORDERS,
-                orderValues,
-                "id = ? AND status = ?",
-                arrayOf(orderId.toString(), OrderStatus.OPEN.name)
-            )
-            if (updated != 1) return null
-
-            val positionValues = ContentValues().apply {
-                put("last_price", exitPrice)
-                put("reserved_margin", 0.0)
-                put("status", OrderStatus.CLOSED.name)
-                put("updated_at", now)
-            }
-            db.update(
-                SBDatabaseHelper.TABLE_POSITIONS,
-                positionValues,
-                "order_id = ? AND status = ?",
-                arrayOf(orderId.toString(), OrderStatus.OPEN.name)
-            )
-
-            val remainingReserved = queryReserved(db)
-            val accountValues = ContentValues().apply {
-                put("balance", newCash)
-                put("reserved_margin", remainingReserved)
-                put("realized_pnl", account.realizedPnl + pnl)
-                put("updated_at", now)
-            }
-            check(
-                db.update(
-                    SBDatabaseHelper.TABLE_PAPER_ACCOUNT,
-                    accountValues,
-                    "id = ?",
-                    arrayOf("1")
-                ) == 1
-            ) { "Could not settle paper trade." }
-
-            db.setTransactionSuccessful()
-
-            return order.copy(
-                exitPrice = exitPrice,
-                realizedPnl = pnl,
-                reservedMargin = 0.0,
-                status = OrderStatus.CLOSED.name,
-                updatedAt = now
-            )
-        } finally {
-            db.endTransaction()
-        }
-    
-        }
+        val order = getOrder(orderId) ?: return null
+        if (!order.isOpen) return null
+        return exitSignalOrder(
+            orderId = orderId,
+            kind = PaperExecutionKind.EXIT,
+            quantity = order.remainingQuantity,
+            executionPrice = exitPrice,
+            executedAt = System.currentTimeMillis(),
+            note = "Manual exit"
+        )
     }
 
     fun getOrder(orderId: Long): PaperOrder? {
         return maintenanceGate.withOperation {
-        return queryOrder(databaseHelper.readableDatabase, orderId)
-    
+            queryOrder(databaseHelper.readableDatabase, orderId)
+        }
+    }
+
+    fun getSignalOrder(signalId: Long): PaperOrder? {
+        return maintenanceGate.withOperation {
+            queryOrderBySignalId(
+                databaseHelper.readableDatabase,
+                signalId
+            )
+        }
+    }
+
+    fun getSignalOrderIds(): Set<Long> {
+        return maintenanceGate.withOperation {
+            val result = LinkedHashSet<Long>()
+            databaseHelper.readableDatabase.rawQuery(
+                "SELECT signal_id FROM ${SBDatabaseHelper.TABLE_PAPER_ORDERS} " +
+                    "WHERE signal_id IS NOT NULL",
+                null
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    result.add(cursor.getLong(0))
+                }
+            }
+            result
         }
     }
 
     fun getOrders(status: String? = null): List<PaperOrder> {
         return maintenanceGate.withOperation {
-        val selection: String?
-        val args: Array<String>?
-        if (status == null) {
-            selection = null
-            args = null
-        } else {
-            val normalized = normalizeStatus(status)
-            selection = "status = ?"
-            args = arrayOf(normalized)
-        }
-
-        val result = ArrayList<PaperOrder>()
-        databaseHelper.readableDatabase.query(
-            SBDatabaseHelper.TABLE_PAPER_ORDERS,
-            orderProjection,
-            selection,
-            args,
-            null,
-            null,
-            "created_at DESC"
-        ).use { cursor ->
-            while (cursor.moveToNext()) {
-                result.add(readOrder(cursor))
+            val selection: String?
+            val args: Array<String>?
+            if (status == null) {
+                selection = null
+                args = null
+            } else {
+                val normalized = normalizeStatus(status)
+                selection = "status = ?"
+                args = arrayOf(normalized)
             }
-        }
-        return result
-    
+
+            val result = ArrayList<PaperOrder>()
+            databaseHelper.readableDatabase.query(
+                SBDatabaseHelper.TABLE_PAPER_ORDERS,
+                orderProjection,
+                selection,
+                args,
+                null,
+                null,
+                "created_at DESC"
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    result.add(readOrder(cursor))
+                }
+            }
+            result
         }
     }
 
     fun getOpenOrders(): List<PaperOrder> {
-        return maintenanceGate.withOperation {
         return getOrders(OrderStatus.OPEN.name)
-    
+    }
+
+    fun getPendingOrders(): List<PaperOrder> {
+        return getOrders(OrderStatus.PENDING.name)
+    }
+
+    fun getActiveOrders(): List<PaperOrder> {
+        return maintenanceGate.withOperation {
+            val result = ArrayList<PaperOrder>()
+            databaseHelper.readableDatabase.query(
+                SBDatabaseHelper.TABLE_PAPER_ORDERS,
+                orderProjection,
+                "status IN (?, ?)",
+                arrayOf(
+                    OrderStatus.PENDING.name,
+                    OrderStatus.OPEN.name
+                ),
+                null,
+                null,
+                "created_at DESC"
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    result.add(readOrder(cursor))
+                }
+            }
+            result
+        }
+    }
+
+    fun getExecutions(
+        orderId: Long? = null,
+        limit: Int = 200
+    ): List<PaperExecution> {
+        return maintenanceGate.withOperation {
+            val selection = if (orderId != null) "order_id = ?" else null
+            val args = if (orderId != null) {
+                arrayOf(orderId.toString())
+            } else {
+                null
+            }
+            val result = ArrayList<PaperExecution>()
+            databaseHelper.readableDatabase.query(
+                SBDatabaseHelper.TABLE_PAPER_EXECUTIONS,
+                executionProjection,
+                selection,
+                args,
+                null,
+                null,
+                "executed_at DESC, id DESC",
+                limit.coerceIn(1, 1000).toString()
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    result.add(readExecution(cursor))
+                }
+            }
+            result
+        }
+    }
+
+    fun getEvents(limit: Int = 200): List<PaperTradeEvent> {
+        return maintenanceGate.withOperation {
+            val result = ArrayList<PaperTradeEvent>()
+            databaseHelper.readableDatabase.query(
+                SBDatabaseHelper.TABLE_PAPER_EVENTS,
+                eventProjection,
+                null,
+                null,
+                null,
+                null,
+                "created_at DESC, id DESC",
+                limit.coerceIn(1, 1000).toString()
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    result.add(readEvent(cursor))
+                }
+            }
+            result
+        }
+    }
+
+    fun logEvent(
+        orderId: Long?,
+        signalId: Long?,
+        type: String,
+        message: String,
+        createdAt: Long = System.currentTimeMillis()
+    ) {
+        maintenanceGate.withOperation {
+            insertEvent(
+                db = databaseHelper.writableDatabase,
+                orderId = orderId,
+                signalId = signalId,
+                type = type,
+                message = message,
+                now = createdAt
+            )
         }
     }
 
     fun getPositions(openOnly: Boolean = true): List<Position> {
         return maintenanceGate.withOperation {
-        val selection = if (openOnly) "status = ?" else null
-        val args = if (openOnly) {
-            arrayOf(OrderStatus.OPEN.name)
-        } else {
-            null
-        }
-
-        val result = ArrayList<Position>()
-        databaseHelper.readableDatabase.query(
-            SBDatabaseHelper.TABLE_POSITIONS,
-            positionProjection,
-            selection,
-            args,
-            null,
-            null,
-            "opened_at DESC"
-        ).use { cursor ->
-            while (cursor.moveToNext()) {
-                result.add(readPosition(cursor))
+            val selection = if (openOnly) "status = ?" else null
+            val args = if (openOnly) {
+                arrayOf(OrderStatus.OPEN.name)
+            } else {
+                null
             }
+
+            val result = ArrayList<Position>()
+            databaseHelper.readableDatabase.query(
+                SBDatabaseHelper.TABLE_POSITIONS,
+                positionProjection,
+                selection,
+                args,
+                null,
+                null,
+                "opened_at DESC"
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    result.add(readPosition(cursor))
+                }
+            }
+            result
         }
-        return result
-    
+    }
+
+    fun updateMarketPrices(
+        prices: Map<String, Double>,
+        exchange: String? = null
+    ): Int {
+        return maintenanceGate.withOperation {
+            if (prices.isEmpty()) return 0
+            val db = databaseHelper.writableDatabase
+            var updated = 0
+            val now = System.currentTimeMillis()
+            val normalizedExchange = exchange?.trim()
+                ?.uppercase(Locale.ROOT)
+
+            db.beginTransaction()
+            try {
+                prices.forEach { entry ->
+                    val symbol = entry.key.trim().uppercase(Locale.ROOT)
+                    val price = entry.value
+                    if (symbol.isBlank() ||
+                        !price.isFinite() ||
+                        price <= 0.0
+                    ) {
+                        return@forEach
+                    }
+
+                    val values = ContentValues().apply {
+                        put("last_price", price)
+                        put("updated_at", now)
+                    }
+                    if (normalizedExchange.isNullOrBlank()) {
+                        updated += db.update(
+                            SBDatabaseHelper.TABLE_POSITIONS,
+                            values,
+                            "UPPER(symbol) = ? AND status = ?",
+                            arrayOf(symbol, OrderStatus.OPEN.name)
+                        )
+                        db.update(
+                            SBDatabaseHelper.TABLE_PAPER_ORDERS,
+                            values,
+                            "UPPER(symbol) = ? AND status IN (?, ?)",
+                            arrayOf(
+                                symbol,
+                                OrderStatus.PENDING.name,
+                                OrderStatus.OPEN.name
+                            )
+                        )
+                    } else {
+                        updated += db.update(
+                            SBDatabaseHelper.TABLE_POSITIONS,
+                            values,
+                            "UPPER(symbol) = ? AND UPPER(exchange) = ? " +
+                                "AND status = ?",
+                            arrayOf(
+                                symbol,
+                                normalizedExchange,
+                                OrderStatus.OPEN.name
+                            )
+                        )
+                        db.update(
+                            SBDatabaseHelper.TABLE_PAPER_ORDERS,
+                            values,
+                            "UPPER(symbol) = ? AND UPPER(exchange) = ? " +
+                                "AND status IN (?, ?)",
+                            arrayOf(
+                                symbol,
+                                normalizedExchange,
+                                OrderStatus.PENDING.name,
+                                OrderStatus.OPEN.name
+                            )
+                        )
+                    }
+                }
+                db.setTransactionSuccessful()
+            } finally {
+                db.endTransaction()
+            }
+            updated
         }
     }
 
     fun updatePositionPrices(
         prices: Map<String, Double>,
         exchange: String? = null
-    ): Int {
-        return maintenanceGate.withOperation {
-        if (prices.isEmpty()) return 0
-        val db = databaseHelper.writableDatabase
-        var updated = 0
-        val now = System.currentTimeMillis()
-        val normalizedExchange = exchange?.trim()?.toUpperCase(Locale.ROOT)
-
-        db.beginTransaction()
-        try {
-            prices.forEach { entry ->
-                val symbol = entry.key.trim().toUpperCase(Locale.ROOT)
-                val price = entry.value
-                if (symbol.isBlank() ||
-                    !price.isFinite() ||
-                    price <= 0.0
-                ) {
-                    return@forEach
-                }
-
-                val values = ContentValues().apply {
-                    put("last_price", price)
-                    put("updated_at", now)
-                }
-                if (normalizedExchange.isNullOrBlank()) {
-                    updated += db.update(
-                        SBDatabaseHelper.TABLE_POSITIONS,
-                        values,
-                        "UPPER(symbol) = ? AND status = ?",
-                        arrayOf(symbol, OrderStatus.OPEN.name)
-                    )
-                } else {
-                    updated += db.update(
-                        SBDatabaseHelper.TABLE_POSITIONS,
-                        values,
-                        "UPPER(symbol) = ? AND UPPER(exchange) = ? AND status = ?",
-                        arrayOf(
-                            symbol,
-                            normalizedExchange,
-                            OrderStatus.OPEN.name
-                        )
-                    )
-                }
-            }
-            db.setTransactionSuccessful()
-        } finally {
-            db.endTransaction()
-        }
-        return updated
-    
-        }
-    }
+    ): Int = updateMarketPrices(prices, exchange)
 
     fun getReservedMargin(): Double {
         return maintenanceGate.withOperation {
-        return databaseHelper.readableDatabase.rawQuery(
-            "SELECT COALESCE(SUM(reserved_margin), 0) " +
-                "FROM ${SBDatabaseHelper.TABLE_POSITIONS} WHERE status = ?",
-            arrayOf(OrderStatus.OPEN.name)
-        ).use { cursor ->
-            if (cursor.moveToFirst()) cursor.getDouble(0) else 0.0
-        }
-    
+            databaseHelper.readableDatabase.rawQuery(
+                "SELECT COALESCE(SUM(reserved_margin), 0) " +
+                    "FROM ${SBDatabaseHelper.TABLE_POSITIONS} " +
+                    "WHERE status = ?",
+                arrayOf(OrderStatus.OPEN.name)
+            ).use { cursor ->
+                if (cursor.moveToFirst()) cursor.getDouble(0) else 0.0
+            }
         }
     }
 
     fun getRealizedPnl(): Double {
         return maintenanceGate.withOperation {
-        return databaseHelper.readableDatabase.rawQuery(
-            "SELECT COALESCE(SUM(realized_pnl), 0) " +
-                "FROM ${SBDatabaseHelper.TABLE_PAPER_ORDERS} " +
-                "WHERE status = ?",
-            arrayOf(OrderStatus.CLOSED.name)
-        ).use { cursor ->
-            if (cursor.moveToFirst()) cursor.getDouble(0) else 0.0
-        }
-    
+            getAccount()?.realizedPnl ?: 0.0
         }
     }
 
     fun getUnrealizedPnl(): Double {
         return maintenanceGate.withOperation {
-        var total = 0.0
-        getPositions(true).forEach { position ->
-            total += position.unrealizedPnl
-        }
-        return total
-    
+            var total = 0.0
+            getPositions(true).forEach { position ->
+                total += position.unrealizedPnl
+            }
+            total
         }
     }
 
@@ -589,15 +1195,16 @@ class PaperRepository(
                     null
                 } else {
                     val positions = queryPositions(db, true)
-                    val realized = queryRealizedPnl(db)
-                    val unrealized = positions.fold(0.0) { total, position ->
+                    val unrealized = positions.fold(0.0) {
+                            total,
+                            position ->
                         total + position.unrealizedPnl
                     }
                     db.setTransactionSuccessful()
                     PaperSnapshotData(
                         account = account,
                         positions = positions,
-                        realizedPnl = realized,
+                        realizedPnl = account.realizedPnl,
                         unrealizedPnl = unrealized
                     )
                 }
@@ -609,57 +1216,57 @@ class PaperRepository(
 
     fun getOpenPositionCount(): Int {
         return maintenanceGate.withOperation {
-        databaseHelper.readableDatabase.rawQuery(
-            "SELECT COUNT(*) FROM ${SBDatabaseHelper.TABLE_POSITIONS} " +
-                "WHERE status = ?",
-            arrayOf(OrderStatus.OPEN.name)
-        ).use { cursor ->
-            return if (cursor.moveToFirst()) cursor.getInt(0) else 0
-        }
-    
+            databaseHelper.readableDatabase.rawQuery(
+                "SELECT COUNT(*) FROM ${SBDatabaseHelper.TABLE_POSITIONS} " +
+                    "WHERE status = ?",
+                arrayOf(OrderStatus.OPEN.name)
+            ).use { cursor ->
+                if (cursor.moveToFirst()) cursor.getInt(0) else 0
+            }
         }
     }
 
     fun reset(startingBalance: Double): PaperAccount {
         return maintenanceGate.withOperation {
-        require(startingBalance.isFinite() && startingBalance > 0.0) {
-            "Starting balance must be a valid positive amount."
-        }
-
-        val db = databaseHelper.writableDatabase
-        val now = System.currentTimeMillis()
-        db.beginTransaction()
-        try {
-            db.delete(SBDatabaseHelper.TABLE_POSITIONS, null, null)
-            db.delete(SBDatabaseHelper.TABLE_PAPER_ORDERS, null, null)
-
-            val values = ContentValues().apply {
-                put("id", 1)
-                put("starting_balance", startingBalance)
-                put("balance", startingBalance)
-                put("reserved_margin", 0.0)
-                put("realized_pnl", 0.0)
-                put("updated_at", now)
+            require(startingBalance.isFinite() && startingBalance > 0.0) {
+                "Starting balance must be a valid positive amount."
             }
-            db.insertWithOnConflict(
-                SBDatabaseHelper.TABLE_PAPER_ACCOUNT,
-                null,
-                values,
-                SQLiteDatabase.CONFLICT_REPLACE
-            )
-            db.setTransactionSuccessful()
-        } finally {
-            db.endTransaction()
-        }
 
-        return PaperAccount(
-            startingBalance = startingBalance,
-            balance = startingBalance,
-            reservedMargin = 0.0,
-            realizedPnl = 0.0,
-            updatedAt = now
-        )
-    
+            val db = databaseHelper.writableDatabase
+            val now = System.currentTimeMillis()
+            db.beginTransaction()
+            try {
+                db.delete(SBDatabaseHelper.TABLE_PAPER_EXECUTIONS, null, null)
+                db.delete(SBDatabaseHelper.TABLE_PAPER_EVENTS, null, null)
+                db.delete(SBDatabaseHelper.TABLE_POSITIONS, null, null)
+                db.delete(SBDatabaseHelper.TABLE_PAPER_ORDERS, null, null)
+
+                val values = ContentValues().apply {
+                    put("id", 1)
+                    put("starting_balance", startingBalance)
+                    put("balance", startingBalance)
+                    put("reserved_margin", 0.0)
+                    put("realized_pnl", 0.0)
+                    put("updated_at", now)
+                }
+                db.insertWithOnConflict(
+                    SBDatabaseHelper.TABLE_PAPER_ACCOUNT,
+                    null,
+                    values,
+                    SQLiteDatabase.CONFLICT_REPLACE
+                )
+                db.setTransactionSuccessful()
+            } finally {
+                db.endTransaction()
+            }
+
+            PaperAccount(
+                startingBalance = startingBalance,
+                balance = startingBalance,
+                reservedMargin = 0.0,
+                realizedPnl = 0.0,
+                updatedAt = now
+            )
         }
     }
 
@@ -669,6 +1276,24 @@ class PaperRepository(
             orderProjection,
             "id = ?",
             arrayOf(orderId.toString()),
+            null,
+            null,
+            null,
+            "1"
+        ).use { cursor ->
+            return if (cursor.moveToFirst()) readOrder(cursor) else null
+        }
+    }
+
+    private fun queryOrderBySignalId(
+        db: SQLiteDatabase,
+        signalId: Long
+    ): PaperOrder? {
+        db.query(
+            SBDatabaseHelper.TABLE_PAPER_ORDERS,
+            orderProjection,
+            "signal_id = ?",
+            arrayOf(signalId.toString()),
             null,
             null,
             null,
@@ -720,24 +1345,21 @@ class PaperRepository(
         return result
     }
 
-    private fun queryRealizedPnl(db: SQLiteDatabase): Double {
-        db.rawQuery(
-            "SELECT COALESCE(SUM(realized_pnl), 0) " +
-                "FROM ${SBDatabaseHelper.TABLE_PAPER_ORDERS} " +
-                "WHERE status = ?",
-            arrayOf(OrderStatus.CLOSED.name)
+    private fun queryPositionByOrderId(
+        db: SQLiteDatabase,
+        orderId: Long
+    ): Position? {
+        db.query(
+            SBDatabaseHelper.TABLE_POSITIONS,
+            positionProjection,
+            "order_id = ? AND status = ?",
+            arrayOf(orderId.toString(), OrderStatus.OPEN.name),
+            null,
+            null,
+            null,
+            "1"
         ).use { cursor ->
-            return if (cursor.moveToFirst()) cursor.getDouble(0) else 0.0
-        }
-    }
-
-    private fun queryReserved(db: SQLiteDatabase): Double {
-        db.rawQuery(
-            "SELECT COALESCE(SUM(reserved_margin), 0) " +
-                "FROM ${SBDatabaseHelper.TABLE_POSITIONS} WHERE status = ?",
-            arrayOf(OrderStatus.OPEN.name)
-        ).use { cursor ->
-            return if (cursor.moveToFirst()) cursor.getDouble(0) else 0.0
+            return if (cursor.moveToFirst()) readPosition(cursor) else null
         }
     }
 
@@ -760,6 +1382,76 @@ class PaperRepository(
         }
     }
 
+    private fun executionExists(
+        db: SQLiteDatabase,
+        eventKey: String
+    ): Boolean {
+        db.query(
+            SBDatabaseHelper.TABLE_PAPER_EXECUTIONS,
+            arrayOf("id"),
+            "event_key = ?",
+            arrayOf(eventKey),
+            null,
+            null,
+            null,
+            "1"
+        ).use { cursor ->
+            return cursor.moveToFirst()
+        }
+    }
+
+    private fun insertExecution(
+        db: SQLiteDatabase,
+        order: PaperOrder,
+        kind: PaperExecutionKind,
+        quantity: Int,
+        price: Double,
+        grossPnl: Double,
+        charges: Double,
+        netPnl: Double,
+        executedAt: Long,
+        eventKey: String,
+        note: String
+    ) {
+        val values = ContentValues().apply {
+            put("order_id", order.id)
+            put("signal_id", order.signalId)
+            put("kind", kind.name)
+            put("quantity", quantity)
+            put("price", price)
+            put("gross_pnl", grossPnl)
+            put("charges", charges)
+            put("net_pnl", netPnl)
+            put("executed_at", executedAt)
+            put("event_key", eventKey)
+            put("note", note)
+        }
+        db.insertWithOnConflict(
+            SBDatabaseHelper.TABLE_PAPER_EXECUTIONS,
+            null,
+            values,
+            SQLiteDatabase.CONFLICT_IGNORE
+        )
+    }
+
+    private fun insertEvent(
+        db: SQLiteDatabase,
+        orderId: Long?,
+        signalId: Long?,
+        type: String,
+        message: String,
+        now: Long
+    ) {
+        val values = ContentValues().apply {
+            put("order_id", orderId)
+            put("signal_id", signalId)
+            put("type", type)
+            put("message", message)
+            put("created_at", now)
+        }
+        db.insert(SBDatabaseHelper.TABLE_PAPER_EVENTS, null, values)
+    }
+
     private fun readAccount(cursor: Cursor): PaperAccount {
         return PaperAccount(
             startingBalance = cursor.getDouble(0),
@@ -778,17 +1470,40 @@ class PaperRepository(
             side = cursor.getString(3),
             quantity = cursor.getInt(4),
             entryPrice = cursor.getDouble(5),
-            exitPrice = if (cursor.isNull(6)) null else cursor.getDouble(6),
-            realizedPnl = if (cursor.isNull(7)) null else cursor.getDouble(7),
+            exitPrice = cursor.getDoubleOrNull(6),
+            realizedPnl = cursor.getDoubleOrNull(7),
             reservedMargin = cursor.getDouble(8),
             status = cursor.getString(9),
             note = cursor.getString(10),
             createdAt = cursor.getLong(11),
             updatedAt = cursor.getLong(12),
-            stopLoss = if (cursor.isNull(13)) null else cursor.getDouble(13),
-            target = if (cursor.isNull(14)) null else cursor.getDouble(14),
+            stopLoss = cursor.getDoubleOrNull(13),
+            target = cursor.getDoubleOrNull(14),
             entrySource = cursor.getString(15),
-            entryTimestamp = if (cursor.isNull(16)) null else cursor.getLong(16)
+            entryTimestamp = cursor.getLongOrNull(16),
+            signalId = cursor.getLongOrNull(17),
+            signalCategory = cursor.getString(18).orEmpty(),
+            signalTimeframe = cursor.getString(19).orEmpty(),
+            strategyId = cursor.getString(20).orEmpty(),
+            strategyVersion = cursor.getString(21).orEmpty(),
+            signalGeneratedAt = cursor.getLongOrNull(22),
+            signalExpiresAt = cursor.getLongOrNull(23),
+            entryLow = cursor.getDoubleOrNull(24),
+            entryHigh = cursor.getDoubleOrNull(25),
+            costBpsPerSide = cursor.getDouble(26),
+            slippageBpsPerSide = cursor.getDouble(27),
+            target1 = cursor.getDoubleOrNull(28),
+            target2 = cursor.getDoubleOrNull(29),
+            target3 = cursor.getDoubleOrNull(30),
+            remainingQuantity = cursor.getInt(31),
+            lastPrice = cursor.getDoubleOrNull(32),
+            entryCharges = cursor.getDouble(33),
+            charges = cursor.getDouble(34),
+            exitReason = cursor.getString(35).orEmpty(),
+            target1At = cursor.getLongOrNull(36),
+            target2At = cursor.getLongOrNull(37),
+            target3At = cursor.getLongOrNull(38),
+            stoppedAt = cursor.getLongOrNull(39)
         )
     }
 
@@ -809,8 +1524,38 @@ class PaperRepository(
         )
     }
 
+    private fun readExecution(cursor: Cursor): PaperExecution {
+        return PaperExecution(
+            id = cursor.getLong(0),
+            orderId = cursor.getLong(1),
+            signalId = cursor.getLongOrNull(2),
+            kind = PaperExecutionKind.values().firstOrNull {
+                it.name == cursor.getString(3)
+            } ?: PaperExecutionKind.EXIT,
+            quantity = cursor.getInt(4),
+            price = cursor.getDouble(5),
+            grossPnl = cursor.getDouble(6),
+            charges = cursor.getDouble(7),
+            netPnl = cursor.getDouble(8),
+            executedAt = cursor.getLong(9),
+            eventKey = cursor.getString(10),
+            note = cursor.getString(11).orEmpty()
+        )
+    }
+
+    private fun readEvent(cursor: Cursor): PaperTradeEvent {
+        return PaperTradeEvent(
+            id = cursor.getLong(0),
+            orderId = cursor.getLongOrNull(1),
+            signalId = cursor.getLongOrNull(2),
+            type = cursor.getString(3),
+            message = cursor.getString(4).orEmpty(),
+            createdAt = cursor.getLong(5)
+        )
+    }
+
     private fun normalizeSide(side: String): String {
-        val normalized = side.trim().toUpperCase(Locale.ROOT)
+        val normalized = side.trim().uppercase(Locale.ROOT)
         require(
             normalized == OrderSide.BUY.name ||
                 normalized == OrderSide.SELL.name
@@ -821,18 +1566,67 @@ class PaperRepository(
     }
 
     private fun normalizeStatus(status: String): String {
-        val normalized = status.trim().toUpperCase(Locale.ROOT)
+        val normalized = status.trim().uppercase(Locale.ROOT)
         require(
-            normalized == OrderStatus.OPEN.name ||
-                normalized == OrderStatus.CLOSED.name
+            normalized in OrderStatus.values().map { it.name }
         ) {
-            "Status must be OPEN or CLOSED."
+            "Unknown paper order status."
         }
         return normalized
     }
 
+    private fun validateSignalLevels(candidate: PaperSignalCandidate) {
+        val low = minOf(candidate.entryLow, candidate.entryHigh)
+        val high = maxOf(candidate.entryLow, candidate.entryHigh)
+        require(low.isFinite() && low > 0.0) {
+            "Entry range must be valid and positive."
+        }
+        require(high.isFinite() && high > 0.0) {
+            "Entry range must be valid and positive."
+        }
+        require(candidate.stopLoss.isFinite() &&
+            candidate.stopLoss > 0.0) {
+            "Stop loss must be valid and positive."
+        }
+        require(candidate.target1.isFinite() &&
+            candidate.target1 > 0.0 &&
+            candidate.target2.isFinite() &&
+            candidate.target2 > 0.0 &&
+            candidate.target3.isFinite() &&
+            candidate.target3 > 0.0) {
+            "Targets must be valid and positive."
+        }
+        if (candidate.side == OrderSide.BUY.name) {
+            require(candidate.stopLoss < low) {
+                "BUY stop loss must be below the entry range."
+            }
+            require(candidate.target1 > high &&
+                candidate.target2 > candidate.target1 &&
+                candidate.target3 > candidate.target2) {
+                "BUY targets must be above the entry range and ordered."
+            }
+        } else {
+            require(candidate.stopLoss > high) {
+                "SELL stop loss must be above the entry range."
+            }
+            require(candidate.target1 < low &&
+                candidate.target2 < candidate.target1 &&
+                candidate.target3 < candidate.target2) {
+                "SELL targets must be below the entry range and ordered."
+            }
+        }
+    }
+
     private fun formatAmount(value: Double): String {
         return String.format(Locale.US, "%.2f", value)
+    }
+
+    private fun Cursor.getLongOrNull(index: Int): Long? {
+        return if (isNull(index)) null else getLong(index)
+    }
+
+    private fun Cursor.getDoubleOrNull(index: Int): Double? {
+        return if (isNull(index)) null else getDouble(index)
     }
 
     companion object {
@@ -861,7 +1655,30 @@ class PaperRepository(
             "stop_loss",
             "target",
             "entry_source",
-            "entry_timestamp"
+            "entry_timestamp",
+            "signal_id",
+            "signal_category",
+            "signal_timeframe",
+            "strategy_id",
+            "strategy_version",
+            "signal_generated_at",
+            "signal_expires_at",
+            "entry_low",
+            "entry_high",
+            "cost_bps_per_side",
+            "slippage_bps_per_side",
+            "target1",
+            "target2",
+            "target3",
+            "remaining_quantity",
+            "last_price",
+            "entry_charges",
+            "charges",
+            "exit_reason",
+            "target1_at",
+            "target2_at",
+            "target3_at",
+            "stopped_at"
         )
 
         private val positionProjection = arrayOf(
@@ -877,6 +1694,30 @@ class PaperRepository(
             "status",
             "opened_at",
             "updated_at"
+        )
+
+        private val executionProjection = arrayOf(
+            "id",
+            "order_id",
+            "signal_id",
+            "kind",
+            "quantity",
+            "price",
+            "gross_pnl",
+            "charges",
+            "net_pnl",
+            "executed_at",
+            "event_key",
+            "note"
+        )
+
+        private val eventProjection = arrayOf(
+            "id",
+            "order_id",
+            "signal_id",
+            "type",
+            "message",
+            "created_at"
         )
     }
 }

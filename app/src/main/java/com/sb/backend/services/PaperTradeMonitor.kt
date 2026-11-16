@@ -8,13 +8,17 @@ import java.util.concurrent.TimeUnit
 
 class PaperTradeMonitor(
     private val paperEngine: PaperTradingEngine,
-    private val intervalMs: Long = AppConfig.get().paperMonitorIntervalMs
+    private val intervalMs: Long = AppConfig.get().paperMonitorIntervalMs,
+    private val signalForwardIntervalMs: Long = 30_000L,
+    private val onSignalCycle: (() -> Unit)? = null
 ) {
 
     private val lock = Any()
 
     @Volatile
     private var executor: ScheduledExecutorService? = null
+
+    private var lastSignalForwardAt = 0L
 
     fun start() {
         synchronized(lock) {
@@ -55,8 +59,19 @@ class PaperTradeMonitor(
     }
 
     private fun runSafely() {
+        val now = System.currentTimeMillis()
+        val safeForwardInterval = signalForwardIntervalMs.coerceAtLeast(1_000L)
+        if (now - lastSignalForwardAt >= safeForwardInterval) {
+            lastSignalForwardAt = now
+            try {
+                onSignalCycle?.invoke()
+            } catch (error: Exception) {
+                Log.e(TAG, "Paper signal forwarding cycle failed.", error)
+            }
+        }
+
         try {
-            paperEngine.monitorOpenTrades()
+            paperEngine.monitorOpenTrades(now)
         } catch (error: Exception) {
             Log.e(TAG, "Paper trade monitor cycle failed.", error)
         }

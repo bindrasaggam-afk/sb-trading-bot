@@ -8,6 +8,7 @@ import android.provider.MediaStore
 import android.util.Log
 import com.sb.backend.database.DatabaseBackup
 import com.sb.backend.database.LegacyPaperMigration
+import com.sb.backend.database.PaperLegacyCleanup
 import com.sb.backend.database.SBDatabaseHelper
 import com.sb.backend.market.repo.MarketFeedRepository
 import com.sb.backend.repositories.InstrumentRepository
@@ -25,6 +26,7 @@ import com.sb.backend.services.PaperTradeMonitor
 import com.sb.backend.services.PaperTradingEngine
 import com.sb.backend.services.RiskManager
 import com.sb.backend.services.SignalEngine
+import com.sb.signals.services.PaperSignalBridge
 import java.io.File
 import java.io.IOException
 import java.io.OutputStreamWriter
@@ -90,7 +92,15 @@ object BackendManager {
                 marketRepository,
                 riskManager
             )
-            paperTradeMonitor = PaperTradeMonitor(paperTradingEngine)
+            paperTradeMonitor = PaperTradeMonitor(
+                paperEngine = paperTradingEngine,
+                onSignalCycle = {
+                    val context = appContext
+                    if (context != null) {
+                        PaperSignalBridge.forwardOpenSignals(context)
+                    }
+                }
+            )
             executor = Executors.newSingleThreadExecutor()
             initialized = true
         }
@@ -173,6 +183,30 @@ object BackendManager {
                                 "Legacy paper migration failed; " +
                                     "legacy database was left untouched.",
                                 migrationError
+                            )
+                        }
+
+                        try {
+                            val cleanup = PaperLegacyCleanup.cleanup(
+                                context = appContext ?: throw IllegalStateException(
+                                    "Backend context is unavailable."
+                                ),
+                                databaseHelper = dbHelper
+                            )
+                            Log.i(
+                                TAG,
+                                "Paper legacy cleanup: ${cleanup.message} " +
+                                    "orders=${cleanup.deletedOrders}, " +
+                                    "positions=${cleanup.deletedPositions}, " +
+                                    "executions=${cleanup.deletedExecutions}, " +
+                                    "backup=${cleanup.backupFile?.name.orEmpty()}"
+                            )
+                        } catch (cleanupError: Exception) {
+                            Log.e(
+                                TAG,
+                                "Paper legacy cleanup failed; " +
+                                    "paper ledger was left untouched.",
+                                cleanupError
                             )
                         }
 

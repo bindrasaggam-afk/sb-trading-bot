@@ -26,6 +26,9 @@ object SignalsPlatform {
     private val analysisLock = Any()
 
     @Volatile
+    private var appContext: Context? = null
+
+    @Volatile
     private var database: SignalDatabase? = null
 
     @Volatile
@@ -198,13 +201,31 @@ object SignalsPlatform {
             analysisService
         } ?: return null
         return synchronized(analysisLock) {
-            try {
+            val summary = try {
                 service.seedStrategyVersions()
                 service.run()
             } catch (error: Exception) {
                 Log.e(TAG, "Signal analysis failed", error)
                 null
             }
+            if (summary != null) {
+                val context = appContext
+                if (context != null &&
+                    BackendManager.isInitialized() &&
+                    BackendManager.isReady()
+                ) {
+                    try {
+                        PaperSignalBridge.forwardOpenSignals(context)
+                    } catch (error: Exception) {
+                        Log.e(
+                            TAG,
+                            "Paper signal forwarding failed",
+                            error
+                        )
+                    }
+                }
+            }
+            summary
         }
     }
 
@@ -233,6 +254,7 @@ object SignalsPlatform {
     }
 
     private fun ensureInitializedLocked(context: Context) {
+        appContext = context.applicationContext
         if (database != null && signalRepository != null) return
         val db = SignalDatabase(context.applicationContext)
         val repo = SignalRepository(db)

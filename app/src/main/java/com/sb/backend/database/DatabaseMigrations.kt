@@ -340,6 +340,29 @@ object DatabaseMigrations {
                 legacy_order_id INTEGER,
                 entry_source TEXT NOT NULL DEFAULT 'MARKET',
                 entry_timestamp INTEGER,
+                signal_id INTEGER,
+                signal_category TEXT NOT NULL DEFAULT '',
+                signal_timeframe TEXT NOT NULL DEFAULT '',
+                strategy_id TEXT NOT NULL DEFAULT '',
+                strategy_version TEXT NOT NULL DEFAULT '',
+                signal_generated_at INTEGER,
+                signal_expires_at INTEGER,
+                entry_low REAL,
+                entry_high REAL,
+                cost_bps_per_side REAL NOT NULL DEFAULT 0,
+                slippage_bps_per_side REAL NOT NULL DEFAULT 0,
+                target1 REAL,
+                target2 REAL,
+                target3 REAL,
+                remaining_quantity INTEGER NOT NULL DEFAULT 0,
+                last_price REAL,
+                entry_charges REAL NOT NULL DEFAULT 0,
+                charges REAL NOT NULL DEFAULT 0,
+                exit_reason TEXT NOT NULL DEFAULT '',
+                target1_at INTEGER,
+                target2_at INTEGER,
+                target3_at INTEGER,
+                stopped_at INTEGER,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             )
@@ -356,6 +379,84 @@ object DatabaseMigrations {
             "TEXT NOT NULL DEFAULT 'MARKET'"
         )
         ensureColumn(db, "paper_orders", "entry_timestamp", "INTEGER")
+        ensureColumn(db, "paper_orders", "signal_id", "INTEGER")
+        ensureColumn(
+            db,
+            "paper_orders",
+            "signal_category",
+            "TEXT NOT NULL DEFAULT ''"
+        )
+        ensureColumn(
+            db,
+            "paper_orders",
+            "signal_timeframe",
+            "TEXT NOT NULL DEFAULT ''"
+        )
+        ensureColumn(
+            db,
+            "paper_orders",
+            "strategy_id",
+            "TEXT NOT NULL DEFAULT ''"
+        )
+        ensureColumn(
+            db,
+            "paper_orders",
+            "strategy_version",
+            "TEXT NOT NULL DEFAULT ''"
+        )
+        ensureColumn(
+            db,
+            "paper_orders",
+            "signal_generated_at",
+            "INTEGER"
+        )
+        ensureColumn(db, "paper_orders", "signal_expires_at", "INTEGER")
+        ensureColumn(db, "paper_orders", "entry_low", "REAL")
+        ensureColumn(db, "paper_orders", "entry_high", "REAL")
+        ensureColumn(
+            db,
+            "paper_orders",
+            "cost_bps_per_side",
+            "REAL NOT NULL DEFAULT 0"
+        )
+        ensureColumn(
+            db,
+            "paper_orders",
+            "slippage_bps_per_side",
+            "REAL NOT NULL DEFAULT 0"
+        )
+        ensureColumn(db, "paper_orders", "target1", "REAL")
+        ensureColumn(db, "paper_orders", "target2", "REAL")
+        ensureColumn(db, "paper_orders", "target3", "REAL")
+        ensureColumn(
+            db,
+            "paper_orders",
+            "remaining_quantity",
+            "INTEGER NOT NULL DEFAULT 0"
+        )
+        ensureColumn(db, "paper_orders", "last_price", "REAL")
+        ensureColumn(
+            db,
+            "paper_orders",
+            "entry_charges",
+            "REAL NOT NULL DEFAULT 0"
+        )
+        ensureColumn(
+            db,
+            "paper_orders",
+            "charges",
+            "REAL NOT NULL DEFAULT 0"
+        )
+        ensureColumn(
+            db,
+            "paper_orders",
+            "exit_reason",
+            "TEXT NOT NULL DEFAULT ''"
+        )
+        ensureColumn(db, "paper_orders", "target1_at", "INTEGER")
+        ensureColumn(db, "paper_orders", "target2_at", "INTEGER")
+        ensureColumn(db, "paper_orders", "target3_at", "INTEGER")
+        ensureColumn(db, "paper_orders", "stopped_at", "INTEGER")
 
         // ---------------------------------------------------------
         // 10. POSITIONS
@@ -377,6 +478,46 @@ object DatabaseMigrations {
                 opened_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 UNIQUE(order_id)
+            )
+            """.trimIndent()
+        )
+
+        // ---------------------------------------------------------
+        // 10A. PAPER EXECUTIONS
+        // ---------------------------------------------------------
+
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS paper_executions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id INTEGER NOT NULL,
+                signal_id INTEGER,
+                kind TEXT NOT NULL,
+                quantity INTEGER NOT NULL CHECK (quantity > 0),
+                price REAL NOT NULL CHECK (price > 0),
+                gross_pnl REAL NOT NULL DEFAULT 0,
+                charges REAL NOT NULL DEFAULT 0,
+                net_pnl REAL NOT NULL DEFAULT 0,
+                executed_at INTEGER NOT NULL,
+                event_key TEXT NOT NULL UNIQUE,
+                note TEXT NOT NULL DEFAULT ''
+            )
+            """.trimIndent()
+        )
+
+        // ---------------------------------------------------------
+        // 10B. PAPER EVENT LOG
+        // ---------------------------------------------------------
+
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS paper_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id INTEGER,
+                signal_id INTEGER,
+                type TEXT NOT NULL,
+                message TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL
             )
             """.trimIndent()
         )
@@ -540,11 +681,41 @@ object DatabaseMigrations {
             """.trimIndent()
         )
 
+        db.execSQL(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_orders_signal
+            ON `paper_orders` (`signal_id`)
+            WHERE `signal_id` IS NOT NULL
+            """.trimIndent()
+        )
+
+        createIndex(
+            db,
+            "idx_orders_source_status",
+            "paper_orders",
+            "entry_source, status"
+        )
+
         createIndex(
             db,
             "idx_positions_status",
             "positions",
             "status"
+        )
+
+        createIndex(
+            db,
+            "idx_paper_executions_order",
+            "paper_executions",
+            "order_id, executed_at"
+        )
+
+        createIndex(
+            db,
+            "idx_paper_events_created",
+            "paper_events",
+            "created_at"
         )
 
         // ---------------------------------------------------------

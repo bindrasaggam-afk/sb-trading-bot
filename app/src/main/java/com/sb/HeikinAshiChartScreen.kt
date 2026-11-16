@@ -996,88 +996,23 @@ class HeikinAshiChartScreen(
     }
 
     private fun placeQuickPaperOrder(request: QuickTradeRequest) {
-        val scope = liveScope
-        if (scope == null) {
-            quickTrade.showMessage("Chart active nahi hai.")
-            return
-        }
-
-        scope.launch {
-            val result = withContext(Dispatchers.IO) {
-                try {
-                    BackendManager.paperEngine().placeOrder(
-                        symbol = request.symbol,
-                        side = request.side,
-                        quantity = request.quantity,
-                        entryPrice = request.entryPrice,
-                        exchange = request.exchange,
-                        note = "Quick trade ${request.side}",
-                        stopLoss = request.stopLoss,
-                        target = request.target,
-                        entryTimestamp = request.entryTimestamp
-                    )
-                } catch (e: Exception) {
-                    TradeResult(
-                        success = false,
-                        message = e.message ?: "Paper engine unavailable."
-                    )
-                }
-            }
-
-            val order = result.order
-            if (!result.success || order == null) {
-                quickTrade.onOrderRejected(result.message, request.requestId)
-                return@launch
-            }
-
-            quickTrade.onOrderPlaced(
-                QuickTradeTracking(
-                    orderId = order.id,
-                    symbol = order.symbol,
-                    exchange = order.exchange,
-                    side = order.side,
-                    quantity = order.quantity,
-                    entryPrice = order.entryPrice,
-                    stopLoss = order.stopLoss ?: request.stopLoss,
-                    target = order.target ?: request.target
-                ),
-                request.requestId
-            )
-        }
+        quickTrade.onOrderRejected(
+            "Manual chart paper orders are disabled. " +
+                "Paper trades open only from genuine Research Signals.",
+            request.requestId
+        )
     }
 
+    @Suppress("UNUSED_PARAMETER")
     private fun closeQuickPaperOrder(
         trade: QuickTradeTracking,
         exitPrice: Double,
         reason: String
     ) {
-        val scope = liveScope
-        if (scope == null) return
-
-        scope.launch {
-            val result = withContext(Dispatchers.IO) {
-                try {
-                    BackendManager.paperEngine().closeOrder(
-                        orderId = trade.orderId,
-                        exitPrice = exitPrice,
-                        exchange = trade.exchange
-                    )
-                } catch (e: Exception) {
-                    TradeResult(
-                        success = false,
-                        message = e.message ?: "Paper engine unavailable."
-                    )
-                }
-            }
-
-            if (result.success) {
-                quickTrade.onTradeClosed(reason, result.pnl)
-            } else {
-                quickTrade.onExitFailed(
-                    "$reason • Exit failed: ${result.message}"
-                )
-            }
-        }
+        quickTrade.showMessage(
+            "Manual paper exits are disabled. " +
+                "Signals manage stops, targets and expiry automatically."
+        )
     }
 
     private fun makeButtonRow(parent: LinearLayout): LinearLayout {

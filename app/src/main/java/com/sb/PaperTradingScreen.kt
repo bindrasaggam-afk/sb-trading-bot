@@ -17,6 +17,7 @@ import android.widget.TextView
 import android.widget.Toast
 import com.sb.backend.core.BackendManager
 import com.sb.backend.models.OrderSide
+import com.sb.backend.models.PaperExecution
 import com.sb.backend.models.PaperOrder
 import com.sb.backend.models.Position
 import com.sb.backend.services.PaperSnapshot
@@ -40,7 +41,8 @@ object PaperTradingScreen {
 
     private data class ScreenData(
         val snapshot: PaperSnapshot?,
-        val orders: List<PaperOrder>
+        val orders: List<PaperOrder>,
+        val executions: List<PaperExecution>
     )
 
     fun create(
@@ -177,7 +179,7 @@ object PaperTradingScreen {
 
             addText("Paper Trading", 20, TEXT, true)
             addText(
-                "Unified practice mode · sb_backend.db",
+                "Automated from genuine Research Signals · sb_backend.db",
                 11, MUTED
             ).setPadding(0, dp(context, 3), 0, dp(context, 8))
 
@@ -255,18 +257,24 @@ object PaperTradingScreen {
                 }
             }
 
-            if (snapshot != null) {
-                addButton("Create Paper Order") {
-                    showCreateOrderDialog(context) { symbol, side, quantity, price ->
-                        runOperation { engine ->
-                            engine.placeOrder(
-                                symbol = symbol,
-                                side = side,
-                                quantity = quantity,
-                                entryPrice = price
-                            )
+            addText("Pending Signal Entries", 17, TEXT, true)
+                .setPadding(0, dp(context, 16), 0, dp(context, 4))
+
+            val pendingOrders = orders.filter { it.isPending }
+            if (pendingOrders.isEmpty()) {
+                addCard(
+                    "No pending entries",
+                    "—",
+                    "New genuine signals will wait here for entry."
+                )
+            } else {
+                pendingOrders.forEach { order ->
+                    page.addView(
+                        orderCard(context, order, onOpenChart),
+                        matchParams().apply {
+                            topMargin = dp(context, 8)
                         }
-                    }
+                    )
                 }
             }
 
@@ -278,7 +286,7 @@ object PaperTradingScreen {
                 addCard(
                     "No open positions",
                     "—",
-                    "Create a paper order to see it here."
+                    "Entries open automatically when price reaches a signal range."
                 )
             } else {
                 openPositions.forEach { position ->
@@ -288,50 +296,6 @@ object PaperTradingScreen {
                         position,
                         order,
                         onOpenChart
-                    )
-
-                    val closeButton = Button(context).apply {
-                        text = "Close Position"
-                        isAllCaps = false
-                        textSize = 12f
-                        setTextColor(TEXT)
-                        background = rounded(context, PANEL_ALT, 9)
-
-                        setOnClickListener {
-                            showInputDialog(
-                                context,
-                                "Close ${position.symbol}",
-                                "Exit price",
-                                InputType.TYPE_CLASS_NUMBER or
-                                    InputType.TYPE_NUMBER_FLAG_DECIMAL
-                            ) { input ->
-                                val exit = input.toDoubleOrNull()
-
-                                if (exit == null ||
-                                    !exit.isFinite() ||
-                                    exit <= 0.0
-                                ) {
-                                    toast(context, "Enter a valid exit price.")
-                                } else {
-                                    runOperation { engine ->
-                                        engine.closeOrder(
-                                            orderId = position.orderId,
-                                            exitPrice = exit
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    card.addView(
-                        closeButton,
-                        LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            dp(context, 44)
-                        ).apply {
-                            topMargin = dp(context, 10)
-                        }
                     )
 
                     page.addView(
@@ -350,7 +314,7 @@ object PaperTradingScreen {
                 addCard(
                     "No paper orders",
                     "—",
-                    "Created orders will appear here."
+                    "Forwarded genuine signals will appear here."
                 )
             } else {
                 orders.forEach { order ->
@@ -363,9 +327,30 @@ object PaperTradingScreen {
                 }
             }
 
+            addText("Recent Executions", 17, TEXT, true)
+                .setPadding(0, dp(context, 16), 0, dp(context, 4))
+
+            if (data.executions.isEmpty()) {
+                addCard(
+                    "No executions",
+                    "—",
+                    "Entries, partial targets and exits will appear here."
+                )
+            } else {
+                data.executions.take(30).forEach { execution ->
+                    page.addView(
+                        executionCard(context, execution),
+                        matchParams().apply {
+                            topMargin = dp(context, 8)
+                        }
+                    )
+                }
+            }
+
             addText(
-                "Practice only. Starting balance is configured, " +
-                    "not a live broker balance. No broker orders are sent.",
+                "Practice only. Trades are opened, scaled out and closed " +
+                    "automatically from genuine signals. No broker orders " +
+                    "are sent and the original signal formulas are unchanged.",
                 12,
                 MUTED
             ).setPadding(0, dp(context, 20), 0, 0)
@@ -471,118 +456,9 @@ object PaperTradingScreen {
         }
         return ScreenData(
             snapshot = engine.snapshot(),
-            orders = engine.getOrders()
+            orders = engine.getOrders(),
+            executions = engine.getExecutions(limit = 100)
         )
-    }
-
-    private fun showCreateOrderDialog(
-        context: Context,
-        onSubmit: (String, String, Int, Double) -> Unit
-    ) {
-        val layout = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(context, 20), dp(context, 8),
-                dp(context, 20), dp(context, 4))
-        }
-
-        fun field(
-            hintText: String,
-            type: Int
-        ): EditText {
-            val edit = EditText(context).apply {
-                hint = hintText
-                inputType = type
-                setSingleLine(true)
-                setTextColor(TEXT)
-                setHintTextColor(MUTED)
-            }
-            layout.addView(edit)
-            return edit
-        }
-
-        val symbol = field(
-            "Symbol (e.g. RELIANCE)",
-            InputType.TYPE_CLASS_TEXT or
-                InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
-        )
-
-        val quantity = field(
-            "Quantity",
-            InputType.TYPE_CLASS_NUMBER
-        )
-
-        val price = field(
-            "Entry price",
-            InputType.TYPE_CLASS_NUMBER or
-                InputType.TYPE_NUMBER_FLAG_DECIMAL
-        )
-
-        var side = OrderSide.BUY.name
-
-        val sideButton = Button(context).apply {
-            text = "Side: BUY (tap to change)"
-            isAllCaps = false
-            setOnClickListener {
-                side = if (side == OrderSide.BUY.name) {
-                    OrderSide.SELL.name
-                } else {
-                    OrderSide.BUY.name
-                }
-                text = "Side: $side (tap to change)"
-            }
-        }
-
-        layout.addView(sideButton)
-
-        AlertDialog.Builder(context)
-            .setTitle("Create Paper Order")
-            .setView(layout)
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Save Order", null)
-            .create()
-            .also { dialog ->
-                dialog.setOnShowListener {
-                    dialog.getButton(AlertDialog.BUTTON_POSITIVE)
-                        .setOnClickListener {
-                            val symbolValue = symbol.text.toString().trim()
-                            val quantityValue = quantity.text.toString()
-                                .trim().toIntOrNull()
-                            val priceValue = price.text.toString()
-                                .trim().toDoubleOrNull()
-
-                            if (symbolValue.isBlank()) {
-                                toast(context, "Enter a symbol.")
-                                return@setOnClickListener
-                            }
-
-                            if (quantityValue == null ||
-                                quantityValue <= 0
-                            ) {
-                                toast(context, "Enter a valid quantity.")
-                                return@setOnClickListener
-                            }
-
-                            if (priceValue == null ||
-                                !priceValue.isFinite() ||
-                                priceValue <= 0.0
-                            ) {
-                                toast(context, "Enter a valid entry price.")
-                                return@setOnClickListener
-                            }
-
-                            dialog.dismiss()
-                            onSubmit(
-                                symbolValue,
-                                side,
-                                quantityValue,
-                                priceValue
-                            )
-                        }
-                }
-
-                AppDesign.styleDialog(dialog)
-                dialog.show()
-            }
     }
 
     private fun showInputDialog(
@@ -676,15 +552,29 @@ object PaperTradingScreen {
             }
         )
 
-        if (order?.stopLoss != null || order?.target != null) {
+        if (order != null) {
             card.addView(
                 makeText(
                     context,
                     "SL: ${order.stopLoss?.let { rupees(it) } ?: "—"}  |  " +
-                        "Target: ${order.target?.let { rupees(it) } ?: "—"}",
+                        "T1: ${order.target1?.let { rupees(it) } ?: "—"}  |  " +
+                        "T2: ${order.target2?.let { rupees(it) } ?: "—"}  |  " +
+                        "T3: ${order.target3?.let { rupees(it) } ?: "—"}",
                     12, MUTED, false
                 ).apply {
                     setPadding(0, dp(context, 5), 0, 0)
+                }
+            )
+
+            card.addView(
+                makeText(
+                    context,
+                    "Remaining: ${order.remainingQuantity}  |  " +
+                        "Signal: ${order.signalCategory.ifBlank { "—" }} · " +
+                        "${order.strategyId.ifBlank { "—" }}",
+                    12, MUTED, false
+                ).apply {
+                    setPadding(0, dp(context, 4), 0, 0)
                 }
             )
         }
@@ -722,8 +612,8 @@ object PaperTradingScreen {
             makeText(
                 context,
                 "Quantity: ${order.quantity}  |  " +
-                    "Entry: ${rupees(order.entryPrice)}  |  " +
-                    "Source: ${order.entrySource}",
+                    "Remaining: ${order.remainingQuantity}  |  " +
+                    "Entry: ${rupees(order.entryPrice)}",
                 13, TEXT, false
             ).apply {
                 setPadding(0, dp(context, 7), 0, 0)
@@ -733,12 +623,28 @@ object PaperTradingScreen {
         card.addView(
             makeText(
                 context,
-                "Status: ${order.status}",
+                "Status: ${order.status}  |  " +
+                    "Signal: ${order.signalCategory.ifBlank { "—" }} · " +
+                    "${order.strategyId.ifBlank { "—" }} " +
+                    "v${order.strategyVersion}",
                 12, MUTED, false
             ).apply {
                 setPadding(0, dp(context, 5), 0, 0)
             }
         )
+
+        if (order.entryLow != null || order.entryHigh != null) {
+            card.addView(
+                makeText(
+                    context,
+                    "Entry range: ${order.entryLow?.let { rupees(it) } ?: "—"}" +
+                        " – ${order.entryHigh?.let { rupees(it) } ?: "—"}",
+                    12, MUTED, false
+                ).apply {
+                    setPadding(0, dp(context, 4), 0, 0)
+                }
+            )
+        }
 
         if (order.exitPrice != null) {
             card.addView(
@@ -766,15 +672,73 @@ object PaperTradingScreen {
             )
         }
 
-        if (order.stopLoss != null || order.target != null) {
+        card.addView(
+            makeText(
+                context,
+                "SL: ${order.stopLoss?.let { rupees(it) } ?: "—"}  |  " +
+                    "T1: ${order.target1?.let { rupees(it) } ?: "—"}  |  " +
+                    "T2: ${order.target2?.let { rupees(it) } ?: "—"}  |  " +
+                    "T3: ${order.target3?.let { rupees(it) } ?: "—"}",
+                12, MUTED, false
+            ).apply {
+                setPadding(0, dp(context, 5), 0, 0)
+            }
+        )
+
+        if (order.exitReason.isNotBlank()) {
             card.addView(
                 makeText(
                     context,
-                    "SL: ${order.stopLoss?.let { rupees(it) } ?: "—"}  |  " +
-                        "Target: ${order.target?.let { rupees(it) } ?: "—"}",
+                    "Exit reason: ${order.exitReason}",
                     12, MUTED, false
                 ).apply {
-                    setPadding(0, dp(context, 5), 0, 0)
+                    setPadding(0, dp(context, 4), 0, 0)
+                }
+            )
+        }
+
+        return card
+    }
+
+    private fun executionCard(
+        context: Context,
+        execution: PaperExecution
+    ): LinearLayout {
+        val card = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(context, 13), dp(context, 10),
+                dp(context, 13), dp(context, 10))
+            background = rounded(context, PANEL, 10)
+        }
+
+        card.addView(
+            makeText(
+                context,
+                "#${execution.orderId} · ${execution.kind}",
+                14, TEXT, true
+            )
+        )
+
+        card.addView(
+            makeText(
+                context,
+                "Qty: ${execution.quantity}  |  " +
+                    "Price: ${rupees(execution.price)}  |  " +
+                    "Net P&L: ${rupees(execution.netPnl)}",
+                13, TEXT, false
+            ).apply {
+                setPadding(0, dp(context, 5), 0, 0)
+            }
+        )
+
+        if (execution.note.isNotBlank()) {
+            card.addView(
+                makeText(
+                    context,
+                    execution.note,
+                    12, MUTED, false
+                ).apply {
+                    setPadding(0, dp(context, 4), 0, 0)
                 }
             )
         }
