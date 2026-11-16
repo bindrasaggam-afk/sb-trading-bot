@@ -3,6 +3,7 @@ package com.sb.signals.domain.indicators
 import com.sb.backend.market.TimeframeBuckets
 import com.sb.backend.market.model.MarketCandle
 import com.sb.signals.TestSignals
+import com.sb.signals.domain.StrategyDefaults
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -40,6 +41,46 @@ class SignalIndicatorEngineTest {
         val expected = 2.0 * sqrt(2.0)
         assertEquals(3.0 + expected, result.upper.last()!!, 0.000001)
         assertEquals(3.0 - expected, result.lower.last()!!, 0.000001)
+    }
+
+    @Test
+    fun priceSmaUsesClosingPricesAndIsSeparateFromVolumeAverage() {
+        val candles = TestSignals.candles(
+            count = 4,
+            start = TestSignals.testNow - 4 * 300_000L,
+            intervalMillis = 300_000L,
+            startPrice = 100.0,
+            step = 1.0,
+            volume = 100L
+        )
+        val config = StrategyDefaults.intraday("5m").copy(
+            smaPeriod = 3,
+            volumePeriod = 2
+        )
+
+        val result = SignalIndicatorEngine.compute(candles, config)
+
+        assertEquals(
+            (candles[1].close + candles[2].close + candles[3].close) / 3.0,
+            result.values["SMA3"]!!,
+            0.000001
+        )
+        assertEquals(
+            ((candles[2].volume + candles[3].volume) / 2.0).toDouble(),
+            result.values["VolumeMA2"]!!,
+            0.000001
+        )
+        assertEquals(
+            config.smaPeriod.toDouble(),
+            SignalIndicatorEngine.indicatorParameters(config)["SMA Period"]!!,
+            0.000001
+        )
+        assertEquals(
+            config.supertrendMultiplier,
+            SignalIndicatorEngine.indicatorParameters(config)
+                ["Supertrend Multiplier"]!!,
+            0.000001
+        )
     }
 
     @Test

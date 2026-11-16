@@ -2,6 +2,13 @@ package com.sb.signals.services
 
 import android.content.Context
 import android.util.Log
+import androidx.work.BackoffPolicy
+import androidx.work.Constraints
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.PeriodicWorkRequest
+import androidx.work.WorkManager
+import com.sb.backend.core.BackendManager
 import com.sb.signals.data.SignalDatabase
 import com.sb.signals.data.SignalRepository
 import java.util.concurrent.ExecutorService
@@ -16,6 +23,7 @@ object SignalsPlatform {
     private const val INITIAL_DELAY_SECONDS = 15L
 
     private val lock = Any()
+    private val analysisLock = Any()
 
     @Volatile
     private var database: SignalDatabase? = null
@@ -80,7 +88,7 @@ object SignalsPlatform {
         scanScheduler.scheduleWithFixedDelay(
             {
                 try {
-                    analysisService?.run()
+                    runAnalysis()
                 } catch (error: Exception) {
                     Log.e(TAG, "Scheduled signal analysis failed", error)
                 }
@@ -89,6 +97,7 @@ object SignalsPlatform {
             SCAN_INTERVAL_SECONDS,
             TimeUnit.SECONDS
         )
+        scheduleBackgroundObservation(context)
         true
     }
 
@@ -116,19 +125,13 @@ object SignalsPlatform {
             onComplete(null)
             return false
         }
-        val service = analysisService
-        if (service == null) {
+        if (analysisService == null) {
             onComplete(null)
             return false
         }
         return try {
             worker.execute {
-                val summary = try {
-                    service.run()
-                } catch (error: Exception) {
-                    Log.e(TAG, "Manual signal analysis failed", error)
-                    null
-                }
+                val summary = runAnalysis()
                 try {
                     onComplete(summary)
                 } catch (error: Exception) {
@@ -139,6 +142,69 @@ object SignalsPlatform {
         } catch (_: Exception) {
             onComplete(null)
             false
+        }
+    }
+
+    fun scheduleBackgroundObservation(context: Context) {
+        try {
+            val constraints = Constraints.Builder()
+                .setRequiredNetworkType(NetworkType.CONNECTED)
+                .build()
+            val request = PeriodicWorkRequest.Builder(
+                SignalObservationWorker::class.java,
+                SignalObservationPolicy.INTERVAL_MINUTES,
+                TimeUnit.MINUTES
+            )
+                .setConstraints(constraints)
+                .setBackoffCriteria(
+                    BackoffPolicy.EXPONENTIAL,
+                    15L,
+                    TimeUnit.MINUTES
+                )
+                .build()
+            WorkManager.getInstance(context.applicationContext)
+                .enqueueUniquePeriodicWork(
+                    SignalObservationPolicy.WORK_NAME,
+                    ExistingPeriodicWorkPolicy.KEEP,
+                    request
+                )
+        } catch (error: Exception) {
+            Log.e(TAG, "Background observation scheduling failed", error)
+        }
+    }
+
+    fun runBackgroundObservation(context: Context): Boolean {
+        ensureInitialized(context)
+        val now = System.currentTimeMillis()
+        val lastFinishedAt = try {
+            signalRepository?.getLastRun()?.finishedAt
+        } catch (error: Exception) {
+            Log.e(TAG, "Last signal run query failed", error)
+            null
+        }
+        if (!SignalObservationPolicy.shouldAnalyze(
+                lastFinishedAt,
+                now,
+                BackendManager.isInitialized()
+            )
+        ) {
+            return true
+        }
+        return runAnalysis() != null
+    }
+
+    private fun runAnalysis(): AnalysisSummary? {
+        val service = synchronized(lock) {
+            analysisService
+        } ?: return null
+        return synchronized(analysisLock) {
+            try {
+                service.seedStrategyVersions()
+                service.run()
+            } catch (error: Exception) {
+                Log.e(TAG, "Signal analysis failed", error)
+                null
+            }
         }
     }
 

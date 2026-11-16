@@ -192,7 +192,9 @@ private class SignalsController(
         addText(
             card,
             if (running) {
-                "Signals refresh every five minutes when subscribed market data is available."
+                "Signals refresh every five minutes while the market service is active. " +
+                    "Persistent WorkManager recovery runs at Android's 15-minute " +
+                    "minimum; this is periodic observation, not real-time monitoring."
             } else {
                 "Start analysis from this screen. No Paper Trading state is touched."
             },
@@ -628,6 +630,9 @@ private class SignalsController(
             "Entry zone",
             "${price(signal.entryLow)} - ${price(signal.entryHigh)}"
         )
+        signal.entryFillPrice?.let {
+            addKeyValue(summary, "Fill", price(it))
+        }
         addKeyValue(summary, "Stop-loss", price(signal.stopLoss))
         addKeyValue(
             summary,
@@ -903,12 +908,20 @@ private class SignalsController(
                     result.byStrategy
                 )
                 addSliceSection(
+                    "By timeframe",
+                    result.byTimeframe
+                )
+                addSliceSection(
                     "By holding period",
                     result.byHoldingPeriod
                 )
                 addSliceSection(
                     "By direction",
                     result.byDirection
+                )
+                addSliceSection(
+                    "By symbol",
+                    result.bySymbol
                 )
                 addSliceSection(
                     "By volatility",
@@ -919,8 +932,16 @@ private class SignalsController(
                     result.byDataQuality
                 )
                 addSliceSection(
+                    "By confidence calibration",
+                    result.byConfidence
+                )
+                addSliceSection(
                     "By higher-timeframe trend",
                     result.byHigherTimeframeTrend
+                )
+                addSliceSection(
+                    "Hourly report",
+                    result.byHour
                 )
                 addSliceSection(
                     "Monthly report",
@@ -954,6 +975,16 @@ private class SignalsController(
         )
         addStatRow(
             card,
+            "Triggered / expired without entry",
+            "${stats.triggered} / ${stats.untriggeredExpired}"
+        )
+        addStatRow(
+            card,
+            "Trigger rate",
+            "${number(stats.triggerRatePct, 1)}%"
+        )
+        addStatRow(
+            card,
             "Evaluated trades",
             "${stats.evaluated}  (open ${stats.open}, invalidated ${stats.invalidated})"
         )
@@ -964,9 +995,24 @@ private class SignalsController(
         )
         addStatRow(
             card,
-            "Win rate",
+            "Completed-trade win rate",
             "${number(stats.winRatePct, 1)}%",
             if (stats.winRatePct >= 50.0) AppDesign.positive else AppDesign.accent
+        )
+        addStatRow(
+            card,
+            "Directional accuracy",
+            "${number(stats.directionalAccuracyPct, 1)}%",
+            if (stats.directionalAccuracyPct >= 50.0) {
+                AppDesign.positive
+            } else {
+                AppDesign.accent
+            }
+        )
+        addStatRow(
+            card,
+            "Trade coverage",
+            "${number(stats.coveragePct, 1)}%"
         )
         addStatRow(
             card,
@@ -995,7 +1041,7 @@ private class SignalsController(
         )
         addStatRow(
             card,
-            "Max drawdown",
+            "Signal-sequence drawdown",
             "${number(stats.maxDrawdownPct, 2)}%",
             AppDesign.negative
         )
@@ -1071,8 +1117,8 @@ private class SignalsController(
         addText(
             card,
             "Completed outcomes include target, stop, time expiry and closed signals. " +
-                "Expired signals without an entry are stored but excluded from win-rate " +
-                "and expectancy denominators.",
+                "Expired or invalidated signals without an entry are stored but " +
+                "excluded from win-rate and expectancy denominators.",
             11f,
             AppDesign.textMuted
         )
@@ -1081,6 +1127,15 @@ private class SignalsController(
             "When a candle touches both stop and target, the stop is assumed first. " +
                 "Net return subtracts round-trip brokerage and slippage from the " +
                 "strategy configuration.",
+            11f,
+            AppDesign.textMuted,
+            topPadding = 5
+        )
+        addText(
+            card,
+            "Drawdown is signal-level and assumes sequential non-overlapping " +
+                "trades. It is not a portfolio equity curve. Trigger rate is " +
+                "triggered signals divided by all generated signals.",
             11f,
             AppDesign.textMuted,
             topPadding = 5

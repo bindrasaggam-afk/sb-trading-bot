@@ -187,7 +187,8 @@ class SignalRepository(
 
     fun applyEvaluation(
         before: ResearchSignal,
-        after: ResearchSignal
+        after: ResearchSignal,
+        eventPrice: Double? = null
     ): Boolean = synchronized(lock) {
         val db = database.writableDatabase
         db.beginTransaction()
@@ -200,6 +201,7 @@ class SignalRepository(
                 put("target3_at", after.target3At)
                 put("stopped_at", after.stoppedAt)
                 put("closed_at", after.closedAt)
+                put("entry_fill_price", after.entryFillPrice)
                 put("exit_price", after.exitPrice)
                 put("outcome_r", after.outcomeR)
                 put("outcome_pnl_percent", after.outcomePnlPercent)
@@ -225,7 +227,7 @@ class SignalRepository(
                 arrayOf(before.id.toString())
             )
             if (updated > 0) {
-                appendTransitions(db, before, after)
+                appendTransitions(db, before, after, eventPrice)
             }
             db.setTransactionSuccessful()
             updated > 0
@@ -238,22 +240,57 @@ class SignalRepository(
         config: StrategyConfig,
         notes: String = ""
     ): Boolean = synchronized(lock) {
+        val configJson = SignalJson.encodeConfig(config)
+        val existing = versionConfig(config.strategyId, config.version)
+        if (existing != null) {
+            return SignalStrategyVersionPolicy.canSave(existing, config)
+        }
+
         val values = ContentValues().apply {
             put("strategy_id", config.strategyId)
             put("version", config.version)
             put("category", config.category.name)
             put("name", config.name)
-            put("config_json", SignalJson.encodeConfig(config))
+            put("config_json", configJson)
             put("created_at", System.currentTimeMillis())
             put("active", 1)
             put("notes", notes)
         }
-        database.writableDatabase.insertWithOnConflict(
+        val inserted = database.writableDatabase.insertWithOnConflict(
             SignalMigrations.TABLE_VERSIONS,
             null,
             values,
-            SQLiteDatabase.CONFLICT_REPLACE
-        ) != -1L
+            SQLiteDatabase.CONFLICT_IGNORE
+        )
+        if (inserted != -1L) {
+            true
+        } else {
+            val raced = versionConfig(config.strategyId, config.version)
+            raced != null &&
+                SignalStrategyVersionPolicy.canSave(raced, config)
+        }
+    }
+
+    private fun versionConfig(
+        strategyId: String,
+        version: String
+    ): String? {
+        database.readableDatabase.query(
+            SignalMigrations.TABLE_VERSIONS,
+            arrayOf("config_json"),
+            "strategy_id = ? AND version = ?",
+            arrayOf(strategyId, version),
+            null,
+            null,
+            null,
+            "1"
+        ).use { cursor ->
+            return if (cursor.moveToFirst()) {
+                cursor.getString(cursor.getColumnIndexOrThrow("config_json"))
+            } else {
+                null
+            }
+        }
     }
 
     fun getStrategyVersions(): List<SignalStrategyVersion> =
@@ -408,6 +445,9 @@ class SignalRepository(
             strategyVersion = cursor.getString(
                 cursor.getColumnIndexOrThrow("strategy_version")
             ),
+            strategyConfigJson = cursor.getStringOrNull(
+                "strategy_config_json"
+            ).orEmpty(),
             candleTimestamp = cursor.getLong(
                 cursor.getColumnIndexOrThrow("candle_timestamp")
             ),
@@ -474,6 +514,9 @@ class SignalRepository(
                     cursor.getString(
                         cursor.getColumnIndexOrThrow("confirmations_json")
                     )
+                ),
+                parameters = SignalJson.decodeDoubleMap(
+                    cursor.getStringOrNull("indicator_params_json")
                 )
             ),
             dataQuality = SignalJson.decodeQuality(
@@ -487,6 +530,7 @@ class SignalRepository(
             target3At = cursor.getLongOrNull("target3_at"),
             stoppedAt = cursor.getLongOrNull("stopped_at"),
             closedAt = cursor.getLongOrNull("closed_at"),
+            entryFillPrice = cursor.getDoubleOrNull("entry_fill_price"),
             exitPrice = cursor.getDoubleOrNull("exit_price"),
             outcomeR = cursor.getDoubleOrNull("outcome_r"),
             outcomePnlPercent = cursor.getDoubleOrNull(
@@ -524,6 +568,7 @@ class SignalRepository(
             put("timeframe", signal.timeframe)
             put("strategy_id", signal.strategyId)
             put("strategy_version", signal.strategyVersion)
+            put("strategy_config_json", signal.strategyConfigJson)
             put("candle_timestamp", signal.candleTimestamp)
             put("generated_at", signal.generatedAt)
             put("reference_price", signal.referencePrice)
@@ -558,6 +603,12 @@ class SignalRepository(
                 )
             )
             put(
+                "indicator_params_json",
+                SignalJson.encodeDoubleMap(
+                    signal.indicatorSnapshot.parameters
+                )
+            )
+            put(
                 "data_quality_json",
                 SignalJson.encodeQuality(signal.dataQuality)
             )
@@ -567,6 +618,7 @@ class SignalRepository(
             put("target3_at", signal.target3At)
             put("stopped_at", signal.stoppedAt)
             put("closed_at", signal.closedAt)
+            put("entry_fill_price", signal.entryFillPrice)
             put("exit_price", signal.exitPrice)
             put("outcome_r", signal.outcomeR)
             put("outcome_pnl_percent", signal.outcomePnlPercent)
@@ -594,7 +646,8 @@ class SignalRepository(
     private fun appendTransitions(
         db: SQLiteDatabase,
         before: ResearchSignal,
-        after: ResearchSignal
+        after: ResearchSignal,
+        eventPrice: Double?
     ) {
         if (after.triggeredAt != null && before.triggeredAt == null) {
             insertEventInternal(
@@ -604,8 +657,8 @@ class SignalRepository(
                     fromStatus = before.status,
                     toStatus = SignalLifecycleStatus.TRIGGERED,
                     eventTime = after.triggeredAt,
-                    price = after.referencePrice,
-                    message = "Entry zone reached"
+                    price = after.entryFillPrice ?: after.referencePrice,
+                    message = "Entry filled"
                 )
             )
         }
@@ -679,7 +732,7 @@ class SignalRepository(
                     eventTime = after.closedAt
                         ?: after.lastEvaluatedAt
                         ?: after.generatedAt,
-                    price = after.exitPrice,
+                    price = eventPrice ?: after.exitPrice,
                     message = after.outcomeReason
                         ?: finalStatus.label
                 )

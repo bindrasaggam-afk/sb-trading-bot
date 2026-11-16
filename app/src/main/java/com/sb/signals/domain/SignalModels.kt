@@ -46,6 +46,7 @@ enum class SignalLifecycleStatus(val label: String) {
         get() = this == TARGET_3_HIT ||
             this == STOPLOSS_HIT ||
             this == EXPIRED ||
+            this == INVALIDATED ||
             this == CLOSED
 
     companion object {
@@ -70,7 +71,9 @@ enum class HoldingPeriod(
     ONE_MONTH("1 month", 29, 45, HoldingFilterGroup.MONTHS),
     TWO_MONTHS("2 months", 46, 75, HoldingFilterGroup.MONTHS),
     THREE_MONTHS("3 months", 76, 120, HoldingFilterGroup.MONTHS),
-    SIX_MONTHS("6 months", 121, 220, HoldingFilterGroup.MONTHS);
+    FOUR_MONTHS("4 months", 121, 150, HoldingFilterGroup.MONTHS),
+    FIVE_MONTHS("5 months", 151, 180, HoldingFilterGroup.MONTHS),
+    SIX_MONTHS("6 months", 181, 220, HoldingFilterGroup.MONTHS);
 
     companion object {
         fun fromName(value: String): HoldingPeriod? =
@@ -96,7 +99,8 @@ data class SignalLevels(
 
 data class SignalIndicatorSnapshot(
     val values: Map<String, Double?> = emptyMap(),
-    val confirmations: Map<String, Boolean> = emptyMap()
+    val confirmations: Map<String, Boolean> = emptyMap(),
+    val parameters: Map<String, Double?> = emptyMap()
 )
 
 data class DataQuality(
@@ -129,6 +133,7 @@ data class ResearchSignal(
     val timeframe: String,
     val strategyId: String,
     val strategyVersion: String,
+    val strategyConfigJson: String = "",
     val candleTimestamp: Long,
     val generatedAt: Long,
     val referencePrice: Double,
@@ -155,6 +160,7 @@ data class ResearchSignal(
     val target3At: Long? = null,
     val stoppedAt: Long? = null,
     val closedAt: Long? = null,
+    val entryFillPrice: Double? = null,
     val exitPrice: Double? = null,
     val outcomeR: Double? = null,
     val outcomePnlPercent: Double? = null,
@@ -165,7 +171,7 @@ data class ResearchSignal(
     val maxFavorableExcursionPercent: Double? = null,
     val maxAdverseExcursionPercent: Double? = null,
     val lastEvaluatedAt: Long? = null,
-    val evaluationVersion: String = "1.0"
+    val evaluationVersion: String = "2.0"
 ) {
     val dedupeKey: String
         get() = listOf(
@@ -233,11 +239,13 @@ data class OutcomeResult(
     val status: SignalLifecycleStatus,
     val eventTime: Long,
     val exitPrice: Double?,
+    val eventPrice: Double? = null,
     val outcomeR: Double?,
     val outcomePnlPercent: Double?,
     val outcomeNetPnlPercent: Double?,
     val outcomeCostPercent: Double?,
     val reason: String,
+    val fillPrice: Double? = null,
     val triggeredAt: Long? = null,
     val target1At: Long? = null,
     val target2At: Long? = null,

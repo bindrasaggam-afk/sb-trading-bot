@@ -2,6 +2,7 @@ package com.sb.signals.services
 
 import com.sb.backend.market.model.MarketCandle
 import com.sb.signals.TestSignals
+import com.sb.signals.domain.SignalDirection
 import com.sb.signals.domain.SignalLifecycleStatus
 import com.sb.signals.domain.StrategyDefaults
 import org.junit.Assert.assertEquals
@@ -36,6 +37,99 @@ class SignalOutcomeEvaluatorTest {
         assertEquals(106.0, result.exitPrice!!, 0.000001)
         assertEquals(3.0, result.outcomeR!!, 0.000001)
         assertTrue(result.outcomeNetPnlPercent!! < result.outcomePnlPercent!!)
+    }
+
+    @Test
+    fun entryFillPriceDrivesOutcomeReturns() {
+        val base = TestSignals.testNow
+        val signal = TestSignals.signal(expiresAt = base + 86_400_000L)
+        val future = listOf(
+            candle(base, 99.5, 106.5, 99.2, 105.0)
+        )
+
+        val result = SignalOutcomeEvaluator.evaluate(
+            signal,
+            future,
+            now = base + 3_600_000L,
+            config = config
+        )!!
+
+        assertEquals(99.5, result.fillPrice!!, 0.000001)
+        assertEquals(SignalLifecycleStatus.TARGET_3_HIT, result.status)
+        assertEquals(6.5 / 1.5, result.outcomeR!!, 0.000001)
+        assertEquals(6.5 / 99.5 * 100.0, result.outcomePnlPercent!!, 0.000001)
+    }
+
+    @Test
+    fun entryFillPriceStaysInsideEntryZone() {
+        val base = TestSignals.testNow
+        val signal = TestSignals.signal(expiresAt = base + 86_400_000L)
+        val future = listOf(
+            candle(base, 98.5, 99.4, 98.5, 99.3)
+        )
+
+        val result = SignalOutcomeEvaluator.evaluate(
+            signal,
+            future,
+            now = base + 3_600_000L,
+            config = config
+        )!!
+
+        assertEquals(99.0, result.fillPrice!!, 0.000001)
+        assertEquals(SignalLifecycleStatus.TRIGGERED, result.status)
+    }
+
+    @Test
+    fun reevaluationUsesPersistedFillPrice() {
+        val base = TestSignals.testNow
+        val signal = TestSignals.signal(
+            status = SignalLifecycleStatus.TRIGGERED,
+            triggeredAt = base,
+            fillPrice = 99.4,
+            expiresAt = base + 86_400_000L
+        )
+        val future = listOf(
+            candle(base, 100.0, 106.5, 99.5, 105.0)
+        )
+
+        val result = SignalOutcomeEvaluator.evaluate(
+            signal,
+            future,
+            now = base + 3_600_000L,
+            config = config
+        )!!
+
+        assertEquals(99.4, result.fillPrice!!, 0.000001)
+        assertEquals(SignalLifecycleStatus.TARGET_3_HIT, result.status)
+        assertEquals(6.6 / 1.4, result.outcomeR!!, 0.000001)
+    }
+
+    @Test
+    fun sellEntryUsesFillPriceForReturns() {
+        val base = TestSignals.testNow
+        val signal = TestSignals.signal(
+            direction = SignalDirection.SELL,
+            reference = 100.0,
+            stop = 102.0,
+            target1 = 98.0,
+            target2 = 96.0,
+            target3 = 94.0,
+            expiresAt = base + 86_400_000L
+        )
+        val future = listOf(
+            candle(base, 100.5, 101.0, 93.5, 94.0)
+        )
+
+        val result = SignalOutcomeEvaluator.evaluate(
+            signal,
+            future,
+            now = base + 3_600_000L,
+            config = config
+        )!!
+
+        assertEquals(100.5, result.fillPrice!!, 0.000001)
+        assertEquals(SignalLifecycleStatus.TARGET_3_HIT, result.status)
+        assertEquals(6.5 / 1.5, result.outcomeR!!, 0.000001)
     }
 
     @Test
@@ -82,6 +176,61 @@ class SignalOutcomeEvaluatorTest {
     }
 
     @Test
+    fun stopBeforeEntryInvalidatesWithoutOutcome() {
+        val base = TestSignals.testNow
+        val signal = TestSignals.signal(expiresAt = base + 86_400_000L)
+        val future = listOf(
+            candle(base, 97.5, 98.5, 96.5, 97.0)
+        )
+
+        val result = SignalOutcomeEvaluator.evaluate(
+            signal,
+            future,
+            now = base + 3_600_000L,
+            config = config
+        )!!
+
+        assertEquals(SignalLifecycleStatus.INVALIDATED, result.status)
+        assertEquals(base, result.closedAt)
+        assertNull(result.triggeredAt)
+        assertNull(result.fillPrice)
+        assertNull(result.outcomeR)
+        assertEquals(signal.stopLoss, result.eventPrice!!, 0.000001)
+        assertEquals("Invalidated before entry: stop reached", result.reason)
+    }
+
+    @Test
+    fun targetBeforeEntryInvalidatesAsMissedEntry() {
+        val base = TestSignals.testNow
+        val signal = TestSignals.signal(expiresAt = base + 86_400_000L)
+        val future = listOf(
+            candle(base, 102.5, 106.5, 102.2, 105.0)
+        )
+
+        val result = SignalOutcomeEvaluator.evaluate(
+            signal,
+            future,
+            now = base + 3_600_000L,
+            config = config
+        )!!
+
+        assertEquals(SignalLifecycleStatus.INVALIDATED, result.status)
+        assertNull(result.triggeredAt)
+        assertNull(result.fillPrice)
+        assertEquals(signal.target3, result.eventPrice!!, 0.000001)
+        assertEquals(
+            "Invalidated before entry: target reached",
+            result.reason
+        )
+    }
+
+    @Test
+    fun invalidatedStatusIsTerminal() {
+        assertTrue(SignalLifecycleStatus.INVALIDATED.isCompleted)
+        assertTrue(!SignalLifecycleStatus.INVALIDATED.isOpen)
+    }
+
+    @Test
     fun expiryWithoutEntryIsCompletedButHasNoOutcome() {
         val base = TestSignals.testNow
         val signal = TestSignals.signal(
@@ -95,7 +244,7 @@ class SignalOutcomeEvaluatorTest {
             expiresAt = base + 1_800_000L
         )
         val future = listOf(
-            candle(base, 100.0, 105.0, 99.0, 104.0)
+            candle(base, 109.0, 109.5, 108.5, 109.0)
         )
 
         val result = SignalOutcomeEvaluator.evaluate(

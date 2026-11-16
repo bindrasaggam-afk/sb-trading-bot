@@ -270,31 +270,94 @@ class SettingsScreen(private val context: Context) {
         label(body, "Local API Server", 18f, yellow, true)
         label(
             body,
-            "Authenticated requests to 127.0.0.1:10000 must send the X-SB-Token header.",
+            "Read requests to 127.0.0.1:10000 use X-SB-Token. " +
+                "Admin writes use X-SB-Admin-Token.",
             11f,
             grey
         )
-        val localApiToken = LocalApiToken.get(context)
-        body.addView(TextView(context).apply {
-            text = localApiToken
+        val localTokens = try {
+            LocalApiToken.tokens(context)
+        } catch (error: Exception) {
+            statusText.text = "API token setup failed: " +
+                error.javaClass.simpleName
+            statusText.setTextColor(Color.RED)
+            return scroll
+        }
+        val readTokenView = tokenView(localTokens.readOnly)
+        val adminTokenView = tokenView(localTokens.admin)
+        body.addView(labelView("READ-ONLY TOKEN", 10f, grey, true))
+        body.addView(readTokenView)
+        body.addView(actionButton("Copy Read-Only Token") {
+            copyToken("SB Read-Only API Token", readTokenView.text.toString())
+        })
+        body.addView(labelView("ADMIN TOKEN", 10f, grey, true))
+        body.addView(adminTokenView)
+        body.addView(actionButton("Copy Admin Token") {
+            copyToken("SB Admin API Token", adminTokenView.text.toString())
+        })
+        body.addView(actionButton("Rotate API Tokens") {
+            AlertDialog.Builder(context)
+                .setTitle("Rotate API tokens?")
+                .setMessage("All existing API tokens will stop working immediately.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Rotate") { _, _ ->
+                    LocalApiToken.reset(context)
+                    val rotated = LocalApiToken.tokens(context)
+                    readTokenView.text = rotated.readOnly
+                    adminTokenView.text = rotated.admin
+                    statusText.text = "API tokens rotated. Old tokens are revoked."
+                    statusText.setTextColor(Color.GREEN)
+                }
+                .create()
+                .also { dialog ->
+                    AppDesign.styleDialog(dialog)
+                    dialog.show()
+                }
+        })
+
+        return scroll
+    }
+
+    private fun tokenView(value: String): TextView {
+        return TextView(context).apply {
+            text = value
             textSize = 12f
             setTextColor(white)
             setTextIsSelectable(true)
             setPadding(dp(12), dp(9), dp(12), dp(9))
             background = AppDesign.fieldBackground(context, 9)
-        })
-        body.addView(actionButton("Copy Local API Token") {
-            val clipboard = context.getSystemService(
-                Context.CLIPBOARD_SERVICE
-            ) as ClipboardManager
-            clipboard.setPrimaryClip(
-                ClipData.newPlainText("SB Local API Token", localApiToken)
-            )
-            statusText.text = "Local API token copied."
-            statusText.setTextColor(Color.GREEN)
-        })
+        }
+    }
 
-        return scroll
+    private fun labelView(
+        value: String,
+        size: Float,
+        color: Int,
+        bold: Boolean
+    ): TextView {
+        return TextView(context).apply {
+            text = value
+            textSize = size
+            setTextColor(color)
+            setTypeface(
+                typeface,
+                if (bold) {
+                    android.graphics.Typeface.BOLD
+                } else {
+                    android.graphics.Typeface.NORMAL
+                }
+            )
+            setPadding(0, dp(8), 0, dp(4))
+        }
+    }
+
+    private fun copyToken(label: String, value: String) {
+        val clipboard = context.getSystemService(
+            Context.CLIPBOARD_SERVICE
+        ) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText(label, value))
+        statusText.text = "$label copied."
+        statusText.setTextColor(Color.GREEN)
     }
 
     private fun saveConfiguration(

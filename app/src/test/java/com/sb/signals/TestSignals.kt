@@ -95,6 +95,7 @@ object TestSignals {
         target3At: Long? = null,
         stoppedAt: Long? = null,
         closedAt: Long? = null,
+        fillPrice: Double? = null,
         exitPrice: Double? = null,
         outcomeNet: Double? = null,
         outcomeR: Double? = null
@@ -149,6 +150,7 @@ object TestSignals {
             target3At = target3At,
             stoppedAt = stoppedAt,
             closedAt = closedAt,
+            entryFillPrice = fillPrice,
             exitPrice = exitPrice,
             outcomeNetPnlPercent = outcomeNet,
             outcomeR = outcomeR,

@@ -25,10 +25,15 @@ data class PerformanceStats(
     val evaluated: Int,
     val open: Int,
     val invalidated: Int,
+    val triggered: Int,
+    val untriggeredExpired: Int,
+    val triggerRatePct: Double,
     val wins: Int,
     val losses: Int,
     val breakeven: Int,
     val winRatePct: Double,
+    val directionalAccuracyPct: Double,
+    val coveragePct: Double,
     val profitFactor: Double,
     val avgWinPct: Double,
     val avgLossPct: Double,
@@ -45,6 +50,8 @@ data class PerformanceStats(
     val byVolatility: Map<String, PerformanceSlice>,
     val byDataQuality: Map<String, PerformanceSlice>,
     val byHigherTimeframeTrend: Map<String, PerformanceSlice>,
+    val byConfidence: Map<String, PerformanceSlice>,
+    val bySymbol: Map<String, PerformanceSlice>,
     val byHour: Map<String, PerformanceSlice>,
     val byMonth: Map<String, PerformanceSlice>
 )
@@ -65,6 +72,26 @@ object PerformanceAnalyzer {
         val breakeven = traded.size - wins - losses
         val winRate = if (traded.isNotEmpty()) {
             wins.toDouble() / traded.size * 100.0
+        } else {
+            0.0
+        }
+        val directionalAccuracy = if (wins + losses > 0) {
+            wins.toDouble() / (wins + losses) * 100.0
+        } else {
+            0.0
+        }
+        val coverage = if (signals.isNotEmpty()) {
+            traded.size.toDouble() / signals.size * 100.0
+        } else {
+            0.0
+        }
+        val triggered = signals.count { it.triggeredAt != null }
+        val untriggeredExpired = signals.count {
+            it.status == SignalLifecycleStatus.EXPIRED &&
+                it.triggeredAt == null
+        }
+        val triggerRate = if (signals.isNotEmpty()) {
+            triggered.toDouble() / signals.size * 100.0
         } else {
             0.0
         }
@@ -144,10 +171,15 @@ object PerformanceAnalyzer {
             invalidated = signals.count {
                 it.status == SignalLifecycleStatus.INVALIDATED
             },
+            triggered = triggered,
+            untriggeredExpired = untriggeredExpired,
+            triggerRatePct = triggerRate,
             wins = wins,
             losses = losses,
             breakeven = breakeven,
             winRatePct = winRate,
+            directionalAccuracyPct = directionalAccuracy,
+            coveragePct = coverage,
             profitFactor = profitFactor,
             avgWinPct = avgWin,
             avgLossPct = avgLoss,
@@ -180,6 +212,12 @@ object PerformanceAnalyzer {
                 } else {
                     "No higher trend confirmation"
                 }
+            },
+            byConfidence = group(traded, "ALL") {
+                confidenceBucket(it)
+            },
+            bySymbol = group(traded, "ALL") {
+                "${it.exchange}:${it.symbol}"
             },
             byHour = group(traded, "ALL") { hourLabel(it.generatedAt) },
             byMonth = group(traded, "ALL") {
@@ -242,6 +280,16 @@ object PerformanceAnalyzer {
             percent < 1.0 -> "Low volatility (<1% ATR)"
             percent < 2.5 -> "Medium volatility (1-2.5% ATR)"
             else -> "High volatility (>2.5% ATR)"
+        }
+    }
+
+    private fun confidenceBucket(signal: ResearchSignal): String {
+        return when {
+            signal.confidence >= 90.0 -> "Confidence 90-100"
+            signal.confidence >= 80.0 -> "Confidence 80-89"
+            signal.confidence >= 70.0 -> "Confidence 70-79"
+            signal.confidence >= 60.0 -> "Confidence 60-69"
+            else -> "Confidence below 60"
         }
     }
 

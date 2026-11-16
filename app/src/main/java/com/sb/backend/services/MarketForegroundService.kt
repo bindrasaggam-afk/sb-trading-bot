@@ -13,6 +13,7 @@ import androidx.core.app.NotificationCompat
 import com.sb.backend.core.BackendManager
 import com.sb.backend.market.MarketDataManager
 import com.sb.backend.security.LocalApiToken
+import com.sb.backend.server.ApiSecurityPolicy
 import com.sb.backend.server.EmbeddedApiServer
 import com.sb.signals.services.SignalsPlatform
 import java.util.concurrent.Executors
@@ -184,8 +185,8 @@ class MarketForegroundService : Service() {
             }
 
             val server = EmbeddedApiServer(
-                port = 10000,
-                accessToken = LocalApiToken.get(this)
+                port = ApiSecurityPolicy.DEFAULT_PORT,
+                tokenProvider = { LocalApiToken.tokens(this) }
             )
             embeddedApiServer = server
 

@@ -37,6 +37,10 @@ object SignalOutcomeEvaluator {
         var ambiguousBar = signal.ambiguousBar
         var mfe = signal.maxFavorableExcursionPercent
         var mae = signal.maxAdverseExcursionPercent
+        var fillPrice = signal.entryFillPrice
+        var invalidatedAt: Long? = null
+        var invalidationReason: String? = null
+        var invalidationPrice: Double? = null
 
         var triggered = triggeredAt != null ||
             status == SignalLifecycleStatus.TRIGGERED ||
@@ -50,6 +54,9 @@ object SignalOutcomeEvaluator {
                 it.timestamp >= triggerTime
             }
             if (entryIndex < 0) entryIndex = candles.size
+            if (fillPrice == null && entryIndex in candles.indices) {
+                fillPrice = simulatedFill(signal, candles[entryIndex])
+            }
         }
         for (index in candles.indices) {
             if (triggered) break
@@ -60,8 +67,55 @@ object SignalOutcomeEvaluator {
                 triggeredAt = candle.timestamp
                 status = SignalLifecycleStatus.TRIGGERED
                 entryIndex = index
+                fillPrice = simulatedFill(signal, candle)
                 break
             }
+
+            val stopBeforeEntry = when (signal.direction) {
+                SignalDirection.BUY -> candle.low <= signal.stopLoss
+                SignalDirection.SELL -> candle.high >= signal.stopLoss
+            }
+            val targetBeforeEntry =
+                highestTargetHit(signal, candle) != null
+            if (stopBeforeEntry || targetBeforeEntry) {
+                invalidatedAt = candle.timestamp
+                invalidationReason = when {
+                    stopBeforeEntry && targetBeforeEntry ->
+                        "Invalidated before entry: stop and target touched"
+                    stopBeforeEntry ->
+                        "Invalidated before entry: stop reached"
+                    else ->
+                        "Invalidated before entry: target reached"
+                }
+                invalidationPrice = if (stopBeforeEntry) {
+                    signal.stopLoss
+                } else {
+                    highestTargetHit(signal, candle)
+                }
+                break
+            }
+        }
+
+        if (!triggered && invalidationReason != null) {
+            return OutcomeResult(
+                status = SignalLifecycleStatus.INVALIDATED,
+                eventTime = invalidatedAt ?: now,
+                exitPrice = null,
+                eventPrice = invalidationPrice,
+                outcomeR = null,
+                outcomePnlPercent = null,
+                outcomeNetPnlPercent = null,
+                outcomeCostPercent = null,
+                reason = invalidationReason.orEmpty(),
+                triggeredAt = null,
+                target1At = null,
+                target2At = null,
+                target3At = null,
+                stoppedAt = null,
+                closedAt = invalidatedAt,
+                mfePercent = null,
+                maePercent = null
+            )
         }
 
         if (!triggered) {
@@ -108,7 +162,7 @@ object SignalOutcomeEvaluator {
             )
         }
 
-        val entry = signal.referencePrice
+        val entry = fillPrice ?: signal.referencePrice
         val risk = abs(entry - signal.stopLoss)
         var completed = false
         var expiryExit: Double? = null
@@ -223,6 +277,7 @@ object SignalOutcomeEvaluator {
                 outcomeNetPnlPercent = null,
                 outcomeCostPercent = null,
                 reason = "Signal active",
+                fillPrice = fillPrice,
                 triggeredAt = triggeredAt,
                 target1At = target1At,
                 target2At = target2At,
@@ -276,6 +331,7 @@ object SignalOutcomeEvaluator {
             outcomeNetPnlPercent = netPnl,
             outcomeCostPercent = config.totalCostPercent,
             reason = reason,
+            fillPrice = entry,
             triggeredAt = triggeredAt,
             target1At = target1At,
             target2At = target2At,
@@ -286,6 +342,15 @@ object SignalOutcomeEvaluator {
             mfePercent = mfe,
             maePercent = mae
         )
+    }
+
+    private fun simulatedFill(
+        signal: ResearchSignal,
+        candle: MarketCandle
+    ): Double {
+        val lower = min(signal.entryLow, signal.entryHigh)
+        val upper = max(signal.entryLow, signal.entryHigh)
+        return candle.open.coerceIn(lower, upper)
     }
 
     private fun entryTouched(

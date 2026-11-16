@@ -1,8 +1,10 @@
 package com.sb.signals.data
 
 import com.sb.signals.domain.DataQuality
+import com.sb.signals.domain.HoldingPeriod
 import com.sb.signals.domain.SignalCategory
 import com.sb.signals.domain.StrategyConfig
+import com.sb.signals.domain.StrategyDefaults
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -126,6 +128,9 @@ object SignalJson {
             put("version", config.version)
             put("category", config.category.name)
             put("name", config.name)
+            put("primaryTimeframe", config.primaryTimeframe)
+            put("confirmationTimeframe", config.confirmationTimeframe)
+            put("trendTimeframe", config.trendTimeframe)
             put("minScore", config.minScore)
             put("minScoreLead", config.minScoreLead)
             put("minPrimaryCandles", config.minPrimaryCandles)
@@ -137,6 +142,11 @@ object SignalJson {
             put("rsiPeriod", config.rsiPeriod)
             put("atrPeriod", config.atrPeriod)
             put("adxPeriod", config.adxPeriod)
+            put("smaPeriod", config.smaPeriod)
+            put("supertrendPeriod", config.supertrendPeriod)
+            put("supertrendMultiplier", config.supertrendMultiplier)
+            put("bollingerPeriod", config.bollingerPeriod)
+            put("bollingerMultiplier", config.bollingerMultiplier)
             put("volumePeriod", config.volumePeriod)
             put("volumeMultiplier", config.volumeMultiplier)
             put("minAdx", config.minAdx)
@@ -152,6 +162,135 @@ object SignalJson {
             put("deliveryHoldingPeriod", config.deliveryHoldingPeriod.name)
             put("categoryLabel", config.category.label)
         }.toString()
+    }
+
+    fun decodeConfig(raw: String?): StrategyConfig? {
+        if (raw.isNullOrBlank()) return null
+        return try {
+            val json = JSONObject(raw)
+            val category = SignalCategory.fromName(
+                json.optString("category")
+            ) ?: return null
+            val strategyId = json.optString("strategyId").trim()
+            val version = json.optString("version").trim()
+            if (strategyId.isBlank() || version.isBlank()) return null
+            val defaults = StrategyDefaults.forCategory(category)
+            StrategyConfig(
+                strategyId = strategyId,
+                version = version,
+                category = category,
+                name = json.optString("name").ifBlank { defaults.name },
+                primaryTimeframe = json.optString("primaryTimeframe")
+                    .ifBlank { defaults.primaryTimeframe },
+                confirmationTimeframe = json.optString(
+                    "confirmationTimeframe"
+                ).ifBlank { defaults.confirmationTimeframe },
+                trendTimeframe = json.optString("trendTimeframe")
+                    .ifBlank { defaults.trendTimeframe },
+                minScore = json.optDouble("minScore", defaults.minScore),
+                minScoreLead = json.optDouble(
+                    "minScoreLead",
+                    defaults.minScoreLead
+                ),
+                minPrimaryCandles = json.optInt(
+                    "minPrimaryCandles",
+                    defaults.minPrimaryCandles
+                ),
+                minConfirmationCandles = json.optInt(
+                    "minConfirmationCandles",
+                    defaults.minConfirmationCandles
+                ),
+                minTrendCandles = json.optInt(
+                    "minTrendCandles",
+                    defaults.minTrendCandles
+                ),
+                emaFast = json.optInt("emaFast", defaults.emaFast),
+                emaSlow = json.optInt("emaSlow", defaults.emaSlow),
+                emaTrend = json.optInt("emaTrend", defaults.emaTrend),
+                rsiPeriod = json.optInt(
+                    "rsiPeriod",
+                    defaults.rsiPeriod
+                ),
+                atrPeriod = json.optInt(
+                    "atrPeriod",
+                    defaults.atrPeriod
+                ),
+                adxPeriod = json.optInt(
+                    "adxPeriod",
+                    defaults.adxPeriod
+                ),
+                smaPeriod = json.optInt(
+                    "smaPeriod",
+                    defaults.smaPeriod
+                ),
+                supertrendPeriod = json.optInt(
+                    "supertrendPeriod",
+                    defaults.supertrendPeriod
+                ),
+                supertrendMultiplier = json.optDouble(
+                    "supertrendMultiplier",
+                    defaults.supertrendMultiplier
+                ),
+                bollingerPeriod = json.optInt(
+                    "bollingerPeriod",
+                    defaults.bollingerPeriod
+                ),
+                bollingerMultiplier = json.optDouble(
+                    "bollingerMultiplier",
+                    defaults.bollingerMultiplier
+                ),
+                volumePeriod = json.optInt(
+                    "volumePeriod",
+                    defaults.volumePeriod
+                ),
+                volumeMultiplier = json.optDouble(
+                    "volumeMultiplier",
+                    defaults.volumeMultiplier
+                ),
+                minAdx = json.optDouble("minAdx", defaults.minAdx),
+                stopAtrMultiplier = json.optDouble(
+                    "stopAtrMultiplier",
+                    defaults.stopAtrMultiplier
+                ),
+                entryAtrBuffer = json.optDouble(
+                    "entryAtrBuffer",
+                    defaults.entryAtrBuffer
+                ),
+                targetR1 = json.optDouble(
+                    "targetR1",
+                    defaults.targetR1
+                ),
+                targetR2 = json.optDouble(
+                    "targetR2",
+                    defaults.targetR2
+                ),
+                targetR3 = json.optDouble(
+                    "targetR3",
+                    defaults.targetR3
+                ),
+                costBpsPerSide = json.optDouble(
+                    "costBpsPerSide",
+                    defaults.costBpsPerSide
+                ),
+                slippageBpsPerSide = json.optDouble(
+                    "slippageBpsPerSide",
+                    defaults.slippageBpsPerSide
+                ),
+                maxSignalAgeBars = json.optInt(
+                    "maxSignalAgeBars",
+                    defaults.maxSignalAgeBars
+                ),
+                allowShorts = json.optBoolean(
+                    "allowShorts",
+                    defaults.allowShorts
+                ),
+                deliveryHoldingPeriod = HoldingPeriod.fromName(
+                    json.optString("deliveryHoldingPeriod")
+                ) ?: defaults.deliveryHoldingPeriod
+            )
+        } catch (_: Exception) {
+            null
+        }
     }
 
     fun categoryName(raw: String?): SignalCategory? =

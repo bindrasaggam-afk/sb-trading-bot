@@ -3,6 +3,7 @@ package com.sb.signals.services
 import com.sb.backend.core.BackendManager
 import com.sb.backend.market.MarketDataManager
 import com.sb.backend.market.model.InstrumentKey
+import com.sb.signals.data.SignalJson
 import com.sb.signals.data.SignalRepository
 import com.sb.signals.domain.DataQuality
 import com.sb.signals.domain.ResearchSignal
@@ -12,6 +13,7 @@ import com.sb.signals.domain.SignalLifecycleStatus
 import com.sb.signals.domain.SignalStrategyVersion
 import com.sb.signals.domain.StrategyConfig
 import com.sb.signals.domain.StrategyDefaults
+import com.sb.signals.domain.indicators.SignalIndicatorEngine
 import com.sb.signals.domain.market.MarketSession
 import com.sb.signals.domain.strategies.SignalRiskPlanner
 import com.sb.signals.domain.strategies.SignalStrategyFactory
@@ -31,10 +33,7 @@ data class AnalysisSummary(
 class SignalAnalysisService(
     private val repository: SignalRepository,
     private val reader: SignalCandleReader = SignalCandleReader(),
-    private val configs: Map<SignalCategory, StrategyConfig> =
-        SignalCategory.values().associateWith {
-            StrategyDefaults.forCategory(it)
-        },
+    private val configs: List<StrategyConfig> = StrategyDefaults.all(),
     private val universeProvider: () -> List<InstrumentKey> = {
         try {
             MarketDataManager.activeKeys()
@@ -74,8 +73,12 @@ class SignalAnalysisService(
     }
 ) {
 
+    private val activeConfigs: List<StrategyConfig> = configs.distinctBy {
+        "${it.strategyId}|${it.version}|${it.primaryTimeframe}"
+    }
+
     fun seedStrategyVersions() {
-        configs.values.forEach {
+        activeConfigs.forEach {
             repository.saveStrategyVersion(it)
         }
     }
@@ -104,12 +107,12 @@ class SignalAnalysisService(
                 return@forEach
             }
             symbolsEvaluated++
-            SignalCategory.values().forEach { category ->
+            activeConfigs.forEach { config ->
                 try {
                     if (generate(
                             symbol = key.symbol,
                             exchange = key.exchange,
-                            category = category,
+                            config = config,
                             now = now
                         ) != null
                     ) {
@@ -119,7 +122,7 @@ class SignalAnalysisService(
                     errors++
                     if (messages.size < 5) {
                         messages.add(
-                            "${key.symbol}/${category.name}: " +
+                            "${key.symbol}/${config.strategyId}: " +
                                 (error.message ?: "unknown error")
                         )
                     }
@@ -172,6 +175,20 @@ class SignalAnalysisService(
         category: SignalCategory,
         now: Long = System.currentTimeMillis()
     ): ResearchSignal? {
+        return generate(
+            symbol,
+            exchange,
+            StrategyDefaults.forCategory(category),
+            now
+        )
+    }
+
+    private fun generate(
+        symbol: String,
+        exchange: String,
+        config: StrategyConfig,
+        now: Long
+    ): ResearchSignal? {
         val normalizedSymbol = symbol.trim().uppercase(Locale.ROOT)
         val normalizedExchange = exchange.trim().uppercase(Locale.ROOT)
         if (normalizedSymbol.isBlank() || normalizedExchange.isBlank()) {
@@ -181,12 +198,10 @@ class SignalAnalysisService(
             return null
         }
 
-        val config = configs[category]
-            ?: StrategyDefaults.forCategory(category)
         val series = reader.read(
             symbol = normalizedSymbol,
             exchange = normalizedExchange,
-            category = category,
+            category = config.category,
             config = config,
             now = now
         )
@@ -216,7 +231,7 @@ class SignalAnalysisService(
             direction = candidate.direction,
             close = lastCandle.close,
             atr = atr,
-            category = category,
+            category = config.category,
             holdingPeriod = candidate.holdingPeriod,
             exchange = normalizedExchange,
             now = now,
@@ -230,15 +245,12 @@ class SignalAnalysisService(
         val signal = ResearchSignal(
             symbol = normalizedSymbol,
             exchange = normalizedExchange,
-            category = category,
+            category = config.category,
             direction = candidate.direction,
-            timeframe = if (category == SignalCategory.INTRADAY) {
-                "5m"
-            } else {
-                "1D"
-            },
+            timeframe = config.primaryTimeframe,
             strategyId = config.strategyId,
             strategyVersion = config.version,
+            strategyConfigJson = SignalJson.encodeConfig(config),
             candleTimestamp = lastCandle.timestamp,
             generatedAt = now,
             referencePrice = plan.referencePrice,
@@ -258,7 +270,8 @@ class SignalAnalysisService(
             status = SignalLifecycleStatus.NEW,
             reasons = candidate.reasons,
             indicatorSnapshot = candidate.snapshot.copy(
-                values = snapshotValues
+                values = snapshotValues,
+                parameters = SignalIndicatorEngine.indicatorParameters(config)
             ),
             dataQuality = DataQuality(
                 score = series.quality.score,
@@ -276,8 +289,7 @@ class SignalAnalysisService(
     fun evaluateOutcomes(now: Long = System.currentTimeMillis()): Int {
         var evaluated = 0
         repository.getOpenSignals().forEach { signal ->
-            val config = configs[signal.category]
-                ?: StrategyDefaults.forCategory(signal.category)
+            val config = configFor(signal)
             val future = reader.futureCandles(
                 symbol = signal.symbol,
                 exchange = signal.exchange,
@@ -299,7 +311,8 @@ class SignalAnalysisService(
                 result.target3At != signal.target3At ||
                 result.stoppedAt != signal.stoppedAt ||
                 result.closedAt != signal.closedAt ||
-                result.exitPrice != signal.exitPrice
+                result.exitPrice != signal.exitPrice ||
+                result.fillPrice != signal.entryFillPrice
 
             val after = signal.copy(
                 status = result.status,
@@ -309,6 +322,7 @@ class SignalAnalysisService(
                 target3At = result.target3At ?: signal.target3At,
                 stoppedAt = result.stoppedAt ?: signal.stoppedAt,
                 closedAt = result.closedAt ?: signal.closedAt,
+                entryFillPrice = result.fillPrice ?: signal.entryFillPrice,
                 exitPrice = result.exitPrice ?: signal.exitPrice,
                 outcomeR = result.outcomeR ?: signal.outcomeR,
                 outcomePnlPercent = result.outcomePnlPercent
@@ -327,12 +341,26 @@ class SignalAnalysisService(
                     ?: signal.maxFavorableExcursionPercent,
                 maxAdverseExcursionPercent = result.maePercent
                     ?: signal.maxAdverseExcursionPercent,
-                lastEvaluatedAt = now
+                lastEvaluatedAt = now,
+                evaluationVersion = "2.0"
             )
-            if (repository.applyEvaluation(signal, after)) {
+            if (repository.applyEvaluation(signal, after, result.eventPrice)) {
                 evaluated++
             }
         }
         return evaluated
+    }
+
+    private fun configFor(signal: ResearchSignal): StrategyConfig {
+        SignalJson.decodeConfig(signal.strategyConfigJson)?.let {
+            return it
+        }
+        return activeConfigs.firstOrNull {
+            it.strategyId == signal.strategyId &&
+                it.version == signal.strategyVersion &&
+                it.primaryTimeframe == signal.timeframe
+        } ?: activeConfigs.firstOrNull {
+            it.category == signal.category
+        } ?: StrategyDefaults.forCategory(signal.category)
     }
 }

@@ -4,7 +4,7 @@ import android.database.sqlite.SQLiteDatabase
 
 object SignalMigrations {
 
-    const val VERSION = 1
+    const val VERSION = 3
 
     const val TABLE_SIGNALS = "research_signals"
     const val TABLE_EVENTS = "signal_events"
@@ -23,11 +23,13 @@ object SignalMigrations {
                 timeframe TEXT NOT NULL,
                 strategy_id TEXT NOT NULL,
                 strategy_version TEXT NOT NULL,
+                strategy_config_json TEXT NOT NULL DEFAULT '',
                 candle_timestamp INTEGER NOT NULL,
                 generated_at INTEGER NOT NULL,
                 reference_price REAL NOT NULL,
                 entry_low REAL NOT NULL,
                 entry_high REAL NOT NULL,
+                entry_fill_price REAL,
                 stop_loss REAL NOT NULL,
                 target1 REAL NOT NULL,
                 target2 REAL NOT NULL,
@@ -43,6 +45,7 @@ object SignalMigrations {
                 reasons_json TEXT NOT NULL,
                 indicator_json TEXT NOT NULL,
                 confirmations_json TEXT NOT NULL,
+                indicator_params_json TEXT NOT NULL DEFAULT '{}',
                 data_quality_json TEXT NOT NULL,
                 triggered_at INTEGER,
                 target1_at INTEGER,
@@ -141,5 +144,44 @@ object SignalMigrations {
         if (oldVersion < 1) {
             createAll(db)
         }
+        if (oldVersion < 2 &&
+            !hasColumn(db, TABLE_SIGNALS, "entry_fill_price")
+        ) {
+            db.execSQL(
+                "ALTER TABLE `$TABLE_SIGNALS` " +
+                    "ADD COLUMN entry_fill_price REAL"
+            )
+        }
+        if (oldVersion < 3 &&
+            !hasColumn(db, TABLE_SIGNALS, "strategy_config_json")
+        ) {
+            db.execSQL(
+                "ALTER TABLE `$TABLE_SIGNALS` " +
+                    "ADD COLUMN strategy_config_json TEXT NOT NULL DEFAULT ''"
+            )
+        }
+        if (oldVersion < 3 &&
+            !hasColumn(db, TABLE_SIGNALS, "indicator_params_json")
+        ) {
+            db.execSQL(
+                "ALTER TABLE `$TABLE_SIGNALS` " +
+                    "ADD COLUMN indicator_params_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        }
+    }
+
+    private fun hasColumn(
+        db: SQLiteDatabase,
+        table: String,
+        column: String
+    ): Boolean {
+        db.rawQuery("PRAGMA table_info(`$table`)", null).use { cursor ->
+            val nameIndex = cursor.getColumnIndex("name")
+            if (nameIndex < 0) return false
+            while (cursor.moveToNext()) {
+                if (cursor.getString(nameIndex) == column) return true
+            }
+        }
+        return false
     }
 }

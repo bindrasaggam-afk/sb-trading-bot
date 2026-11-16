@@ -35,6 +35,7 @@ import com.sb.backend.market.repo.MarketFeedRepository
 import com.sb.backend.models.Instrument
 import com.sb.backend.repositories.InstrumentRepository
 import com.sb.signals.presentation.SignalsScreen
+import com.sb.signals.services.SignalsPlatform
 import com.sb.ui.market.InstrumentLiveViewModel
 import com.sb.ui.market.MarketListAdapter
 import com.sb.ui.market.MarketListItem
@@ -582,7 +583,7 @@ class MainActivity : AppCompatActivity() {
 
         val signalsValue = addMetricCard(
             secondRow,
-            "Live Signals",
+            "Active Research Signals",
             "—"
         )
         val positionsValue = addMetricCard(
@@ -595,29 +596,39 @@ class MainActivity : AppCompatActivity() {
         body.addView(secondRow)
 
         fun updateMetrics() {
-            if (!BackendManager.isInitialized() ||
-                dashboardMetricsJob?.isActive == true
-            ) {
-                return
-            }
+            if (dashboardMetricsJob?.isActive == true) return
 
             dashboardMetricsJob = lifecycleScope.launch {
                 val metrics = withContext(Dispatchers.IO) {
-                    try {
-                        val snapshot = BackendManager.paperEngine().snapshot()
-                        val activeSignals = BackendManager.signals().getActive().size
-                        snapshot to activeSignals
+                    val snapshot = try {
+                        if (BackendManager.isInitialized()) {
+                            BackendManager.paperEngine().snapshot()
+                        } else {
+                            null
+                        }
                     } catch (error: Exception) {
                         android.util.Log.e(
                             "SB_DASHBOARD",
-                            "Dashboard metrics query failed",
+                            "Paper metrics query failed",
                             error
                         )
                         null
                     }
+                    val activeSignals = try {
+                        SignalsPlatform.repository(applicationContext)
+                            .getOpenSignals().size
+                    } catch (error: Exception) {
+                        android.util.Log.e(
+                            "SB_DASHBOARD",
+                            "Research signal count query failed",
+                            error
+                        )
+                        null
+                    }
+                    snapshot to activeSignals
                 }
 
-                val snapshot = metrics?.first
+                val snapshot = metrics.first
                 val pnl = snapshot?.let {
                     it.realizedPnl + it.unrealizedPnl
                 }
@@ -635,7 +646,7 @@ class MainActivity : AppCompatActivity() {
                 )
                 positionsValue.text =
                     snapshot?.openPositions?.size?.toString() ?: "—"
-                signalsValue.text = metrics?.second?.toString() ?: "—"
+                signalsValue.text = metrics.second?.toString() ?: "—"
             }
         }
 
@@ -643,7 +654,7 @@ class MainActivity : AppCompatActivity() {
         dashboardMetricsUpdater = { updateMetrics() }
 
         addLabel(body, "Quick Access", 18f, yellow, true)
-        addActionCard(body, "📈  Live Signals", "Signals")
+        addActionCard(body, "📈  Research Signals", "Signals")
         addActionCard(body, "📝  Paper Trading", "Paper")
         addActionCard(body, "▣  Open Positions", "Positions")
         addActionCard(body, "⌁  Market Watch", "Market")

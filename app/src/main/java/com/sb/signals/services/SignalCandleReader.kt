@@ -98,22 +98,32 @@ class SignalCandleReader(
         config: StrategyConfig,
         now: Long
     ): CategoryCandleSeries {
-        val primaryRaw = source.candles(symbol, exchange, "5m", 500)
+        val primaryRaw = source.candles(
+            symbol,
+            exchange,
+            config.primaryTimeframe,
+            500
+        )
         val primary = CandleSeriesTools.prepare(
             primaryRaw,
-            "5m",
+            config.primaryTimeframe,
             exchange,
             now,
             config.minPrimaryCandles
         )
 
-        val confirmationRaw = source.candles(symbol, exchange, "15m", 400)
+        val confirmationRaw = source.candles(
+            symbol,
+            exchange,
+            config.confirmationTimeframe,
+            400
+        )
         val confirmation = if (confirmationRaw.size >=
             config.minConfirmationCandles
         ) {
             CandleSeriesTools.prepare(
                 confirmationRaw,
-                "15m",
+                config.confirmationTimeframe,
                 exchange,
                 now,
                 config.minConfirmationCandles
@@ -121,23 +131,28 @@ class SignalCandleReader(
         } else {
             val aggregated = CandleSeriesTools.aggregate(
                 primary.all,
-                "15m",
+                config.confirmationTimeframe,
                 exchange
             )
             CandleSeriesTools.prepareMarket(
                 aggregated,
-                "15m",
+                config.confirmationTimeframe,
                 exchange,
                 now,
                 config.minConfirmationCandles
             )
         }
 
-        val trendRaw = source.candles(symbol, exchange, "1h", 300)
+        val trendRaw = source.candles(
+            symbol,
+            exchange,
+            config.trendTimeframe,
+            300
+        )
         val trend = if (trendRaw.size >= config.minTrendCandles) {
             CandleSeriesTools.prepare(
                 trendRaw,
-                "1h",
+                config.trendTimeframe,
                 exchange,
                 now,
                 config.minTrendCandles
@@ -145,12 +160,12 @@ class SignalCandleReader(
         } else {
             val aggregated = CandleSeriesTools.aggregate(
                 confirmation.all,
-                "1h",
+                config.trendTimeframe,
                 exchange
             )
             CandleSeriesTools.prepareMarket(
                 aggregated,
-                "1h",
+                config.trendTimeframe,
                 exchange,
                 now,
                 config.minTrendCandles
@@ -175,22 +190,32 @@ class SignalCandleReader(
         config: StrategyConfig,
         now: Long
     ): CategoryCandleSeries {
-        val primaryRaw = source.candles(symbol, exchange, "1D", 800)
+        val primaryRaw = source.candles(
+            symbol,
+            exchange,
+            config.primaryTimeframe,
+            800
+        )
         val primary = CandleSeriesTools.prepare(
             primaryRaw,
-            "1D",
+            config.primaryTimeframe,
             exchange,
             now,
             config.minPrimaryCandles
         )
 
-        val confirmationRaw = source.candles(symbol, exchange, "1W", 300)
+        val confirmationRaw = source.candles(
+            symbol,
+            exchange,
+            config.confirmationTimeframe,
+            300
+        )
         val confirmation = if (confirmationRaw.size >=
             config.minConfirmationCandles
         ) {
             CandleSeriesTools.prepare(
                 confirmationRaw,
-                "1W",
+                config.confirmationTimeframe,
                 exchange,
                 now,
                 config.minConfirmationCandles
@@ -198,12 +223,12 @@ class SignalCandleReader(
         } else {
             val aggregated = CandleSeriesTools.aggregate(
                 primary.all,
-                "1W",
+                config.confirmationTimeframe,
                 exchange
             )
             CandleSeriesTools.prepareMarket(
                 aggregated,
-                "1W",
+                config.confirmationTimeframe,
                 exchange,
                 now,
                 config.minConfirmationCandles
@@ -228,49 +253,72 @@ class SignalCandleReader(
         config: StrategyConfig,
         now: Long
     ): CategoryCandleSeries {
-        val primaryRaw = source.candles(symbol, exchange, "1D", 1200)
+        val primaryRaw = source.candles(
+            symbol,
+            exchange,
+            config.primaryTimeframe,
+            1200
+        )
         val primary = CandleSeriesTools.prepare(
             primaryRaw,
-            "1D",
+            config.primaryTimeframe,
             exchange,
             now,
             config.minPrimaryCandles
         )
 
-        val confirmationRaw = source.candles(symbol, exchange, "1W", 300)
+        val confirmationRaw = source.candles(
+            symbol,
+            exchange,
+            config.confirmationTimeframe,
+            300
+        )
         val confirmation = if (confirmationRaw.size >=
             config.minConfirmationCandles
         ) {
             CandleSeriesTools.prepare(
                 confirmationRaw,
-                "1W",
+                config.confirmationTimeframe,
                 exchange,
                 now,
                 config.minConfirmationCandles
             )
         } else {
             CandleSeriesTools.prepareMarket(
-                CandleSeriesTools.aggregate(primary.all, "1W", exchange),
-                "1W",
+                CandleSeriesTools.aggregate(
+                    primary.all,
+                    config.confirmationTimeframe,
+                    exchange
+                ),
+                config.confirmationTimeframe,
                 exchange,
                 now,
                 config.minConfirmationCandles
             )
         }
 
-        val trendRaw = source.candles(symbol, exchange, "1M", 120)
+        val trendRaw = source.candles(
+            symbol,
+            exchange,
+            config.trendTimeframe,
+            120
+        )
         val trend = if (trendRaw.size >= config.minTrendCandles) {
             CandleSeriesTools.prepare(
                 trendRaw,
-                "1M",
+                config.trendTimeframe,
                 exchange,
                 now,
                 config.minTrendCandles
             )
         } else {
             CandleSeriesTools.prepareMarket(
-                CandleSeriesTools.aggregate(primary.all, "1M", exchange),
-                "1M",
+                CandleSeriesTools.aggregate(
+                    primary.all,
+                    config.trendTimeframe,
+                    exchange
+                ),
+                config.trendTimeframe,
                 exchange,
                 now,
                 config.minTrendCandles

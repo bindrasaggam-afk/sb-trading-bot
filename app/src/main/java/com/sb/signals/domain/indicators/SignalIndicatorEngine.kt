@@ -61,11 +61,16 @@ object SignalIndicatorEngine {
         val atr = IndicatorService.atr(bridged, config.atrPeriod)
         val supertrend = IndicatorService.supertrend(
             candles = bridged,
-            period = 10,
-            multiplier = 3.0
+            period = config.supertrendPeriod,
+            multiplier = config.supertrendMultiplier
         )
         val adx = adx(bridged, config.adxPeriod)
-        val bollinger = bollinger(closes, 20, 2.0)
+        val sma = IndicatorService.sma(closes, config.smaPeriod)
+        val bollinger = bollinger(
+            closes,
+            config.bollingerPeriod,
+            config.bollingerMultiplier
+        )
         val vwap = sessionVwap(candles)
         val volumeMa = volumeSma(candles, config.volumePeriod)
 
@@ -79,6 +84,7 @@ object SignalIndicatorEngine {
             "MACDSignal" to macd.signalLine,
             "MACDHistogram" to macd.histogram,
             "ATR${config.atrPeriod}" to atr,
+            "SMA${config.smaPeriod}" to sma,
             "Supertrend" to supertrend.line,
             "ADX${config.adxPeriod}" to adx.adx,
             "PlusDI" to adx.plusDi,
@@ -105,6 +111,24 @@ object SignalIndicatorEngine {
 
         return IndicatorComputation(values, series)
     }
+
+    fun indicatorParameters(
+        config: StrategyConfig
+    ): Map<String, Double?> = linkedMapOf(
+        "EMA Fast" to config.emaFast.toDouble(),
+        "EMA Slow" to config.emaSlow.toDouble(),
+        "EMA Trend" to config.emaTrend.toDouble(),
+        "RSI Period" to config.rsiPeriod.toDouble(),
+        "ATR Period" to config.atrPeriod.toDouble(),
+        "ADX Period" to config.adxPeriod.toDouble(),
+        "SMA Period" to config.smaPeriod.toDouble(),
+        "Supertrend Period" to config.supertrendPeriod.toDouble(),
+        "Supertrend Multiplier" to config.supertrendMultiplier,
+        "Bollinger Period" to config.bollingerPeriod.toDouble(),
+        "Bollinger Multiplier" to config.bollingerMultiplier,
+        "Volume Period" to config.volumePeriod.toDouble(),
+        "Volume Multiplier" to config.volumeMultiplier
+    )
 
     fun adx(
         candles: List<Candle>,
