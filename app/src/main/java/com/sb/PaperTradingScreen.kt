@@ -223,12 +223,12 @@ object PaperTradingScreen {
                 addCard(
                     "Paper Cash Balance",
                     rupees(account.balance),
-                    "BUY cost deducted; short proceeds excluded"
+                    "BUY cost and entry charges deducted; short proceeds excluded"
                 )
                 addCard(
-                    "Reserved Margin",
+                    "Reserved Capital",
                     rupees(account.reservedMargin),
-                    "Short-sale margin held by the engine"
+                    "Pending entries plus open short-sale margin"
                 )
             }
 

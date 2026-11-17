@@ -59,6 +59,11 @@ class StockSearchScreen(
             screen = "Market"
         ),
         UniversalSearchItem(
+            "All Instruments",
+            "Overview • Browse every exchange and instrument type",
+            screen = "All Instruments"
+        ),
+        UniversalSearchItem(
             "Chart",
             "Chart • Heikin Ashi and candle view",
             screen = "Chart"

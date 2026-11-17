@@ -379,11 +379,18 @@ class PaperTradingEngine(
             }
             if (quantity <= 0) return@forEach
 
+            val executionPrice = if (
+                order.side == OrderSide.BUY.name
+            ) {
+                maxOf(level, ltp)
+            } else {
+                minOf(level, ltp)
+            }
             val updated = paperRepository.exitSignalOrder(
                 orderId = current.id,
                 kind = target.kind,
                 quantity = quantity,
-                executionPrice = level,
+                executionPrice = executionPrice,
                 executedAt = quote.receivedAt,
                 note = "${target.kind.name} reached"
             )

@@ -52,6 +52,12 @@ object SignalsPlatform {
             ?: throw IllegalStateException("Signals repository unavailable")
     }
 
+    fun database(context: Context): SignalDatabase {
+        ensureInitialized(context)
+        return database
+            ?: throw IllegalStateException("Signals database unavailable")
+    }
+
     fun start(context: Context): Boolean = synchronized(lock) {
         ensureInitializedLocked(context)
         if (running) return true
@@ -215,7 +221,12 @@ object SignalsPlatform {
                     BackendManager.isReady()
                 ) {
                     try {
-                        PaperSignalBridge.forwardOpenSignals(context)
+                        val result =
+                            PaperSignalBridge.forwardOpenSignals(context)
+                        Log.d(
+                            TAG,
+                            "Paper signal bridge ${result.summary()}"
+                        )
                     } catch (error: Exception) {
                         Log.e(
                             TAG,

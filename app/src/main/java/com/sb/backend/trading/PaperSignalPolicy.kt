@@ -35,8 +35,19 @@ data class PaperSizingRules(
     val riskPerTradePercent: Double,
     val allocationPercent: Double,
     val shortMarginRate: Double,
-    val maxQuantity: Int
+    val maxQuantity: Int,
+    val costBpsPerSide: Double = 0.0
 )
+
+data class PaperCapitalRequirement(
+    val orderValue: Double,
+    val cashDebit: Double,
+    val reservedMargin: Double,
+    val entryCharge: Double
+) {
+    val totalReservation: Double
+        get() = cashDebit + reservedMargin + entryCharge
+}
 
 enum class PaperEntryDecisionType {
     WAIT,
@@ -56,12 +67,13 @@ object PaperSignalPolicy {
     fun initialQuantity(
         candidate: PaperSignalCandidate,
         availableBalance: Double,
-        rules: PaperSizingRules
+        rules: PaperSizingRules,
+        expectedEntryPrice: Double = candidate.referencePrice
     ): Int {
         if (!availableBalance.isFinite() || availableBalance <= 0.0) {
             return 0
         }
-        val entry = candidate.referencePrice
+        val entry = expectedEntryPrice
         if (!entry.isFinite() || entry <= 0.0) return 0
 
         val riskPerUnit = abs(entry - candidate.stopLoss)
@@ -77,16 +89,20 @@ object PaperSignalPolicy {
                 rules.allocationPercent.coerceAtLeast(0.0) / 100.0 / entry
         ).toLong()
         val marginRate = rules.shortMarginRate.coerceIn(0.0, 1.0)
-        val affordableQuantity = if (
-            candidate.side == OrderSide.SELL.name
-        ) {
-            if (marginRate <= 0.0) {
-                Long.MAX_VALUE
-            } else {
-                floor(availableBalance / (entry * marginRate)).toLong()
-            }
+        val costRate = if (rules.costBpsPerSide.isFinite()) {
+            rules.costBpsPerSide.coerceAtLeast(0.0) / 10_000.0
         } else {
-            floor(availableBalance / entry).toLong()
+            0.0
+        }
+        val unitCapital = if (candidate.side == OrderSide.SELL.name) {
+            entry * (marginRate + costRate)
+        } else {
+            entry * (1.0 + costRate)
+        }
+        val affordableQuantity = if (unitCapital > 0.0) {
+            floor(availableBalance / unitCapital).toLong()
+        } else {
+            Long.MAX_VALUE
         }
         val maxQuantity = if (rules.maxQuantity > 0) {
             rules.maxQuantity.toLong()
@@ -99,6 +115,63 @@ object PaperSignalPolicy {
             affordableQuantity,
             maxQuantity
         ).coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
+    }
+
+    fun expectedEntryPrice(
+        candidate: PaperSignalCandidate,
+        applySlippage: Boolean = false
+    ): Double {
+        if (!candidate.referencePrice.isFinite() ||
+            candidate.referencePrice <= 0.0
+        ) {
+            return 0.0
+        }
+        val low = min(candidate.entryLow, candidate.entryHigh)
+        val high = max(candidate.entryLow, candidate.entryHigh)
+        if (!low.isFinite() || !high.isFinite() || low <= 0.0) {
+            return 0.0
+        }
+        val reference = candidate.referencePrice.coerceIn(low, high)
+        if (!applySlippage) return reference
+        val bps = if (candidate.slippageBpsPerSide.isFinite()) {
+            candidate.slippageBpsPerSide.coerceAtLeast(0.0)
+        } else {
+            0.0
+        }
+        val slipped = if (candidate.side == OrderSide.BUY.name) {
+            reference * (1.0 + bps / 10_000.0)
+        } else {
+            reference * (1.0 - bps / 10_000.0)
+        }
+        return slipped.coerceIn(low, high)
+    }
+
+    fun capitalRequirement(
+        side: String,
+        price: Double,
+        quantity: Int,
+        costBpsPerSide: Double,
+        shortMarginRate: Double
+    ): PaperCapitalRequirement {
+        val safePrice = if (price.isFinite() && price > 0.0) price else 0.0
+        val safeQuantity = quantity.coerceAtLeast(0)
+        val orderValue = safePrice * safeQuantity
+        val isSell = side == OrderSide.SELL.name
+        val marginRate = shortMarginRate.coerceIn(0.0, 1.0)
+        return PaperCapitalRequirement(
+            orderValue = orderValue,
+            cashDebit = if (isSell) 0.0 else orderValue,
+            reservedMargin = if (isSell) {
+                orderValue * marginRate
+            } else {
+                0.0
+            },
+            entryCharge = entryCharge(
+                price = safePrice,
+                quantity = safeQuantity,
+                costBps = costBpsPerSide
+            )
+        )
     }
 
     fun entryDecision(

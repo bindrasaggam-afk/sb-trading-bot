@@ -1,7 +1,10 @@
 
 package com.sb.backend.database
 
+import android.content.ContentValues
 import android.database.sqlite.SQLiteDatabase
+import com.sb.backend.core.AppConfig
+import com.sb.backend.trading.PaperSignalPolicy
 
 object DatabaseMigrations {
 
@@ -811,6 +814,76 @@ object DatabaseMigrations {
                 """.trimIndent()
             )
         }
+
+        if (oldVersion < 11) {
+            repairPaperAccounting(db)
+        }
+    }
+
+    private fun repairPaperAccounting(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            UPDATE paper_executions
+            SET net_pnl = 0
+            WHERE kind = 'ENTRY'
+            """.trimIndent()
+        )
+
+        var pendingReservation = 0.0
+        val pendingUpdates = ArrayList<Pair<Long, Double>>()
+        db.rawQuery(
+            """
+            SELECT id, side, quantity, entry_price, cost_bps_per_side,
+                   COALESCE(reserved_margin, 0)
+            FROM paper_orders
+            WHERE status = 'PENDING'
+            """.trimIndent(),
+            null
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val orderId = cursor.getLong(0)
+                val currentReservation = cursor.getDouble(5)
+                if (currentReservation > 0.0) {
+                    pendingReservation += currentReservation
+                    continue
+                }
+                val requirement = PaperSignalPolicy.capitalRequirement(
+                    side = cursor.getString(1),
+                    price = cursor.getDouble(3),
+                    quantity = cursor.getInt(2),
+                    costBpsPerSide = cursor.getDouble(4),
+                    shortMarginRate = AppConfig.get().shortMarginRate
+                )
+                if (requirement.totalReservation > 0.0) {
+                    pendingUpdates.add(
+                        orderId to requirement.totalReservation
+                    )
+                    pendingReservation += requirement.totalReservation
+                }
+            }
+        }
+        pendingUpdates.forEach { (orderId, reservation) ->
+            val values = ContentValues().apply {
+                put("reserved_margin", reservation)
+            }
+            db.update(
+                "paper_orders",
+                values,
+                "id = ? AND status = 'PENDING'",
+                arrayOf(orderId.toString())
+            )
+        }
+        if (pendingReservation > 0.0) {
+            db.execSQL(
+                """
+                UPDATE paper_account
+                SET reserved_margin = reserved_margin + ?
+                WHERE id = 1
+                """.trimIndent(),
+                arrayOf<Any>(pendingReservation)
+            )
+        }
+
     }
 
     // -------------------------------------------------------------

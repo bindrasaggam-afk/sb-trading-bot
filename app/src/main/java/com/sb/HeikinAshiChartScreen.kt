@@ -1212,6 +1212,7 @@ class HeikinAshiChartScreen(
 
         if (tick == null) {
             lastTick = null
+            if (::chartView.isInitialized) chartView.lastPrice = null
             renderDepth(null)
             livePriceText.text = "LIVE • waiting for tick"
             livePriceText.setTextColor(mutedColor)
@@ -1238,6 +1239,7 @@ class HeikinAshiChartScreen(
         }
 
         lastTick = tick
+        if (::chartView.isInitialized) chartView.lastPrice = tick.ltp
 
         val previousClose = tick.previousClose ?: tick.close
         val change = tick.change

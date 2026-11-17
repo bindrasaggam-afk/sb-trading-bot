@@ -794,7 +794,7 @@ class InstrumentRepository(
                 "WHEN exchange = 'BSE' THEN 1 ELSE 2 END, " +
                 "CASE WHEN expiry_millis IS NULL THEN 1 ELSE 0 END, " +
                 "expiry_millis ASC, symbol COLLATE NOCASE",
-            limit.coerceIn(1, 10000).toString()
+            limit.coerceIn(1, 50000).toString()
         ).use { cursor ->
             while (cursor.moveToNext()) {
                 result.add(readInstrument(cursor))

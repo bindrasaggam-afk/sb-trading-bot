@@ -151,7 +151,8 @@ class TrendSignalStrategy(
             reasons = chosen.reasons,
             snapshot = SignalIndicatorSnapshot(
                 values = mergedValues,
-                confirmations = chosen.confirmations
+                confirmations = chosen.confirmations,
+                scores = chosen.scores
             ),
             holdingPeriod = holdingPeriod
         )
@@ -205,7 +206,8 @@ class TrendSignalStrategy(
         val direction: SignalDirection,
         val score: Double,
         val reasons: List<String>,
-        val confirmations: Map<String, Boolean>
+        val confirmations: Map<String, Boolean>,
+        val scores: Map<String, Double?>
     )
 
     private fun score(
@@ -239,6 +241,7 @@ class TrendSignalStrategy(
         )
 
         val confirmations = linkedMapOf<String, Boolean>()
+        val scores = linkedMapOf<String, Double?>()
         val reasons = ArrayList<String>()
         var total = 0.0
 
@@ -260,6 +263,7 @@ class TrendSignalStrategy(
             else -> 0.0
         }
         total += trendScore
+        scores["EMA trend"] = trendScore
         confirmations["EMA trend"] = trendScore >= 18.0
         if (trendScore > 0.0) reasons.add("EMA structure aligns")
 
@@ -280,6 +284,7 @@ class TrendSignalStrategy(
             }
         }
         total += rsiScore
+        scores["RSI"] = rsiScore
         confirmations["RSI"] = rsiScore >= 10.0
         if (rsiScore >= 6.0) reasons.add("Momentum RSI confirms")
 
@@ -300,6 +305,7 @@ class TrendSignalStrategy(
             else -> 0.0
         }
         total += macdScore
+        scores["MACD"] = macdScore
         confirmations["MACD"] = macdScore >= 10.0
         if (macdScore >= 6.0) reasons.add("MACD momentum confirms")
 
@@ -310,6 +316,7 @@ class TrendSignalStrategy(
             }
         val supertrendScore = if (supertrendAligned) 10.0 else 0.0
         total += supertrendScore
+        scores["Supertrend"] = supertrendScore
         confirmations["Supertrend"] = supertrendAligned
         if (supertrendAligned) reasons.add("Supertrend direction aligns")
 
@@ -327,6 +334,7 @@ class TrendSignalStrategy(
             else -> 0.0
         }
         total += adxScore
+        scores["ADX"] = adxScore
         confirmations["ADX"] = adxScore >= 7.0
         if (adxScore >= 7.0) reasons.add("ADX confirms directional strength")
 
@@ -337,6 +345,7 @@ class TrendSignalStrategy(
             }
         val vwapScore = if (vwapAligned) 7.0 else 0.0
         total += vwapScore
+        scores["VWAP"] = vwapScore
         confirmations["VWAP"] = vwapAligned
         if (vwapAligned) reasons.add("Price is on the signal side of VWAP")
 
@@ -355,6 +364,7 @@ class TrendSignalStrategy(
             else -> 0.0
         }
         total += volumeScore
+        scores["Volume"] = volumeScore
         confirmations["Volume"] = volumeScore >= 5.0
         if (volumeScore >= 5.0) reasons.add("Volume expansion supports the move")
 
@@ -380,6 +390,7 @@ class TrendSignalStrategy(
             }
         }
         total += breakout
+        scores["Breakout"] = breakout
         confirmations["Breakout"] = breakout >= 7.0
         if (breakout >= 7.0) reasons.add("Range breakout is confirmed")
 
@@ -402,6 +413,7 @@ class TrendSignalStrategy(
             }
         }
         total += bollingerScore
+        scores["Bollinger"] = bollingerScore
         confirmations["Bollinger"] = bollingerScore >= 5.0
         if (bollingerScore >= 5.0) reasons.add("Bollinger structure confirms")
 
@@ -429,6 +441,7 @@ class TrendSignalStrategy(
             else -> 0.0
         }
         total += higherScore
+        scores["Higher timeframe"] = higherScore
         confirmations["Higher timeframe"] = higherAligned
         if (higherScore >= 5.0) {
             reasons.add("Higher timeframe trend agrees")
@@ -446,12 +459,19 @@ class TrendSignalStrategy(
             direction = direction,
             score = total.coerceIn(0.0, 100.0),
             reasons = reasons.distinct(),
-            confirmations = confirmations
+            confirmations = confirmations,
+            scores = scores
         )
     }
 
     private fun emptyScore(direction: SignalDirection): DirectionScore =
-        DirectionScore(direction, 0.0, emptyList(), emptyMap())
+        DirectionScore(
+            direction = direction,
+            score = 0.0,
+            reasons = emptyList(),
+            confirmations = emptyMap(),
+            scores = emptyMap()
+        )
 }
 
 object SignalStrategyFactory {

@@ -28,6 +28,111 @@ class PaperSignalPolicyTest {
     }
 
     @Test
+    fun `sizing uses actual expected entry price and entry costs`() {
+        val candidate = candidate()
+        val rules = PaperSizingRules(
+            riskPerTradePercent = 1.0,
+            allocationPercent = 100.0,
+            shortMarginRate = 1.0,
+            maxQuantity = 1_000,
+            costBpsPerSide = 2.0
+        )
+
+        assertEquals(
+            200,
+            PaperSignalPolicy.initialQuantity(
+                candidate = candidate,
+                availableBalance = 100_000.0,
+                rules = rules,
+                expectedEntryPrice = 100.0
+            )
+        )
+        assertEquals(
+            66,
+            PaperSignalPolicy.initialQuantity(
+                candidate = candidate,
+                availableBalance = 100_000.0,
+                rules = rules,
+                expectedEntryPrice = 110.0
+            )
+        )
+    }
+
+    @Test
+    fun `expected entry price clamps reference into signal range`() {
+        val candidate = candidate()
+
+        assertEquals(
+            99.0,
+            PaperSignalPolicy.expectedEntryPrice(
+                candidate.copy(referencePrice = 90.0)
+            ),
+            0.000001
+        )
+        assertEquals(
+            101.0,
+            PaperSignalPolicy.expectedEntryPrice(
+                candidate.copy(referencePrice = 110.0)
+            ),
+            0.000001
+        )
+        assertEquals(
+            100.0,
+            PaperSignalPolicy.expectedEntryPrice(candidate),
+            0.000001
+        )
+    }
+
+    @Test
+    fun `expected entry price applies adverse slippage within range`() {
+        val candidate = candidate().copy(slippageBpsPerSide = 2.0)
+
+        assertEquals(
+            100.02,
+            PaperSignalPolicy.expectedEntryPrice(
+                candidate = candidate,
+                applySlippage = true
+            ),
+            0.000001
+        )
+        assertEquals(
+            101.0,
+            PaperSignalPolicy.expectedEntryPrice(
+                candidate = candidate.copy(referencePrice = 110.0),
+                applySlippage = true
+            ),
+            0.000001
+        )
+    }
+
+    @Test
+    fun `capital requirement separates cash margin and entry charge`() {
+        val buy = PaperSignalPolicy.capitalRequirement(
+            side = OrderSide.BUY.name,
+            price = 100.0,
+            quantity = 10,
+            costBpsPerSide = 2.0,
+            shortMarginRate = 0.2
+        )
+        assertEquals(1_000.0, buy.cashDebit, 0.000001)
+        assertEquals(0.0, buy.reservedMargin, 0.000001)
+        assertEquals(0.2, buy.entryCharge, 0.000001)
+        assertEquals(1_000.2, buy.totalReservation, 0.000001)
+
+        val sell = PaperSignalPolicy.capitalRequirement(
+            side = OrderSide.SELL.name,
+            price = 100.0,
+            quantity = 10,
+            costBpsPerSide = 2.0,
+            shortMarginRate = 0.2
+        )
+        assertEquals(0.0, sell.cashDebit, 0.000001)
+        assertEquals(200.0, sell.reservedMargin, 0.000001)
+        assertEquals(0.2, sell.entryCharge, 0.000001)
+        assertEquals(200.2, sell.totalReservation, 0.000001)
+    }
+
+    @Test
     fun `sizing rejects invalid balance and price`() {
         val candidate = candidate()
         val rules = PaperSizingRules(1.0, 20.0, 1.0, 100)

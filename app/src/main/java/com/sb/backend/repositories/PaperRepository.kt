@@ -13,8 +13,11 @@ import com.sb.backend.models.PaperExecutionKind
 import com.sb.backend.models.PaperOrder
 import com.sb.backend.models.PaperTradeEvent
 import com.sb.backend.models.Position
+import com.sb.backend.trading.PaperCapitalPolicy
+import com.sb.backend.trading.PaperCapitalState
 import com.sb.backend.trading.PaperSignalCandidate
 import com.sb.backend.trading.PaperSignalPolicy
+import com.sb.backend.trading.PaperSizingRules
 import java.util.Locale
 
 data class PaperAccount(
@@ -33,6 +36,12 @@ data class PaperSnapshotData(
     val positions: List<Position>,
     val realizedPnl: Double,
     val unrealizedPnl: Double
+)
+
+data class SignalOrderSaveResult(
+    val order: PaperOrder,
+    val inserted: Boolean,
+    val reservedCapital: Double
 )
 
 class PaperRepository(
@@ -141,7 +150,12 @@ class PaperRepository(
     fun saveSignalOrder(
         candidate: PaperSignalCandidate,
         quantity: Int
-    ): PaperOrder {
+    ): PaperOrder = saveSignalOrderDetailed(candidate, quantity).order
+
+    fun saveSignalOrderDetailed(
+        candidate: PaperSignalCandidate,
+        quantity: Int
+    ): SignalOrderSaveResult {
         return maintenanceGate.withOperation {
             require(candidate.signalId > 0L) {
                 "Signal ID must be positive."
@@ -175,22 +189,58 @@ class PaperRepository(
                 )
                 if (existing != null) {
                     db.setTransactionSuccessful()
-                    return@withOperation existing
+                    return@withOperation SignalOrderSaveResult(
+                        order = existing,
+                        inserted = false,
+                        reservedCapital = existing.reservedMargin
+                    )
                 }
 
-                queryAccount(db)
+                val account = queryAccount(db)
                     ?: throw IllegalStateException(
                         "Set starting balance first."
                     )
+                val expectedEntry =
+                    PaperSignalPolicy.expectedEntryPrice(
+                        candidate = candidate,
+                        applySlippage = true
+                    )
+                check(expectedEntry.isFinite() && expectedEntry > 0.0) {
+                    "Expected entry price is invalid."
+                }
+                val rules = sizingRules(candidate.costBpsPerSide)
+                val allowedQuantity = minOf(
+                    quantity,
+                    PaperSignalPolicy.initialQuantity(
+                        candidate = candidate,
+                        availableBalance = account.availableBalance,
+                        rules = rules,
+                        expectedEntryPrice = expectedEntry
+                    )
+                )
+                check(allowedQuantity > 0) {
+                    "Insufficient available capital for this signal."
+                }
+                val requirement = PaperSignalPolicy.capitalRequirement(
+                    side = normalizedSide,
+                    price = expectedEntry,
+                    quantity = allowedQuantity,
+                    costBpsPerSide = candidate.costBpsPerSide,
+                    shortMarginRate = AppConfig.get().shortMarginRate
+                )
+                val capital = PaperCapitalPolicy.reserve(
+                    state = capitalState(account),
+                    amount = requirement.totalReservation
+                )
 
                 val now = System.currentTimeMillis()
                 val values = ContentValues().apply {
                     put("symbol", normalizedSymbol)
                     put("exchange", normalizedExchange)
                     put("side", normalizedSide)
-                    put("quantity", quantity)
-                    put("entry_price", candidate.referencePrice)
-                    put("reserved_margin", 0.0)
+                    put("quantity", allowedQuantity)
+                    put("entry_price", expectedEntry)
+                    put("reserved_margin", requirement.totalReservation)
                     put("status", OrderStatus.PENDING.name)
                     put("note", "Signal #${candidate.signalId} " +
                         "${candidate.strategyId} v" +
@@ -219,8 +269,8 @@ class PaperRepository(
                     put("target1", candidate.target1)
                     put("target2", candidate.target2)
                     put("target3", candidate.target3)
-                    put("remaining_quantity", quantity)
-                    put("last_price", candidate.referencePrice)
+                    put("remaining_quantity", allowedQuantity)
+                    put("last_price", expectedEntry)
                     put("entry_charges", 0.0)
                     put("charges", 0.0)
                     put("exit_reason", "")
@@ -233,19 +283,43 @@ class PaperRepository(
                     null,
                     values
                 )
+                updateAccountCapital(
+                    db = db,
+                    state = capital,
+                    updatedAt = now,
+                    message = "Could not reserve capital."
+                )
                 insertEvent(
                     db = db,
                     orderId = orderId,
                     signalId = candidate.signalId,
                     type = "SIGNAL_FORWARDED",
-                    message = "Genuine signal forwarded to paper trading",
+                    message = "Genuine signal forwarded with " +
+                        "${formatAmount(requirement.totalReservation)} " +
+                        "capital reserved",
                     now = now
                 )
+                if (allowedQuantity < quantity) {
+                    insertEvent(
+                        db = db,
+                        orderId = orderId,
+                        signalId = candidate.signalId,
+                        type = "SIGNAL_SIZED",
+                        message = "Quantity reduced from $quantity to " +
+                            "$allowedQuantity by paper risk limits",
+                        now = now
+                    )
+                }
                 db.setTransactionSuccessful()
-                queryOrder(db, orderId)
+                val saved = queryOrder(db, orderId)
                     ?: throw IllegalStateException(
                         "Could not read forwarded paper order."
                     )
+                SignalOrderSaveResult(
+                    order = saved,
+                    inserted = true,
+                    reservedCapital = requirement.totalReservation
+                )
             } finally {
                 db.endTransaction()
             }
@@ -282,31 +356,33 @@ class PaperRepository(
                     ?: throw IllegalStateException(
                         "Paper account is missing."
                     )
-                val quantity = order.quantity
-                val entryValue = executionPrice * quantity
-                val marginRate = AppConfig.get().shortMarginRate
-                val reserved = if (order.side == OrderSide.SELL.name) {
-                    entryValue * marginRate
-                } else {
-                    0.0
+                val candidate = candidateForOrder(order, executionPrice)
+                val availableWithReservation =
+                    account.availableBalance + order.reservedMargin
+                val rules = sizingRules(order.costBpsPerSide)
+                val allowedQuantity = PaperSignalPolicy.initialQuantity(
+                    candidate = candidate,
+                    availableBalance = availableWithReservation,
+                    rules = rules,
+                    expectedEntryPrice = executionPrice
+                )
+                val quantity = minOf(order.quantity, allowedQuantity)
+                check(quantity > 0) {
+                    "Actual entry price exceeds available paper capital."
                 }
-                val cashDebit = if (order.side == OrderSide.BUY.name) {
-                    entryValue
-                } else {
-                    0.0
-                }
-                val entryCharge = PaperSignalPolicy.entryCharge(
+
+                val requirement = PaperSignalPolicy.capitalRequirement(
+                    side = order.side,
                     price = executionPrice,
                     quantity = quantity,
-                    costBps = order.costBpsPerSide
+                    costBpsPerSide = order.costBpsPerSide,
+                    shortMarginRate = AppConfig.get().shortMarginRate
                 )
-                val required = cashDebit + reserved + entryCharge
-                val available = account.balance - account.reservedMargin
-                check(available + 0.000001 >= required) {
-                    "Insufficient available funds at entry. Required: ${
-                        formatAmount(required)
-                    }"
-                }
+                val capital = PaperCapitalPolicy.applyEntry(
+                    state = capitalState(account),
+                    previousReservation = order.reservedMargin,
+                    requirement = requirement
+                )
 
                 val maxOpenPositions = AppConfig.get().maxOpenPositions
                 if (maxOpenPositions > 0) {
@@ -316,14 +392,15 @@ class PaperRepository(
                 }
 
                 val orderValues = ContentValues().apply {
+                    put("quantity", quantity)
                     put("entry_price", executionPrice)
                     put("entry_timestamp", executedAt)
-                    put("reserved_margin", reserved)
+                    put("reserved_margin", requirement.reservedMargin)
                     put("status", OrderStatus.OPEN.name)
                     put("remaining_quantity", quantity)
                     put("last_price", executionPrice)
-                    put("entry_charges", entryCharge)
-                    put("charges", entryCharge)
+                    put("entry_charges", requirement.entryCharge)
+                    put("charges", requirement.entryCharge)
                     put("updated_at", executedAt)
                 }
                 check(
@@ -346,7 +423,7 @@ class PaperRepository(
                     put("quantity", quantity)
                     put("entry_price", executionPrice)
                     put("last_price", executionPrice)
-                    put("reserved_margin", reserved)
+                    put("reserved_margin", requirement.reservedMargin)
                     put("status", OrderStatus.OPEN.name)
                     put("opened_at", executedAt)
                     put("updated_at", executedAt)
@@ -357,26 +434,12 @@ class PaperRepository(
                     positionValues
                 )
 
-                val accountValues = ContentValues().apply {
-                    put("balance", account.balance - cashDebit - entryCharge)
-                    put(
-                        "reserved_margin",
-                        account.reservedMargin + reserved
-                    )
-                    put(
-                        "realized_pnl",
-                        account.realizedPnl - entryCharge
-                    )
-                    put("updated_at", executedAt)
-                }
-                check(
-                    db.update(
-                        SBDatabaseHelper.TABLE_PAPER_ACCOUNT,
-                        accountValues,
-                        "id = ?",
-                        arrayOf("1")
-                    ) == 1
-                ) { "Could not update paper account at entry." }
+                updateAccountCapital(
+                    db = db,
+                    state = capital,
+                    updatedAt = executedAt,
+                    message = "Could not update paper account at entry."
+                )
 
                 insertExecution(
                     db = db,
@@ -385,8 +448,8 @@ class PaperRepository(
                     quantity = quantity,
                     price = executionPrice,
                     grossPnl = 0.0,
-                    charges = entryCharge,
-                    netPnl = -entryCharge,
+                    charges = requirement.entryCharge,
+                    netPnl = PaperCapitalPolicy.entryExecutionNetPnl(),
                     executedAt = executedAt,
                     eventKey = "$orderId:ENTRY",
                     note = "Signal entry filled"
@@ -396,15 +459,60 @@ class PaperRepository(
                     orderId = orderId,
                     signalId = order.signalId,
                     type = "ENTRY_FILLED",
-                    message = "Entry filled at ${formatAmount(executionPrice)}",
+                    message = "Entry filled at " +
+                        "${formatAmount(executionPrice)}; charges " +
+                        formatAmount(requirement.entryCharge),
                     now = executedAt
                 )
+                if (quantity < order.quantity) {
+                    insertEvent(
+                        db = db,
+                        orderId = orderId,
+                        signalId = order.signalId,
+                        type = "ENTRY_REVALIDATED",
+                        message = "Quantity reduced from ${order.quantity} " +
+                            "to $quantity at the actual entry price",
+                        now = executedAt
+                    )
+                }
 
                 db.setTransactionSuccessful()
                 queryOrder(db, orderId)
             } finally {
                 db.endTransaction()
             }
+        }
+    }
+
+    fun saveAndFillSignalOrder(
+        candidate: PaperSignalCandidate,
+        quantity: Int,
+        executionPrice: Double,
+        executedAt: Long
+    ): SignalOrderSaveResult {
+        val saved = saveSignalOrderDetailed(candidate, quantity)
+        if (!saved.inserted) return saved
+        try {
+            val filled = fillSignalOrder(
+                orderId = saved.order.id,
+                executionPrice = executionPrice,
+                executedAt = executedAt
+            ) ?: throw IllegalStateException(
+                "Triggered paper order could not be filled."
+            )
+            return saved.copy(order = filled)
+        } catch (error: Exception) {
+            try {
+                cancelSignalOrder(
+                    orderId = saved.order.id,
+                    reason = "Triggered entry failed: " +
+                        (error.message ?: "unknown error"),
+                    createdAt = executedAt
+                )
+            } catch (cancelError: Exception) {
+                error.addSuppressed(cancelError)
+            }
+            throw error
         }
     }
 
@@ -573,30 +681,21 @@ class PaperRepository(
                     ) == 1
                 ) { "Could not update paper order." }
 
-                val cashChange = when (order.side) {
-                    OrderSide.BUY.name ->
-                        executionPrice * exitQuantity - exitCharge
-                    else -> grossPnl - exitCharge
-                }
-                val newReserved = (account.reservedMargin -
-                    releaseReserved).coerceAtLeast(0.0)
-                val accountValues = ContentValues().apply {
-                    put("balance", account.balance + cashChange)
-                    put("reserved_margin", newReserved)
-                    put(
-                        "realized_pnl",
-                        account.realizedPnl + grossPnl - exitCharge
-                    )
-                    put("updated_at", executedAt)
-                }
-                check(
-                    db.update(
-                        SBDatabaseHelper.TABLE_PAPER_ACCOUNT,
-                        accountValues,
-                        "id = ?",
-                        arrayOf("1")
-                    ) == 1
-                ) { "Could not update paper account at exit." }
+                val capital = PaperCapitalPolicy.applyExit(
+                    state = capitalState(account),
+                    side = order.side,
+                    exitPrice = executionPrice,
+                    exitQuantity = exitQuantity,
+                    grossPnl = grossPnl,
+                    exitCharge = exitCharge,
+                    releaseReserved = releaseReserved
+                )
+                updateAccountCapital(
+                    db = db,
+                    state = capital,
+                    updatedAt = executedAt,
+                    message = "Could not update paper account at exit."
+                )
 
                 insertExecution(
                     db = db,
@@ -606,7 +705,11 @@ class PaperRepository(
                     price = executionPrice,
                     grossPnl = grossPnl,
                     charges = entryCharge + exitCharge,
-                    netPnl = netPnl,
+                    netPnl = PaperCapitalPolicy.exitExecutionNetPnl(
+                        grossPnl = grossPnl,
+                        allocatedEntryCharge = entryCharge,
+                        exitCharge = exitCharge
+                    ),
                     executedAt = executedAt,
                     eventKey = eventKey,
                     note = note.ifBlank { kind.name }
@@ -658,8 +761,19 @@ class PaperRepository(
                     db.setTransactionSuccessful()
                     return@withOperation order
                 }
+                val account = queryAccount(db)
+                    ?: throw IllegalStateException(
+                        "Paper account is missing."
+                    )
+                val released = order.reservedMargin
+                    .coerceIn(0.0, account.reservedMargin)
+                val capital = PaperCapitalPolicy.release(
+                    state = capitalState(account),
+                    amount = released
+                )
                 val values = ContentValues().apply {
                     put("status", OrderStatus.CANCELLED.name)
+                    put("reserved_margin", 0.0)
                     put("exit_reason", reason.trim())
                     put("updated_at", createdAt)
                 }
@@ -674,12 +788,19 @@ class PaperRepository(
                         )
                     ) == 1
                 ) { "Could not cancel paper order." }
+                updateAccountCapital(
+                    db = db,
+                    state = capital,
+                    updatedAt = createdAt,
+                    message = "Could not release paper capital."
+                )
                 insertEvent(
                     db = db,
                     orderId = orderId,
                     signalId = order.signalId,
                     type = "ENTRY_CANCELLED",
-                    message = reason.trim(),
+                    message = reason.trim() +
+                        " (released ${formatAmount(released)})",
                     now = createdAt
                 )
                 db.setTransactionSuccessful()
@@ -995,7 +1116,7 @@ class PaperRepository(
                 null,
                 null,
                 "executed_at DESC, id DESC",
-                limit.coerceIn(1, 1000).toString()
+                limit.coerceIn(1, 100000).toString()
             ).use { cursor ->
                 while (cursor.moveToNext()) {
                     result.add(readExecution(cursor))
@@ -1158,14 +1279,7 @@ class PaperRepository(
 
     fun getReservedMargin(): Double {
         return maintenanceGate.withOperation {
-            databaseHelper.readableDatabase.rawQuery(
-                "SELECT COALESCE(SUM(reserved_margin), 0) " +
-                    "FROM ${SBDatabaseHelper.TABLE_POSITIONS} " +
-                    "WHERE status = ?",
-                arrayOf(OrderStatus.OPEN.name)
-            ).use { cursor ->
-                if (cursor.moveToFirst()) cursor.getDouble(0) else 0.0
-            }
+            getAccount()?.reservedMargin ?: 0.0
         }
     }
 
@@ -1268,6 +1382,86 @@ class PaperRepository(
                 updatedAt = now
             )
         }
+    }
+
+    private fun capitalState(account: PaperAccount): PaperCapitalState {
+        return PaperCapitalState(
+            balance = account.balance,
+            reservedMargin = account.reservedMargin,
+            realizedPnl = account.realizedPnl
+        )
+    }
+
+    private fun updateAccountCapital(
+        db: SQLiteDatabase,
+        state: PaperCapitalState,
+        updatedAt: Long,
+        message: String
+    ) {
+        val values = ContentValues().apply {
+            put("balance", state.balance)
+            put("reserved_margin", state.reservedMargin)
+            put("realized_pnl", state.realizedPnl)
+            put("updated_at", updatedAt)
+        }
+        check(
+            db.update(
+                SBDatabaseHelper.TABLE_PAPER_ACCOUNT,
+                values,
+                "id = ?",
+                arrayOf("1")
+            ) == 1
+        ) { message }
+    }
+
+    private fun sizingRules(costBpsPerSide: Double): PaperSizingRules {
+        val config = AppConfig.get()
+        return PaperSizingRules(
+            riskPerTradePercent = config.paperRiskPerTradePercent,
+            allocationPercent = config.paperAllocationPercent,
+            shortMarginRate = config.shortMarginRate,
+            maxQuantity = config.maxOrderQuantity,
+            costBpsPerSide = costBpsPerSide
+        )
+    }
+
+    private fun candidateForOrder(
+        order: PaperOrder,
+        referencePrice: Double
+    ): PaperSignalCandidate {
+        val entryLow = order.entryLow ?: minOf(
+            referencePrice,
+            order.entryPrice
+        )
+        val entryHigh = order.entryHigh ?: maxOf(
+            referencePrice,
+            order.entryPrice
+        )
+        val stopLoss = order.stopLoss ?: referencePrice
+        val target1 = order.target1 ?: order.target ?: referencePrice
+        val target2 = order.target2 ?: target1
+        val target3 = order.target3 ?: target2
+        return PaperSignalCandidate(
+            signalId = order.signalId ?: 0L,
+            symbol = order.symbol,
+            exchange = order.exchange,
+            side = order.side,
+            category = order.signalCategory,
+            timeframe = order.signalTimeframe,
+            strategyId = order.strategyId,
+            strategyVersion = order.strategyVersion,
+            referencePrice = referencePrice,
+            entryLow = entryLow,
+            entryHigh = entryHigh,
+            stopLoss = stopLoss,
+            target1 = target1,
+            target2 = target2,
+            target3 = target3,
+            generatedAt = order.signalGeneratedAt ?: order.createdAt,
+            expiresAt = order.signalExpiresAt ?: Long.MAX_VALUE,
+            costBpsPerSide = order.costBpsPerSide,
+            slippageBpsPerSide = order.slippageBpsPerSide
+        )
     }
 
     private fun queryOrder(db: SQLiteDatabase, orderId: Long): PaperOrder? {

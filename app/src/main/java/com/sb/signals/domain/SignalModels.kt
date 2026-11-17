@@ -100,7 +100,8 @@ data class SignalLevels(
 data class SignalIndicatorSnapshot(
     val values: Map<String, Double?> = emptyMap(),
     val confirmations: Map<String, Boolean> = emptyMap(),
-    val parameters: Map<String, Double?> = emptyMap()
+    val parameters: Map<String, Double?> = emptyMap(),
+    val scores: Map<String, Double?> = emptyMap()
 )
 
 data class DataQuality(

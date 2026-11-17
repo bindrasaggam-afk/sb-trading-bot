@@ -34,6 +34,9 @@ import com.sb.backend.market.model.InstrumentKey
 import com.sb.backend.market.repo.MarketFeedRepository
 import com.sb.backend.models.Instrument
 import com.sb.backend.repositories.InstrumentRepository
+import com.sb.overview.AllInstrumentsScreen
+import com.sb.overview.InstrumentDetailScreen
+import com.sb.researchanalytics.dashboard.ResearchAnalyticsScreen
 import com.sb.signals.presentation.SignalsScreen
 import com.sb.signals.services.SignalsPlatform
 import com.sb.ui.market.InstrumentLiveViewModel
@@ -79,6 +82,10 @@ class MainActivity : AppCompatActivity() {
     private var mcxCommodity = ""
     private var mcxExpirySymbol = ""
     private var settingsScreen: SettingsScreen? = null
+    private var allInstrumentsScreen: AllInstrumentsScreen? = null
+    private var instrumentDetailScreen: InstrumentDetailScreen? = null
+    private var detailExchange = ""
+    private var detailSymbol = ""
     private val quoteHandler = Handler(Looper.getMainLooper())
     private var quoteRefresh: Runnable? = null
     private val marketListAdapter = MarketListAdapter()
@@ -118,7 +125,11 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        if (currentScreen != "Home") {
+        if (currentScreen == "Instrument Detail") {
+            showScreen("All Instruments")
+        } else if (currentScreen == "All Instruments") {
+            showScreen("Home")
+        } else if (currentScreen != "Home") {
             showScreen("Home")
         } else {
             super.onBackPressed()
@@ -203,6 +214,7 @@ class MainActivity : AppCompatActivity() {
         val navItems = listOf(
             "Home" to "⌂",
             "Signals" to "↗",
+            "Analytics" to "◫",
             "Paper" to "▤",
             "Positions" to "▣",
             "Market" to "⌁"
@@ -393,6 +405,22 @@ class MainActivity : AppCompatActivity() {
         return valueView
     }
 
+    private fun releaseOverviewScreens() {
+        allInstrumentsScreen?.release()
+        allInstrumentsScreen = null
+        instrumentDetailScreen?.release()
+        instrumentDetailScreen = null
+    }
+
+    private fun openInstrumentDetail(
+        exchange: String,
+        symbol: String
+    ) {
+        detailExchange = exchange.trim().uppercase(Locale.ROOT)
+        detailSymbol = symbol.trim()
+        showScreen("Instrument Detail")
+    }
+
     private fun openChart(
         symbol: String,
         exchange: String,
@@ -412,6 +440,7 @@ class MainActivity : AppCompatActivity() {
         marketListVisible = false
         stopQuoteRefresh()
         stopMarketTicks()
+        releaseOverviewScreens()
         marketListAdapter.release()
         content.removeAllViews()
         chartScreen = null
@@ -446,6 +475,7 @@ class MainActivity : AppCompatActivity() {
         marketListVisible = false
         stopQuoteRefresh()
         stopMarketTicks()
+        releaseOverviewScreens()
         marketListAdapter.release()
         content.removeAllViews()
         chartScreen = null
@@ -483,6 +513,58 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        if (screen == "All Instruments") {
+            val overview = AllInstrumentsScreen(
+                context = this,
+                scope = lifecycleScope,
+                onBack = { showScreen("Home") },
+                onInstrumentSelected = { instrument ->
+                    openInstrumentDetail(
+                        instrument.exchange,
+                        instrument.symbol
+                    )
+                }
+            )
+            allInstrumentsScreen = overview
+
+            content.addView(
+                overview.createView(),
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            )
+            return
+        }
+
+        if (screen == "Instrument Detail") {
+            if (detailExchange.isBlank() || detailSymbol.isBlank()) {
+                showScreen("All Instruments")
+                return
+            }
+
+            val detail = InstrumentDetailScreen(
+                context = this,
+                exchange = detailExchange,
+                symbol = detailSymbol,
+                scope = lifecycleScope,
+                onBack = { showScreen("All Instruments") },
+                onOpenChart = { exchange, symbol ->
+                    openChart(symbol, exchange, "")
+                }
+            )
+            instrumentDetailScreen = detail
+
+            content.addView(
+                detail.createView(),
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            )
+            return
+        }
+
         val scroll = ScrollView(this).apply {
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -506,6 +588,7 @@ class MainActivity : AppCompatActivity() {
         when (screen) {
             "Home" -> showDashboard(body)
             "Signals" -> showSignals(body)
+            "Analytics" -> showAnalytics(body)
             "Paper" -> {
                 content.removeAllViews()
                 content.addView(
@@ -655,9 +738,11 @@ class MainActivity : AppCompatActivity() {
 
         addLabel(body, "Quick Access", 18f, yellow, true)
         addActionCard(body, "📈  Research Signals", "Signals")
+        addActionCard(body, "◫  Research & Analytics", "Analytics")
         addActionCard(body, "📝  Paper Trading", "Paper")
         addActionCard(body, "▣  Open Positions", "Positions")
         addActionCard(body, "⌁  Market Watch", "Market")
+        addActionCard(body, "☷  All Instruments", "All Instruments")
         addActionCard(body, "▥  Chart", "Chart")
 
         addLabel(body, "Market Watch", 18f, yellow, true)
@@ -833,6 +918,7 @@ class MainActivity : AppCompatActivity() {
         chromeAnimator = null
         stopQuoteRefresh()
         stopMarketTicks()
+        releaseOverviewScreens()
         marketListAdapter.release()
 
         // Close only Settings UI resources.
@@ -864,6 +950,16 @@ class MainActivity : AppCompatActivity() {
 
     private fun showSignals(body: LinearLayout) {
         SignalsScreen.show(
+            context = this,
+            container = body,
+            onOpenChart = { symbol, exchange ->
+                openChart(symbol, exchange, "Market")
+            }
+        )
+    }
+
+    private fun showAnalytics(body: LinearLayout) {
+        ResearchAnalyticsScreen.show(
             context = this,
             container = body,
             onOpenChart = { symbol, exchange ->
@@ -994,6 +1090,7 @@ class MainActivity : AppCompatActivity() {
 
         addLabel(body, "Market Watch", 22f, white, true)
         body.addView(createMarketTabs())
+        addActionCard(body, "☷  All Instruments (all exchanges)", "All Instruments")
 
         if (marketTab == "F&O" && marketCategory.isBlank()) {
             addLabel(body, "F&O Categories", 17f, yellow, true)
@@ -1685,6 +1782,12 @@ class MainActivity : AppCompatActivity() {
 
         root.addView(makeText("Market Watch", 22f, white, true))
         root.addView(createMarketTabs())
+        root.addView(
+            makeText("☷  All Instruments", 11f, yellow, true).apply {
+                setPadding(0, dp(6), 0, dp(6))
+                setOnClickListener { showScreen("All Instruments") }
+            }
+        )
 
         if (isMcx && mcxGroups.isNotEmpty()) {
             root.addView(createMcxSelectors(mcxGroups))
@@ -2170,6 +2273,7 @@ class MainActivity : AppCompatActivity() {
             "Paper" to "▤",
             "Positions" to "▣",
             "Market" to "⌁",
+            "All Instruments" to "☷",
             "No Live Price" to "⚠",
             "Chart" to "▥",
             "Stock Search" to "⌕",

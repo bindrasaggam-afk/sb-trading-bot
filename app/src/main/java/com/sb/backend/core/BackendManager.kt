@@ -97,7 +97,12 @@ object BackendManager {
                 onSignalCycle = {
                     val context = appContext
                     if (context != null) {
-                        PaperSignalBridge.forwardOpenSignals(context)
+                        val result =
+                            PaperSignalBridge.forwardOpenSignals(context)
+                        Log.d(
+                            TAG,
+                            "Paper signal bridge ${result.summary()}"
+                        )
                     }
                 }
             )
@@ -196,9 +201,11 @@ object BackendManager {
                             Log.i(
                                 TAG,
                                 "Paper legacy cleanup: ${cleanup.message} " +
-                                    "orders=${cleanup.deletedOrders}, " +
-                                    "positions=${cleanup.deletedPositions}, " +
-                                    "executions=${cleanup.deletedExecutions}, " +
+                                    "deletedOrders=${cleanup.deletedOrders}, " +
+                                    "deletedPositions=${cleanup.deletedPositions}, " +
+                                    "deletedExecutions=${cleanup.deletedExecutions}, " +
+                                    "preservedOrders=${cleanup.preservedOrders}, " +
+                                    "uncertainOrders=${cleanup.uncertainOrders}, " +
                                     "backup=${cleanup.backupFile?.name.orEmpty()}"
                             )
                         } catch (cleanupError: Exception) {

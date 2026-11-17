@@ -4,21 +4,21 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import com.sb.backend.core.AppConfig
+import com.sb.backend.models.OrderSide
+import com.sb.backend.models.OrderStatus
+import com.sb.backend.trading.PaperSignalPolicy
 import java.io.File
 
 /**
- * Removes pre-automation paper records that have no genuine signal provenance.
- *
- * Cleanup is all-or-nothing: a backup is taken first, then all paper ledger rows
- * are removed and the account is reset in one transaction. If any signal-linked
- * data exists, cleanup refuses to touch the ledger.
+ * Selectively removes test-generated paper records while preserving genuine
+ * signal-linked records and records whose provenance cannot be proven.
  */
 object PaperLegacyCleanup {
 
-    const val MARKER_KEY = "paper_legacy_cleanup_v1"
+    const val MARKER_KEY = "paper_legacy_cleanup_v2"
 
-    private const val SUPPRESSED_MIGRATION_VALUE = "suppressed_by_cleanup_v1"
-    private const val EPSILON = 0.000001
+    private const val SUPPRESSED_MIGRATION_VALUE = "suppressed_by_cleanup_v2"
+    private const val DELETE_CHUNK_SIZE = 500
 
     data class Result(
         val applied: Boolean,
@@ -28,6 +28,14 @@ object PaperLegacyCleanup {
         val deletedPositions: Int,
         val deletedExecutions: Int,
         val deletedEvents: Int,
+        val preservedOrders: Int,
+        val preservedPositions: Int,
+        val preservedExecutions: Int,
+        val preservedEvents: Int,
+        val uncertainOrders: Int,
+        val uncertainPositions: Int,
+        val uncertainExecutions: Int,
+        val uncertainEvents: Int,
         val message: String
     )
 
@@ -37,45 +45,11 @@ object PaperLegacyCleanup {
         now: Long = System.currentTimeMillis()
     ): Result {
         val db = databaseHelper.writableDatabase
-        if (readMarker(db) != null) {
-            return Result(
-                applied = false,
-                skipped = true,
-                backupFile = null,
-                deletedOrders = 0,
-                deletedPositions = 0,
-                deletedExecutions = 0,
-                deletedEvents = 0,
-                message = "Paper legacy cleanup already completed."
-            )
-        }
-
-        val provenance = readProvenance(db)
-        if (provenance.signalLinkedRows > 0) {
-            return Result(
-                applied = false,
-                skipped = true,
-                backupFile = null,
-                deletedOrders = 0,
-                deletedPositions = 0,
-                deletedExecutions = 0,
-                deletedEvents = 0,
-                message = "Cleanup skipped: signal-linked paper data exists."
-            )
-        }
-
-        val existingRows = provenance.totalRows
-        val backupFile = if (existingRows > 0) {
+        val initialPlan = buildPlan(db)
+        val backupFile = if (initialPlan.hasDestructiveRows) {
             DatabaseBackup(context, databaseHelper)
                 .backup("sb_paper_legacy_cleanup")
-                ?: return Result(
-                    applied = false,
-                    skipped = true,
-                    backupFile = null,
-                    deletedOrders = 0,
-                    deletedPositions = 0,
-                    deletedExecutions = 0,
-                    deletedEvents = 0,
+                ?: return skipped(
                     message = "Cleanup skipped: database backup failed."
                 )
         } else {
@@ -84,73 +58,82 @@ object PaperLegacyCleanup {
 
         db.beginTransaction()
         try {
-            val recheck = readProvenance(db)
-            check(recheck.signalLinkedRows == 0) {
-                "Signal-linked paper data appeared during cleanup."
+            val plan = buildPlan(db)
+            if (plan.hasDestructiveRows && backupFile == null) {
+                throw IllegalStateException(
+                    "Test-generated paper rows appeared during cleanup."
+                )
             }
 
-            val deletedExecutions = db.delete(
+            val deletedExecutions = deleteByIds(
+                db,
                 SBDatabaseHelper.TABLE_PAPER_EXECUTIONS,
-                null,
-                null
+                plan.testExecutionIds
             )
-            val deletedEvents = db.delete(
+            val deletedEvents = deleteByIds(
+                db,
                 SBDatabaseHelper.TABLE_PAPER_EVENTS,
-                null,
-                null
+                plan.testEventIds
             )
-            val deletedPositions = db.delete(
+            val deletedPositions = deleteByIds(
+                db,
                 SBDatabaseHelper.TABLE_POSITIONS,
-                null,
-                null
+                plan.testPositionIds
             )
-            val deletedOrders = db.delete(
+            val deletedOrders = deleteByIds(
+                db,
                 SBDatabaseHelper.TABLE_PAPER_ORDERS,
-                null,
-                null
+                plan.testOrderIds
             )
 
             val startingBalance = readStartingBalance(db)
                 ?.takeIf { it.isFinite() && it > 0.0 }
                 ?: AppConfig.get().paperStartingBalance
-            val accountValues = ContentValues().apply {
-                put("id", 1)
-                put("starting_balance", startingBalance)
-                put("balance", startingBalance)
-                put("reserved_margin", 0.0)
-                put("realized_pnl", 0.0)
-                put("updated_at", now)
-            }
-            db.insertWithOnConflict(
-                SBDatabaseHelper.TABLE_PAPER_ACCOUNT,
-                null,
-                accountValues,
-                SQLiteDatabase.CONFLICT_REPLACE
+            rebuildAccount(
+                db = db,
+                startingBalance = startingBalance,
+                now = now
             )
 
-            verifyCleanup(db, startingBalance)
             writeMarker(
                 db = db,
-                value = "v1|backup=${backupFile?.name.orEmpty()}" +
+                value = "v2|backup=${backupFile?.name.orEmpty()}" +
                     "|orders=$deletedOrders" +
                     "|positions=$deletedPositions" +
                     "|executions=$deletedExecutions" +
                     "|events=$deletedEvents" +
+                    "|preserved=${plan.preservedOrderCount}" +
+                    "|uncertain=${plan.uncertainOrderCount}" +
                     "|starting=$startingBalance",
                 now = now
             )
-            suppressLegacyMigration(db, now)
+            if (plan.hasDestructiveRows) {
+                suppressLegacyMigration(db, now)
+            }
 
             db.setTransactionSuccessful()
             return Result(
-                applied = true,
-                skipped = false,
+                applied = plan.hasDestructiveRows,
+                skipped = !plan.hasDestructiveRows,
                 backupFile = backupFile,
                 deletedOrders = deletedOrders,
                 deletedPositions = deletedPositions,
                 deletedExecutions = deletedExecutions,
                 deletedEvents = deletedEvents,
-                message = "Paper legacy cleanup completed."
+                preservedOrders = plan.preservedOrderCount,
+                preservedPositions = plan.preservedPositionCount,
+                preservedExecutions = plan.preservedExecutionCount,
+                preservedEvents = plan.preservedEventCount,
+                uncertainOrders = plan.uncertainOrderCount,
+                uncertainPositions = plan.uncertainPositionCount,
+                uncertainExecutions = plan.uncertainExecutionCount,
+                uncertainEvents = plan.uncertainEventCount,
+                message = if (plan.hasDestructiveRows) {
+                    "Paper legacy cleanup removed test-generated records " +
+                        "and preserved signal provenance."
+                } else {
+                    "No test-generated paper rows found; account reconciled."
+                }
             )
         } finally {
             db.endTransaction()
@@ -172,77 +155,343 @@ object PaperLegacyCleanup {
         }
     }
 
-    private fun readProvenance(db: SQLiteDatabase): Provenance {
-        val signalLinked = count(
+    private fun buildPlan(db: SQLiteDatabase): CleanupPlan {
+        val orders = readOrders(db)
+        val orderClasses = orders.associate { order ->
+            order.id to PaperLegacyClassifier.classifyOrder(
+                signalId = order.signalId,
+                entrySource = order.entrySource
+            )
+        }
+        val testOrderIds = orderClasses.filterValues {
+            it == PaperRecordClass.TEST_GENERATED
+        }.keys
+        var genuineOrders = 0
+        var uncertainOrders = 0
+        orderClasses.values.forEach { recordClass ->
+            when (recordClass) {
+                PaperRecordClass.GENUINE_SIGNAL -> genuineOrders++
+                PaperRecordClass.UNCERTAIN -> uncertainOrders++
+                PaperRecordClass.TEST_GENERATED -> Unit
+            }
+        }
+
+        val positions = readChildRows(
             db,
-            "SELECT " +
-                "(SELECT COUNT(*) FROM ${SBDatabaseHelper.TABLE_PAPER_ORDERS} " +
-                "WHERE signal_id IS NOT NULL) + " +
-                "(SELECT COUNT(*) FROM " +
-                "${SBDatabaseHelper.TABLE_PAPER_EXECUTIONS} " +
-                "WHERE signal_id IS NOT NULL) + " +
-                "(SELECT COUNT(*) FROM ${SBDatabaseHelper.TABLE_PAPER_EVENTS} " +
-                "WHERE signal_id IS NOT NULL)"
+            SBDatabaseHelper.TABLE_POSITIONS,
+            includeSignalId = false
         )
-        val total = count(
+        val testPositionIds = ArrayList<Long>()
+        var genuinePositions = 0
+        var uncertainPositions = 0
+        positions.forEach { row ->
+            val recordClass = PaperLegacyClassifier.classifyChild(
+                parentClass = row.orderId?.let { orderClasses[it] },
+                childSignalId = row.signalId
+            )
+            when (recordClass) {
+                PaperRecordClass.TEST_GENERATED ->
+                    testPositionIds.add(row.id)
+                PaperRecordClass.GENUINE_SIGNAL -> genuinePositions++
+                PaperRecordClass.UNCERTAIN -> uncertainPositions++
+            }
+        }
+
+        val executions = readChildRows(
             db,
-            "SELECT (SELECT COUNT(*) FROM " +
-                "${SBDatabaseHelper.TABLE_PAPER_ORDERS}) + " +
-                "(SELECT COUNT(*) FROM ${SBDatabaseHelper.TABLE_POSITIONS}) + " +
-                "(SELECT COUNT(*) FROM " +
-                "${SBDatabaseHelper.TABLE_PAPER_EXECUTIONS}) + " +
-                "(SELECT COUNT(*) FROM ${SBDatabaseHelper.TABLE_PAPER_EVENTS})"
-        ) + if (readStartingBalance(db) != null) 1 else 0
-        return Provenance(
-            signalLinkedRows = signalLinked,
-            totalRows = total
+            SBDatabaseHelper.TABLE_PAPER_EXECUTIONS
+        )
+        val testExecutionIds = ArrayList<Long>()
+        var genuineExecutions = 0
+        var uncertainExecutions = 0
+        executions.forEach { row ->
+            val recordClass = PaperLegacyClassifier.classifyChild(
+                parentClass = row.orderId?.let { orderClasses[it] },
+                childSignalId = row.signalId
+            )
+            when (recordClass) {
+                PaperRecordClass.TEST_GENERATED ->
+                    testExecutionIds.add(row.id)
+                PaperRecordClass.GENUINE_SIGNAL -> genuineExecutions++
+                PaperRecordClass.UNCERTAIN -> uncertainExecutions++
+            }
+        }
+
+        val events = readChildRows(db, SBDatabaseHelper.TABLE_PAPER_EVENTS)
+        val testEventIds = ArrayList<Long>()
+        var genuineEvents = 0
+        var uncertainEvents = 0
+        events.forEach { row ->
+            val recordClass = PaperLegacyClassifier.classifyChild(
+                parentClass = row.orderId?.let { orderClasses[it] },
+                childSignalId = row.signalId
+            )
+            when (recordClass) {
+                PaperRecordClass.TEST_GENERATED -> testEventIds.add(row.id)
+                PaperRecordClass.GENUINE_SIGNAL -> genuineEvents++
+                PaperRecordClass.UNCERTAIN -> uncertainEvents++
+            }
+        }
+
+        return CleanupPlan(
+            testOrderIds = testOrderIds,
+            testPositionIds = testPositionIds,
+            testExecutionIds = testExecutionIds,
+            testEventIds = testEventIds,
+            preservedOrderCount = genuineOrders + uncertainOrders,
+            preservedPositionCount = genuinePositions + uncertainPositions,
+            preservedExecutionCount = genuineExecutions + uncertainExecutions,
+            preservedEventCount = genuineEvents + uncertainEvents,
+            uncertainOrderCount = uncertainOrders,
+            uncertainPositionCount = uncertainPositions,
+            uncertainExecutionCount = uncertainExecutions,
+            uncertainEventCount = uncertainEvents
         )
     }
 
-    private fun verifyCleanup(db: SQLiteDatabase, startingBalance: Double) {
-        val remainingData = count(
-            db,
-            "SELECT (SELECT COUNT(*) FROM " +
-                "${SBDatabaseHelper.TABLE_PAPER_ORDERS}) + " +
-                "(SELECT COUNT(*) FROM ${SBDatabaseHelper.TABLE_POSITIONS}) + " +
-                "(SELECT COUNT(*) FROM " +
-                "${SBDatabaseHelper.TABLE_PAPER_EXECUTIONS}) + " +
-                "(SELECT COUNT(*) FROM ${SBDatabaseHelper.TABLE_PAPER_EVENTS})"
-        )
-        check(remainingData == 0) {
-            "Paper cleanup verification failed: ledger rows remain."
+    private fun rebuildAccount(
+        db: SQLiteDatabase,
+        startingBalance: Double,
+        now: Long
+    ) {
+        val orders = readOrders(db)
+        var balance = startingBalance
+        var reservedMargin = 0.0
+        var realizedPnl = 0.0
+
+        orders.forEach { order ->
+            val executions = readExecutionsForOrder(db, order.id)
+            val entryExecution = executions.firstOrNull {
+                it.kind == "ENTRY"
+            }
+            val entered = entryExecution != null ||
+                order.entryTimestamp != null ||
+                order.status == OrderStatus.OPEN.name ||
+                order.status == OrderStatus.CLOSED.name
+            val entryPrice = entryExecution?.price ?: order.entryPrice
+            val entryQuantity = entryExecution?.quantity ?: order.quantity
+            val entryCharge = when {
+                order.entryCharges > 0.0 -> order.entryCharges
+                entryExecution != null -> entryExecution.charges
+                else -> 0.0
+            }
+
+            if (entered) {
+                if (order.side == OrderSide.BUY.name) {
+                    balance -= entryPrice * entryQuantity + entryCharge
+                } else {
+                    balance -= entryCharge
+                }
+                realizedPnl -= entryCharge
+            }
+
+            val exits = executions.filter { it.kind != "ENTRY" }
+            if (exits.isNotEmpty()) {
+                exits.forEach { execution ->
+                    val exitCharge = PaperSignalPolicy.exitCharge(
+                        price = execution.price,
+                        quantity = execution.quantity,
+                        costBps = order.costBpsPerSide
+                    )
+                    if (order.side == OrderSide.BUY.name) {
+                        balance += execution.price * execution.quantity -
+                            exitCharge
+                    } else {
+                        balance += execution.grossPnl - exitCharge
+                    }
+                    realizedPnl += execution.grossPnl - exitCharge
+                }
+            } else if (entered &&
+                order.status == OrderStatus.CLOSED.name &&
+                order.exitPrice != null
+            ) {
+                val gross = PaperSignalPolicy.grossPnl(
+                    side = order.side,
+                    entryPrice = entryPrice,
+                    exitPrice = order.exitPrice,
+                    quantity = entryQuantity
+                )
+                val exitCharge = PaperSignalPolicy.exitCharge(
+                    price = order.exitPrice,
+                    quantity = entryQuantity,
+                    costBps = order.costBpsPerSide
+                )
+                if (order.side == OrderSide.BUY.name) {
+                    balance += order.exitPrice * entryQuantity - exitCharge
+                } else {
+                    balance += gross - exitCharge
+                }
+                realizedPnl += gross - exitCharge
+            }
+
+            if (order.status == OrderStatus.PENDING.name) {
+                val requirement = PaperSignalPolicy.capitalRequirement(
+                    side = order.side,
+                    price = order.entryPrice,
+                    quantity = order.quantity,
+                    costBpsPerSide = order.costBpsPerSide,
+                    shortMarginRate = AppConfig.get().shortMarginRate
+                )
+                val requiredReservation = if (order.reservedMargin > 0.0) {
+                    order.reservedMargin
+                } else {
+                    requirement.totalReservation
+                }
+                reservedMargin += requiredReservation
+                if (order.reservedMargin <= 0.0 &&
+                    requiredReservation > 0.0
+                ) {
+                    val values = ContentValues().apply {
+                        put("reserved_margin", requiredReservation)
+                        put("updated_at", now)
+                    }
+                    db.update(
+                        SBDatabaseHelper.TABLE_PAPER_ORDERS,
+                        values,
+                        "id = ? AND status = ?",
+                        arrayOf(
+                            order.id.toString(),
+                            OrderStatus.PENDING.name
+                        )
+                    )
+                }
+            } else if (order.status == OrderStatus.OPEN.name) {
+                reservedMargin += order.reservedMargin
+            }
         }
 
-        db.query(
+        require(balance.isFinite() && realizedPnl.isFinite() &&
+            reservedMargin.isFinite() && reservedMargin >= 0.0) {
+            "Paper account rebuild produced invalid values."
+        }
+        val accountValues = ContentValues().apply {
+            put("id", 1)
+            put("starting_balance", startingBalance)
+            put("balance", balance)
+            put("reserved_margin", reservedMargin)
+            put("realized_pnl", realizedPnl)
+            put("updated_at", now)
+        }
+        db.insertWithOnConflict(
             SBDatabaseHelper.TABLE_PAPER_ACCOUNT,
+            null,
+            accountValues,
+            SQLiteDatabase.CONFLICT_REPLACE
+        )
+    }
+
+    private fun readOrders(db: SQLiteDatabase): List<OrderSnapshot> {
+        val result = ArrayList<OrderSnapshot>()
+        db.query(
+            SBDatabaseHelper.TABLE_PAPER_ORDERS,
             arrayOf(
-                "starting_balance",
-                "balance",
+                "id",
+                "signal_id",
+                "entry_source",
+                "side",
+                "quantity",
+                "entry_price",
+                "exit_price",
                 "reserved_margin",
-                "realized_pnl"
+                "status",
+                "entry_timestamp",
+                "entry_charges",
+                "cost_bps_per_side"
             ),
-            "id = ?",
-            arrayOf("1"),
             null,
             null,
-            null
+            null,
+            null,
+            "id ASC"
         ).use { cursor ->
-            check(cursor.moveToFirst()) {
-                "Paper cleanup verification failed: account is missing."
-            }
-            check(kotlin.math.abs(cursor.getDouble(0) - startingBalance) <= EPSILON) {
-                "Paper cleanup verification failed: starting balance mismatch."
-            }
-            check(kotlin.math.abs(cursor.getDouble(1) - startingBalance) <= EPSILON) {
-                "Paper cleanup verification failed: balance mismatch."
-            }
-            check(kotlin.math.abs(cursor.getDouble(2)) <= EPSILON) {
-                "Paper cleanup verification failed: reserved margin remains."
-            }
-            check(kotlin.math.abs(cursor.getDouble(3)) <= EPSILON) {
-                "Paper cleanup verification failed: realized P&L remains."
+            while (cursor.moveToNext()) {
+                result.add(
+                    OrderSnapshot(
+                        id = cursor.getLong(0),
+                        signalId = cursor.getLongOrNull(1),
+                        entrySource = cursor.getString(2),
+                        side = cursor.getString(3),
+                        quantity = cursor.getInt(4),
+                        entryPrice = cursor.getDouble(5),
+                        exitPrice = cursor.getDoubleOrNull(6),
+                        reservedMargin = cursor.getDouble(7),
+                        status = cursor.getString(8),
+                        entryTimestamp = cursor.getLongOrNull(9),
+                        entryCharges = cursor.getDouble(10),
+                        costBpsPerSide = cursor.getDouble(11)
+                    )
+                )
             }
         }
+        return result
+    }
+
+    private fun readChildRows(
+        db: SQLiteDatabase,
+        table: String,
+        includeSignalId: Boolean = true
+    ): List<ChildRow> {
+        val result = ArrayList<ChildRow>()
+        val projection = if (includeSignalId) {
+            arrayOf("id", "order_id", "signal_id")
+        } else {
+            arrayOf("id", "order_id", "NULL AS signal_id")
+        }
+        db.query(
+            table,
+            projection,
+            null,
+            null,
+            null,
+            null,
+            "id ASC"
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                result.add(
+                    ChildRow(
+                        id = cursor.getLong(0),
+                        orderId = cursor.getLongOrNull(1),
+                        signalId = cursor.getLongOrNull(2)
+                    )
+                )
+            }
+        }
+        return result
+    }
+
+    private fun readExecutionsForOrder(
+        db: SQLiteDatabase,
+        orderId: Long
+    ): List<ExecutionSnapshot> {
+        val result = ArrayList<ExecutionSnapshot>()
+        db.query(
+            SBDatabaseHelper.TABLE_PAPER_EXECUTIONS,
+            arrayOf(
+                "kind",
+                "quantity",
+                "price",
+                "gross_pnl",
+                "charges"
+            ),
+            "order_id = ?",
+            arrayOf(orderId.toString()),
+            null,
+            null,
+            "executed_at ASC, id ASC"
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                result.add(
+                    ExecutionSnapshot(
+                        kind = cursor.getString(0),
+                        quantity = cursor.getInt(1),
+                        price = cursor.getDouble(2),
+                        grossPnl = cursor.getDouble(3),
+                        charges = cursor.getDouble(4)
+                    )
+                )
+            }
+        }
+        return result
     }
 
     private fun readStartingBalance(db: SQLiteDatabase): Double? {
@@ -296,10 +545,22 @@ object PaperLegacyCleanup {
         )
     }
 
-    private fun count(db: SQLiteDatabase, sql: String): Int {
-        db.rawQuery(sql, null).use { cursor ->
-            return if (cursor.moveToFirst()) cursor.getInt(0) else 0
+    private fun deleteByIds(
+        db: SQLiteDatabase,
+        table: String,
+        ids: Collection<Long>
+    ): Int {
+        if (ids.isEmpty()) return 0
+        var deleted = 0
+        ids.chunked(DELETE_CHUNK_SIZE).forEach { chunk ->
+            val placeholders = chunk.joinToString(",") { "?" }
+            deleted += db.delete(
+                table,
+                "id IN ($placeholders)",
+                chunk.map { it.toString() }.toTypedArray()
+            )
         }
+        return deleted
     }
 
     private fun tableExists(db: SQLiteDatabase, table: String): Boolean {
@@ -312,8 +573,82 @@ object PaperLegacyCleanup {
         }
     }
 
-    private data class Provenance(
-        val signalLinkedRows: Int,
-        val totalRows: Int
+    private fun skipped(message: String): Result {
+        return Result(
+            applied = false,
+            skipped = true,
+            backupFile = null,
+            deletedOrders = 0,
+            deletedPositions = 0,
+            deletedExecutions = 0,
+            deletedEvents = 0,
+            preservedOrders = 0,
+            preservedPositions = 0,
+            preservedExecutions = 0,
+            preservedEvents = 0,
+            uncertainOrders = 0,
+            uncertainPositions = 0,
+            uncertainExecutions = 0,
+            uncertainEvents = 0,
+            message = message
+        )
+    }
+
+    private fun android.database.Cursor.getLongOrNull(index: Int): Long? {
+        return if (isNull(index)) null else getLong(index)
+    }
+
+    private fun android.database.Cursor.getDoubleOrNull(index: Int): Double? {
+        return if (isNull(index)) null else getDouble(index)
+    }
+
+    private data class ChildRow(
+        val id: Long,
+        val orderId: Long?,
+        val signalId: Long?
     )
+
+    private data class OrderSnapshot(
+        val id: Long,
+        val signalId: Long?,
+        val entrySource: String?,
+        val side: String,
+        val quantity: Int,
+        val entryPrice: Double,
+        val exitPrice: Double?,
+        val reservedMargin: Double,
+        val status: String,
+        val entryTimestamp: Long?,
+        val entryCharges: Double,
+        val costBpsPerSide: Double
+    )
+
+    private data class ExecutionSnapshot(
+        val kind: String,
+        val quantity: Int,
+        val price: Double,
+        val grossPnl: Double,
+        val charges: Double
+    )
+
+    private data class CleanupPlan(
+        val testOrderIds: Collection<Long>,
+        val testPositionIds: Collection<Long>,
+        val testExecutionIds: Collection<Long>,
+        val testEventIds: Collection<Long>,
+        val preservedOrderCount: Int,
+        val preservedPositionCount: Int,
+        val preservedExecutionCount: Int,
+        val preservedEventCount: Int,
+        val uncertainOrderCount: Int,
+        val uncertainPositionCount: Int,
+        val uncertainExecutionCount: Int,
+        val uncertainEventCount: Int
+    ) {
+        val hasDestructiveRows: Boolean
+            get() = testOrderIds.isNotEmpty() ||
+                testPositionIds.isNotEmpty() ||
+                testExecutionIds.isNotEmpty() ||
+                testEventIds.isNotEmpty()
+    }
 }

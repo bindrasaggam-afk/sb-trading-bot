@@ -3,6 +3,8 @@ package com.sb.signals.data
 import android.content.ContentValues
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
+import android.util.Log
+import com.sb.researchanalytics.data.ResearchSnapshotWriter
 import com.sb.signals.domain.HoldingFilterGroup
 import com.sb.signals.domain.HoldingPeriod
 import com.sb.signals.domain.ResearchSignal
@@ -46,6 +48,22 @@ class SignalRepository(
                             "v${signal.strategyVersion}"
                     )
                 )
+                try {
+                    ResearchSnapshotWriter.capture(
+                        db = db,
+                        signalId = insertedId,
+                        signal = signal
+                    )
+                } catch (error: Exception) {
+                    // The original signal row already contains the exact
+                    // snapshot JSON. Never fail signal generation because
+                    // the analytics projection could not be written.
+                    Log.e(
+                        "SignalRepository",
+                        "Research analytics snapshot capture failed",
+                        error
+                    )
+                }
             }
             db.setTransactionSuccessful()
         } finally {
@@ -92,6 +110,52 @@ class SignalRepository(
                 selectionArgs = emptyArray(),
                 limit = limit.coerceIn(1, 20000)
             )
+        }
+
+    /**
+     * Read-only paged access used by the independent analytics module.
+     * No trading state is changed by this query.
+     */
+    fun getSignalsPage(
+        limit: Int = 500,
+        offset: Int = 0
+    ): List<ResearchSignal> = synchronized(lock) {
+        val result = ArrayList<ResearchSignal>()
+        database.readableDatabase.query(
+            SignalMigrations.TABLE_SIGNALS,
+            null,
+            null,
+            null,
+            null,
+            null,
+            "generated_at DESC, id DESC",
+            "${limit.coerceIn(1, 5000)} OFFSET ${offset.coerceAtLeast(0)}"
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                result.add(readSignal(cursor))
+            }
+        }
+        result
+    }
+
+    fun getAllSignals(limit: Int = 50000): List<ResearchSignal> =
+        synchronized(lock) {
+            val result = ArrayList<ResearchSignal>()
+            database.readableDatabase.query(
+                SignalMigrations.TABLE_SIGNALS,
+                null,
+                null,
+                null,
+                null,
+                null,
+                "generated_at DESC, id DESC",
+                limit.coerceIn(1, 100000).toString()
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    result.add(readSignal(cursor))
+                }
+            }
+            result
         }
 
     fun query(filter: SignalFilter): List<ResearchSignal> = synchronized(lock) {
@@ -184,6 +248,47 @@ class SignalRepository(
         }
         result
     }
+
+    fun getAllEvents(limit: Int = 50000): List<SignalEvent> =
+        synchronized(lock) {
+            val result = ArrayList<SignalEvent>()
+            database.readableDatabase.query(
+                SignalMigrations.TABLE_EVENTS,
+                null,
+                null,
+                null,
+                null,
+                null,
+                "event_time ASC, id ASC",
+                limit.coerceIn(1, 100000).toString()
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    result.add(
+                        SignalEvent(
+                            id = cursor.getLong(
+                                cursor.getColumnIndexOrThrow("id")
+                            ),
+                            signalId = cursor.getLong(
+                                cursor.getColumnIndexOrThrow("signal_id")
+                            ),
+                            fromStatus = cursor.getStringOrNull(
+                                "from_status"
+                            )?.let { SignalLifecycleStatus.fromName(it) },
+                            toStatus = SignalLifecycleStatus.fromName(
+                                cursor.getStringOrNull("to_status").orEmpty()
+                            ) ?: SignalLifecycleStatus.NEW,
+                            eventTime = cursor.getLong(
+                                cursor.getColumnIndexOrThrow("event_time")
+                            ),
+                            price = cursor.getDoubleOrNull("price"),
+                            message = cursor.getStringOrNull("message")
+                                .orEmpty()
+                        )
+                    )
+                }
+            }
+            result
+        }
 
     fun applyEvaluation(
         before: ResearchSignal,
@@ -517,6 +622,9 @@ class SignalRepository(
                 ),
                 parameters = SignalJson.decodeDoubleMap(
                     cursor.getStringOrNull("indicator_params_json")
+                ),
+                scores = SignalJson.decodeDoubleMap(
+                    cursor.getStringOrNull("indicator_scores_json")
                 )
             ),
             dataQuality = SignalJson.decodeQuality(
@@ -606,6 +714,12 @@ class SignalRepository(
                 "indicator_params_json",
                 SignalJson.encodeDoubleMap(
                     signal.indicatorSnapshot.parameters
+                )
+            )
+            put(
+                "indicator_scores_json",
+                SignalJson.encodeDoubleMap(
+                    signal.indicatorSnapshot.scores
                 )
             )
             put(
