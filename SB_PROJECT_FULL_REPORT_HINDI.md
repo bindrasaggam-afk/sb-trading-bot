@@ -1,4 +1,4 @@
-# SB (SBA) प्रोजेक्ट — अपडेटेड A-to-Z रिपोर्ट
+**SB (SBA) प्रोजेक्ट — अपडेटेड A-to-Z रिपोर्ट**
 
 **अपडेट की तारीख:** 21 नवंबर 2026 (शनिवार)
 **प्रोजेक्ट:** SB Trading Bot — Android / Kotlin ऐप + लोकल मार्केट-डेटा और ट्रेडिंग बैकएंड
@@ -6,7 +6,7 @@
 **ब्रांच:** `feature/platform-hardening`
 **इस रन का दायरा:** सिर्फ वे काम जो इस मोबाइल एनवायरनमेंट में चल सकते हैं — compile, JVM unit tests, `assembleDebug`, Git cleanup/commit और दस्तावेज़। लाइव ADB / emulator / Shizuku / `rish` वाले UI/instrumented टेस्ट **नहीं चलाए गए** और लैपटॉप के लिए पेंडिंग हैं।
 
-**मुख्य परिणाम:** `./gradlew test assembleDebug --offline` सफल — Debug 291/291 और Release 291/291 JVM unit tests पास (0 fail, 0 skip); APK 15 MB; 7 लॉजिकल commits (पिछले 6 + इस रन का chart persistence/config commit); Git working tree इस रिपोर्ट के अंतिम commit के बाद साफ़।
+**मुख्य परिणाम:** `./gradlew test assembleDebug --offline` सफल — Debug 302/302 और Release 302/302 JVM unit tests पास (0 fail, 0 skip); APK 15 MB; 8 लॉजिकल commits (पिछले 7 + इस रन का DB gate/historical-bars commit); Git working tree इस रिपोर्ट के अंतिम commit के बाद साफ़।
 
 **स्थिति सारांश:**
 
@@ -17,12 +17,13 @@
 | 3 | दोनों DB अलग-अलग, प्रॉपर init + coordinated facade/shutdown | **कंप्लीट** |
 | 4 | DB backup/restore hardening — JVM safety layer + owner-scoped tests | **कंप्लीट (JVM स्तर)** |
 | 5 | `1m→5m→15m→1h` + chart↔DB cross-check — JVM fixtures | **कंप्लीट (JVM स्तर)** |
-| 6 | `./gradlew test` (291/291 × 2) + `assembleDebug` (15 MB APK) | **कंप्लीट** |
+| 6 | `./gradlew test` (302/302 × 2) + `assembleDebug` (15 MB APK) | **कंप्लीट** |
 | 7 | Shizuku (rish) ताज़ा जाँच — बंद/अनुपलब्ध, इस्तेमाल संभव नहीं | **कंप्लीट (निरीक्षण)** |
 | 8 | Drawing persistence + configurable indicators — versioned pure-JVM layer, UI hooks | **कंप्लीट (JVM स्तर)** |
-| 9 | लैपटॉप/फ़ोन पर लाइव UI + instrumented टेस्ट | **पेंडिंग** |
-| 10 | Backup gate coverage, independent historical bars, live cross-check samples | **पेंडिंग** |
-| 11 | नए indicators (Ichimoku/ADX/...), price alerts, PNG export + प्लेटफ़ॉर्म स्केल/सिक्योरिटी | **पेंडिंग** |
+| 9 | DB gate coverage + hand-authored historical-bar JVM cross-check | **कंप्लीट (JVM स्तर)** |
+| 10 | लैपटॉप/फ़ोन पर लाइव UI + instrumented टेस्ट | **पेंडिंग** |
+| 11 | असली बाहरी historical feed + live cross-check samples | **पेंडिंग** |
+| 12 | नए indicators (Ichimoku/ADX/...), price alerts, PNG export + प्लेटफ़ॉर्म स्केल/सिक्योरिटी | **पेंडिंग** |
 
 ---
 
@@ -55,7 +56,7 @@
 - `.gitignore` में `*.hprof` जोड़ा गया।
 - 843 MB की `java_pid19063.hprof`, `tatus --short` और `tory needs investigation"` रिपोजिटरी से हटाई गईं।
 - पुराना review artifact `SB_IMPLEMENTATION_REVIEW.patch` ریپो के बाहर `/data/user/0/com.m4coding.ide/cache/opencode/` में सुरक्षित रखा गया (डिलीट नहीं) — ताकि Git status साफ़ रहे और फ़ाइल भी न खोए।
-- सभी बदलाव 5 लॉजिकल commits में बाँटे गए:
+- सभी बदलाव 8 लॉजिकल commits में बाँटे गए:
 
 | Commit | Hash | सामग्री |
 |---|---|---|
@@ -65,7 +66,8 @@
 | 4 | `afb5d1f` | `feat(backend): coordinate two database backends and ordered shutdown` — 8 फ़ाइलें (coordinator, shutdown sequence, API server, lifecycle, signals platform, नया टेस्ट) |
 | 5 | `1a95b70` | `docs: refresh Hindi report for dual-database design and verification` |
 | 6 | `c5c21a5` | `feat(db): harden owner-scoped backup and accuracy cross-checks` — backup policy/engine, signals-scoped backup, pure aggregator/row-mapper, 15 नए JVM टेस्ट, docs + ये रिपोर्ट |
-| 7 | अंतिम | `feat(chart): persist drawings and configure indicators` — drawing/config models, codecs, repositories, non-breaking view/cache hooks, 23 नए JVM टेस्ट, docs + ये रिपोर्ट |
+| 7 | `9163b53` | `feat(chart): persist drawings and configure indicators` — drawing/config models, codecs, repositories, non-breaking view/cache hooks, 23 नए JVM टेस्ट, docs + ये रिपोर्ट |
+| 8 | `HEAD` | `feat(db): gate remaining read paths and add independent bar cross-checks` — guard, signals/export/analytics/CSV read paths, 11 नए JVM टेस्ट, docs + ये रिपोर्ट |
 
 - Commit से पहले `git status`, `git diff`, `git diff --cached` देखे गए; secrets/keystore/shizuku binaries/kotlin compiled artifacts कभी stage नहीं किए गए।
 
@@ -155,18 +157,18 @@
 - `TimeframeAggregatorTest` (3): fixed IST timestamps पर 1m→5m→15m→1h चेन (expected OHLCV 100/161/99/160, volume 2370), direct 1h parity, `CandleSeriesTools.aggregate` + `CandleSeriesAudit` से exactMatch; seconds normalization, non-positive skip; unsorted input में timestamp-order close।
 - `ChartOhlcvEquivalenceTest` (2): DB row → `CandleRowMapper` → `Candle` → `CandleSeriesTools.toMarketCandle` → `ChartCandle` → `ChartCandleSeries.canonicalize` → `CandleSeriesAudit` round-trip exactMatch; invalid rows drop और duplicate timestamp पर last-row keep।
 
-**सीमा:** ये cross-check fixed deterministic fixtures पर हैं। बाहरी independently-sourced historical bars और असली instruments/sessions के live samples अभी पेंडिंग हैं; लाइव accuracy claim नहीं किया गया।
+**सीमा:** ये cross-check fixed deterministic fixtures पर हैं। हाथ से लिखे vendor-style historical rollups की अतिरिक्त जाँच सेक्शन 1.9 में जोड़ी गई है, पर असली बाहरी independently-sourced historical feed और असली instruments/sessions के live samples अभी पेंडिंग हैं; लाइव accuracy claim नहीं किया गया।
 
 ## 1.6 Compile + Unit Tests + APK Build — सफल
 
 | चेक | कमांड | परिणाम |
 |---|---|---|
 | Kotlin compile | `JAVA_HOME=/opt/java/jdk-17.0.20.1+1 ./gradlew compileDebugKotlin --offline` | **BUILD SUCCESSFUL** |
-| सभी JVM unit tests + APK | `JAVA_HOME=/opt/java/jdk-17.0.20.1+1 ./gradlew test assembleDebug --offline` | **BUILD SUCCESSFUL** — Debug **291 tests**, Release **291 tests**; दोनों में 0 failures, 0 errors, 0 skipped |
-| APK आउटपुट | `app/build/outputs/apk/debug/app-debug.apk` | **15 MB**, timestamp 21 Nov 16:03 |
+| सभी JVM unit tests + APK | `JAVA_HOME=/opt/java/jdk-17.0.20.1+1 ./gradlew test assembleDebug --offline` | **BUILD SUCCESSFUL** — Debug **302 tests**, Release **302 tests**; दोनों में 0 failures, 0 errors, 0 skipped |
+| APK आउटपुट | `app/build/outputs/apk/debug/app-debug.apk` | **15 MB**, timestamp 21 Nov 16:51 |
 | Android lint | `JAVA_HOME=/opt/java/jdk-17.0.20.1+1 GRADLE_OPTS='-Dorg.gradle.jvmargs=-Xmx2g -XX:MaxMetaspaceSize=512m' ./gradlew lintDebug --offline --no-daemon` | रिपोर्ट बनी; केवल **पहले से मौजूद** `ExpiredTargetSdkVersion` error (`targetSdkVersion 29`) — इस रन में platform/target SDK बदला नहीं गया |
 
-कुल 291 = पिछले 268 + drawing persistence/config के 23 नए JVM टेस्ट (`ChartDrawingPolicyTest` 3, `ChartDrawingCodecTest` 3, `ChartDrawingRepositoryTest` 2, `ChartDrawingBridgeTest` 3, `IndicatorConfigPolicyTest` 4, `IndicatorConfigCodecTest` 3, `IndicatorConfigRepositoryTest` 1, `IndicatorConfiguredCacheTest` 3, `IndicatorConfigPresetTest` 1)। डोमेन-वाइज़ कवरेज अब DB backup/restore policy, owner scoping, rollback, timeframe rollup, chart/DB OHLCV equivalence, drawing serialization/bridge और configurable indicator/cache parity तक बढ़ गया है।
+कुल 302 = पिछले 268 + drawing persistence/config के 23 नए JVM टेस्ट (`ChartDrawingPolicyTest` 3, `ChartDrawingCodecTest` 3, `ChartDrawingRepositoryTest` 2, `ChartDrawingBridgeTest` 3, `IndicatorConfigPolicyTest` 4, `IndicatorConfigCodecTest` 3, `IndicatorConfigRepositoryTest` 1, `IndicatorConfiguredCacheTest` 3, `IndicatorConfigPresetTest` 1) + इस रन के 11 नए JVM टेस्ट (`DatabaseOperationGuardTest` 5, `IndependentHistoricalBarsCrossCheckTest` 6)। डोमेन-वाइज़ कवरेज अब DB backup/restore policy, owner scoping, rollback, maintenance-gate read paths, timeframe rollup, hand-authored historical-bar parity, chart/DB OHLCV equivalence, drawing serialization/bridge और configurable indicator/cache parity तक बढ़ गया है।
 
 **नोट:** compile के दौरान कुछ पहले से मौजूद Kotlin warnings आए (deprecated `toUpperCase`, unused variables, opt-in annotation, label shadowing, `MarketRepository` में unreachable-code warnings) — ये **गैर-घातक** हैं, build सफल है।
 
@@ -212,6 +214,20 @@
 
 **निष्कर्ष:** Shizuku लाइव इस्तेमाल में **नहीं** लाया जा सकता; स्थिति पहले जैसी रुकी हुई है। सैंडबॉक्स की वजह से यह हमारी पहुँच से बाहर है — परमिशन देना या `RISH_APPLICATION_ID` सेट करना भी तब तक काम नहीं करेगा जब तक `/system/bin/app_process` और Shizuku सेवा मौजूद न हों।
 
+## 1.9 DB gate coverage + hand-authored historical-bar cross-check
+
+**Gate coverage:**
+- नई pure-JVM लेयर `app/src/main/java/com/sb/backend/database/DatabaseOperationGuard.kt` `DatabaseMaintenanceGate.withOperation` को injectable gate और configurable timeout के साथ wraps करती है; डिफ़ॉल्ट timeout/lease नीति वही 10s है। किसी मौजूदा public API/signature को बदला नहीं गया।
+- `signals.data.SignalRepository` के सभी 14 synchronized DB call sites अब `withDbOperation` से गुज़रते हैं: insert, getById, getOpen/Completed, paged/all/query, events, applyEvaluation, strategy versions, run logging; पुराना `synchronized(lock)` lock भी उसी guarded block के भीतर रखा गया है।
+- `ExportHistoryRepository.record()/recent()`, `ResearchAnalyticsRepository.loadStoredSnapshots()` signals-DB read और `BackendManager.exportCandlesCsvToDownloads()` की raw candle query को operation lease मिला है; CSV export की गलती पर existing catch/rollback व्यवहार वही है।
+- startup migrations/cleanup की raw writes जानबूझकर नहीं लपेटी गईं: वे maintenance backup/restore पथ के भीतर nested हो सकती हैं और उन्हें guards देने से self-deadlock का जोखिम है; live instrumented verification के लिए यह हिस्सा सेक्शन 2 में रखा गया है।
+- `DatabaseOperationGuardTest` (5): normal pass-through + lease release, maintenance के दौरान fail-fast, reentrant nesting, exception पर lease release और active guard operation के दौरान maintenance wait।
+
+**Independently-authored historical bars:**
+- `IndependentHistoricalBarsCrossCheckTest` (6): 60 fixed 1m vendor-style rows, हाथ से लिखे/generated expected 5m (12 bars), 15m (4 bars) और 1h (1 bar) rollups; expected values production aggregator से calculate नहीं किए गए।
+- 1m→5m→15m→1h chain, direct 1h parity और `CandleSeriesTools.aggregate` तीनों को `CandleSeriesAudit.exactMatch` से independent expected bars के विरुद्ध मिलाया गया; OHLC invariants, unique/ascending timestamps, volume sum और single-bar drift negative control भी टेस्ट किए गए।
+- `docs/SIGNAL_ACCURACY_STANDARD.md` अपडेट किया गया; यह JVM-level cross-check है, असली external historical feed से verification अभी पेंडिंग है।
+
 ---
 
 # सेक्शन 2 — पेंडिंग वाला वर्क (Pending Work)
@@ -232,7 +248,7 @@
 
 **अभी पेंडिंग:**
 - Instrumented round-trip असली Android SQLite पर चलाना: valid backup→restore, corrupt/empty/incompatible reject, concurrent writer exclusion और process-kill के बाद rollback snapshot का व्यवहार।
-- Gate coverage अधूरी है: API के कुछ सीधे `BackendManager.database()` queries और `signals.data.SignalRepository` के UI रीडर अभी `DatabaseMaintenanceGate` से नहीं गुज़रते; coordinated quiescence को पूरी तरह सच बनाने के लिए इन्हें भी operation lease देना है।
+- मुख्य gate coverage अब JVM स्तर पर पूरी है (सेक्शन 1.9): `SignalRepository`, export history, analytics snapshot read और CSV read guarded हैं। बाकी है startup migration/cleanup raw writes की live verification — इन्हें nested maintenance deadlock से बचने के लिए जानबूझकर guards नहीं दिए गए; instrumented environment में quiescence सत्यापित करना बाकी है।
 - Restore के बाद owner helper का reopen/refresh व्यवहार live app में verify करना (`DatabaseBackup` और `SignalsPlatform` सफल restore पर owner को बंद करते हैं)।
 
 ## 2.3 SIGNAL_ACCURACY_STANDARD.md — बचा हुआ हिस्सा
@@ -240,7 +256,7 @@
 **JVM स्तर कंप्लीट** (सेक्शन 1.5 देखें): fixed fixtures पर 1m→5m→15m→1h chain, `CandleSeriesTools`/`CandleSeriesAudit` parity, seconds normalization, unsorted-order close, DB row→chart OHLCV round-trip; `docs/SIGNAL_ACCURACY_STANDARD.md` अपडेट किया गया।
 
 **अभी पेंडिंग:**
-- **Independently-sourced historical bars** के विरुद्ध aggregation मिलान (`docs/SIGNAL_ACCURACY_STANDARD.md:32`) — अभी synthetic deterministic fixtures हैं, बाहरी डेटा source नहीं।
+- **असली बाहरी independently-sourced historical feed** के विरुद्ध aggregation मिलान (`docs/SIGNAL_ACCURACY_STANDARD.md:32`) — हाथ से लिखे vendor-style deterministic rollups JVM में जुड़ चुके हैं (सेक्शन 1.9), पर real external data source अभी नहीं जुड़ा।
 - **Sample instruments/sessions पर live chart↔DB equivalence** (`:34`, `:79`) — JVM fixture test है, असली DB/UI samples नहीं।
 - **Release gates:** 80–90% directional accuracy अभी सिर्फ research target है; walk-forward/out-of-sample metrics, coverage, costs, drawdown प्रकाशित नहीं हुए — live-trading readiness claim नहीं है।
 

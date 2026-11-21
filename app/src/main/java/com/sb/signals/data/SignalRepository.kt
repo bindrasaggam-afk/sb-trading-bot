@@ -4,6 +4,7 @@ import android.content.ContentValues
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.util.Log
+import com.sb.backend.database.DatabaseOperationGuard
 import com.sb.researchanalytics.data.ResearchSnapshotWriter
 import com.sb.signals.domain.HoldingFilterGroup
 import com.sb.signals.domain.HoldingPeriod
@@ -23,8 +24,12 @@ class SignalRepository(
 ) {
 
     private val lock = Any()
+    private val operationGuard = DatabaseOperationGuard()
 
-    fun insert(signal: ResearchSignal): Long = synchronized(lock) {
+    private inline fun <T> withDbOperation(crossinline block: () -> T): T =
+        operationGuard.withOperation { synchronized(lock) { block() } }
+
+    fun insert(signal: ResearchSignal): Long = withDbOperation {
         val db = database.writableDatabase
         var insertedId = 0L
         db.beginTransaction()
@@ -72,7 +77,7 @@ class SignalRepository(
         insertedId
     }
 
-    fun getById(id: Long): ResearchSignal? = synchronized(lock) {
+    fun getById(id: Long): ResearchSignal? = withDbOperation {
         database.readableDatabase.query(
             SignalMigrations.TABLE_SIGNALS,
             null,
@@ -88,7 +93,7 @@ class SignalRepository(
     }
 
     fun getOpenSignals(category: SignalCategory? = null): List<ResearchSignal> =
-        synchronized(lock) {
+        withDbOperation {
             val clauses = ArrayList<String>()
             val args = ArrayList<String>()
             clauses.add(openStatusClause())
@@ -104,7 +109,7 @@ class SignalRepository(
         }
 
     fun getCompletedSignals(limit: Int = 10000): List<ResearchSignal> =
-        synchronized(lock) {
+        withDbOperation {
             queryInternal(
                 selection = completedStatusClause(),
                 selectionArgs = emptyArray(),
@@ -119,7 +124,7 @@ class SignalRepository(
     fun getSignalsPage(
         limit: Int = 500,
         offset: Int = 0
-    ): List<ResearchSignal> = synchronized(lock) {
+    ): List<ResearchSignal> = withDbOperation {
         val result = ArrayList<ResearchSignal>()
         database.readableDatabase.query(
             SignalMigrations.TABLE_SIGNALS,
@@ -139,7 +144,7 @@ class SignalRepository(
     }
 
     fun getAllSignals(limit: Int = 50000): List<ResearchSignal> =
-        synchronized(lock) {
+        withDbOperation {
             val result = ArrayList<ResearchSignal>()
             database.readableDatabase.query(
                 SignalMigrations.TABLE_SIGNALS,
@@ -158,7 +163,7 @@ class SignalRepository(
             result
         }
 
-    fun query(filter: SignalFilter): List<ResearchSignal> = synchronized(lock) {
+    fun query(filter: SignalFilter): List<ResearchSignal> = withDbOperation {
         val clauses = ArrayList<String>()
         val args = ArrayList<String>()
 
@@ -212,7 +217,7 @@ class SignalRepository(
         )
     }
 
-    fun getEvents(signalId: Long): List<SignalEvent> = synchronized(lock) {
+    fun getEvents(signalId: Long): List<SignalEvent> = withDbOperation {
         val result = ArrayList<SignalEvent>()
         database.readableDatabase.query(
             SignalMigrations.TABLE_EVENTS,
@@ -250,7 +255,7 @@ class SignalRepository(
     }
 
     fun getAllEvents(limit: Int = 50000): List<SignalEvent> =
-        synchronized(lock) {
+        withDbOperation {
             val result = ArrayList<SignalEvent>()
             database.readableDatabase.query(
                 SignalMigrations.TABLE_EVENTS,
@@ -294,7 +299,7 @@ class SignalRepository(
         before: ResearchSignal,
         after: ResearchSignal,
         eventPrice: Double? = null
-    ): Boolean = synchronized(lock) {
+    ): Boolean = withDbOperation {
         val db = database.writableDatabase
         db.beginTransaction()
         try {
@@ -344,11 +349,11 @@ class SignalRepository(
     fun saveStrategyVersion(
         config: StrategyConfig,
         notes: String = ""
-    ): Boolean = synchronized(lock) {
+    ): Boolean = withDbOperation {
         val configJson = SignalJson.encodeConfig(config)
         val existing = versionConfig(config.strategyId, config.version)
         if (existing != null) {
-            return SignalStrategyVersionPolicy.canSave(existing, config)
+            return@withDbOperation SignalStrategyVersionPolicy.canSave(existing, config)
         }
 
         val values = ContentValues().apply {
@@ -399,7 +404,7 @@ class SignalRepository(
     }
 
     fun getStrategyVersions(): List<SignalStrategyVersion> =
-        synchronized(lock) {
+        withDbOperation {
             val result = ArrayList<SignalStrategyVersion>()
             database.readableDatabase.query(
                 SignalMigrations.TABLE_VERSIONS,
@@ -446,7 +451,7 @@ class SignalRepository(
             result
         }
 
-    fun recordRun(run: SignalAnalysisRun): Long = synchronized(lock) {
+    fun recordRun(run: SignalAnalysisRun): Long = withDbOperation {
         database.writableDatabase.insert(
             SignalMigrations.TABLE_RUNS,
             null,
@@ -463,7 +468,7 @@ class SignalRepository(
         )
     }
 
-    fun getLastRun(): SignalAnalysisRun? = synchronized(lock) {
+    fun getLastRun(): SignalAnalysisRun? = withDbOperation {
         database.readableDatabase.query(
             SignalMigrations.TABLE_RUNS,
             null,
@@ -474,7 +479,7 @@ class SignalRepository(
             "finished_at DESC",
             "1"
         ).use { cursor ->
-            if (!cursor.moveToFirst()) return null
+            if (!cursor.moveToFirst()) return@withDbOperation null
             SignalAnalysisRun(
                 id = cursor.getLong(cursor.getColumnIndexOrThrow("id")),
                 startedAt = cursor.getLong(

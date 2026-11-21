@@ -2,6 +2,7 @@ package com.sb.researchanalytics.data
 
 import android.content.Context
 import android.database.Cursor
+import com.sb.backend.database.DatabaseOperationGuard
 import com.sb.backend.database.SBDatabaseHelper
 import com.sb.backend.models.PaperExecution
 import com.sb.backend.models.PaperOrder
@@ -27,6 +28,8 @@ import kotlin.math.max
 class ResearchAnalyticsRepository(
     private val context: Context
 ) {
+
+    private val operationGuard = DatabaseOperationGuard()
 
     fun load(
         filter: AnalyticsFilter = AnalyticsFilter(),
@@ -137,50 +140,52 @@ class ResearchAnalyticsRepository(
         val result = HashMap<Long, SnapshotPair>()
         val payloads = HashMap<Long, StoredSnapshot>()
         return try {
-            val database = SignalsPlatform.database(context)
-                .readableDatabase
-            database.query(
-                SignalMigrations.TABLE_INDICATOR_SNAPSHOTS,
-                arrayOf(
-                    "signal_id",
-                    "source",
-                    "captured_at",
-                    "indicator_values_json",
-                    "indicator_scores_json",
-                    "confirmations_json",
-                    "parameters_json"
-                ),
-                null,
-                null,
-                null,
-                null,
-                "signal_id ASC"
-            ).use { cursor ->
-                while (cursor.moveToNext()) {
-                    val signalId = cursor.getLong(0)
-                    val source = cursor.getStringOrNull(1)
-                        ?: "CAPTURED"
-                    val capturedAt = cursor.getLong(2)
-                    val values = SignalJson.decodeDoubleMap(
-                        cursor.getStringOrNull(3)
-                    )
-                    val scores = SignalJson.decodeDoubleMap(
-                        cursor.getStringOrNull(4)
-                    )
-                    val confirmations = SignalJson.decodeBooleanMap(
-                        cursor.getStringOrNull(5)
-                    )
-                    val parameters = SignalJson.decodeDoubleMap(
-                        cursor.getStringOrNull(6)
-                    )
-                    payloads[signalId] = StoredSnapshot(
-                        values = values,
-                        scores = scores,
-                        confirmations = confirmations,
-                        parameters = parameters,
-                        source = source,
-                        capturedAt = capturedAt
-                    )
+            operationGuard.withOperation {
+                val database = SignalsPlatform.database(context)
+                    .readableDatabase
+                database.query(
+                    SignalMigrations.TABLE_INDICATOR_SNAPSHOTS,
+                    arrayOf(
+                        "signal_id",
+                        "source",
+                        "captured_at",
+                        "indicator_values_json",
+                        "indicator_scores_json",
+                        "confirmations_json",
+                        "parameters_json"
+                    ),
+                    null,
+                    null,
+                    null,
+                    null,
+                    "signal_id ASC"
+                ).use { cursor ->
+                    while (cursor.moveToNext()) {
+                        val signalId = cursor.getLong(0)
+                        val source = cursor.getStringOrNull(1)
+                            ?: "CAPTURED"
+                        val capturedAt = cursor.getLong(2)
+                        val values = SignalJson.decodeDoubleMap(
+                            cursor.getStringOrNull(3)
+                        )
+                        val scores = SignalJson.decodeDoubleMap(
+                            cursor.getStringOrNull(4)
+                        )
+                        val confirmations = SignalJson.decodeBooleanMap(
+                            cursor.getStringOrNull(5)
+                        )
+                        val parameters = SignalJson.decodeDoubleMap(
+                            cursor.getStringOrNull(6)
+                        )
+                        payloads[signalId] = StoredSnapshot(
+                            values = values,
+                            scores = scores,
+                            confirmations = confirmations,
+                            parameters = parameters,
+                            source = source,
+                            capturedAt = capturedAt
+                        )
+                    }
                 }
             }
             payloads.forEach { (signalId, stored) ->

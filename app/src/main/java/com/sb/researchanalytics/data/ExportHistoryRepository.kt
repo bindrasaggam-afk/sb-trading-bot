@@ -3,6 +3,7 @@ package com.sb.researchanalytics.data
 import android.content.ContentValues
 import android.content.Context
 import android.database.Cursor
+import com.sb.backend.database.DatabaseOperationGuard
 import com.sb.researchanalytics.domain.ExportHistoryEntry
 import com.sb.signals.data.SignalMigrations
 import com.sb.signals.services.SignalsPlatform
@@ -11,7 +12,9 @@ class ExportHistoryRepository(
     private val context: Context
 ) {
 
-    fun record(entry: ExportHistoryEntry): Long {
+    private val operationGuard = DatabaseOperationGuard()
+
+    fun record(entry: ExportHistoryEntry): Long = operationGuard.withOperation {
         val values = ContentValues().apply {
             put("export_type", entry.exportType)
             put("format", entry.format)
@@ -22,7 +25,7 @@ class ExportHistoryRepository(
             put("message", entry.message)
             put("created_at", entry.createdAt)
         }
-        return SignalsPlatform.database(context)
+        SignalsPlatform.database(context)
             .writableDatabase
             .insert(
                 SignalMigrations.TABLE_EXPORT_HISTORY,
@@ -31,7 +34,7 @@ class ExportHistoryRepository(
             )
     }
 
-    fun recent(limit: Int = 20): List<ExportHistoryEntry> {
+    fun recent(limit: Int = 20): List<ExportHistoryEntry> = operationGuard.withOperation {
         val result = ArrayList<ExportHistoryEntry>()
         SignalsPlatform.database(context)
             .readableDatabase
@@ -49,7 +52,7 @@ class ExportHistoryRepository(
                     result.add(read(cursor))
                 }
             }
-        return result
+        result
     }
 
     private fun read(cursor: Cursor): ExportHistoryEntry =

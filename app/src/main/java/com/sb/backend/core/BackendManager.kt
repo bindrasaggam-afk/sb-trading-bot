@@ -7,6 +7,7 @@ import android.os.Build
 import android.provider.MediaStore
 import android.util.Log
 import com.sb.backend.database.DatabaseBackup
+import com.sb.backend.database.DatabaseOperationGuard
 import com.sb.backend.database.LegacyPaperMigration
 import com.sb.backend.database.PaperLegacyCleanup
 import com.sb.backend.database.SBDatabaseHelper
@@ -41,6 +42,7 @@ object BackendManager {
     private const val TAG = "BackendManager"
 
     private val lock = Any()
+    private val operationGuard = DatabaseOperationGuard()
 
     @Volatile
     private var initialized = false
@@ -461,22 +463,24 @@ object BackendManager {
             resolver.openOutputStream(uri)?.use { stream ->
                 OutputStreamWriter(stream, StandardCharsets.UTF_8).use { writer ->
                     writer.write("symbol,exchange,timeframe,timestamp,open,high,low,close,volume,candle_status\n")
-                    database().readableDatabase.rawQuery(
-                        """
-                        SELECT symbol, exchange, timeframe, timestamp,
-                               open, high, low, close, volume, status
-                        FROM ${SBDatabaseHelper.TABLE_CANDLES}
-                        ORDER BY symbol ASC, exchange ASC, timeframe ASC, timestamp ASC
-                        """.trimIndent(),
-                        null
-                    ).use { cursor ->
-                        while (cursor.moveToNext()) {
-                            val fields = (0 until cursor.columnCount).map { index ->
-                                if (cursor.isNull(index)) "" else cursor.getString(index)
+                    operationGuard.withOperation {
+                        database().readableDatabase.rawQuery(
+                            """
+                            SELECT symbol, exchange, timeframe, timestamp,
+                                   open, high, low, close, volume, status
+                            FROM ${SBDatabaseHelper.TABLE_CANDLES}
+                            ORDER BY symbol ASC, exchange ASC, timeframe ASC, timestamp ASC
+                            """.trimIndent(),
+                            null
+                        ).use { cursor ->
+                            while (cursor.moveToNext()) {
+                                val fields = (0 until cursor.columnCount).map { index ->
+                                    if (cursor.isNull(index)) "" else cursor.getString(index)
+                                }
+                                writer.write(fields.joinToString(",") { csvEscape(it) })
+                                writer.write("\n")
+                                exported++
                             }
-                            writer.write(fields.joinToString(",") { csvEscape(it) })
-                            writer.write("\n")
-                            exported++
                         }
                     }
                     writer.flush()
