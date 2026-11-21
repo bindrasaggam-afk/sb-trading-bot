@@ -17,6 +17,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 class KotakNeoLiveFeedService(
@@ -39,6 +40,22 @@ class KotakNeoLiveFeedService(
         ArrayBlockingQueue<TickPersistenceEvent>(8_192)
     private val tickPersistenceWorkerRunning = AtomicBoolean(false)
     private val droppedTickPersistenceEvents = AtomicLong(0L)
+
+    data class TickPersistenceMetrics(
+        val enqueued: Long,
+        val processed: Long,
+        val dropped: Long,
+        val failed: Long,
+        val queueSize: Int,
+        val maxQueueSize: Int,
+        val lastProcessedAt: Long
+    )
+
+    private val enqueuedTickPersistenceEvents = AtomicLong(0L)
+    private val processedTickPersistenceEvents = AtomicLong(0L)
+    private val failedTickPersistenceEvents = AtomicLong(0L)
+    private val maxTickPersistenceQueueSize = AtomicInteger(0)
+    private val lastTickPersistenceProcessedAt = AtomicLong(0L)
 
     @Volatile
     private var tickPersistenceThread: Thread? = null
@@ -352,10 +369,24 @@ class KotakNeoLiveFeedService(
         tick: MarketTick?,
         audit: MarketRepository.TickAuditDelta
     ) {
-        if (!tickPersistenceQueue.offer(TickPersistenceEvent(tick, audit))) {
+        val accepted = tickPersistenceQueue.offer(
+            TickPersistenceEvent(tick, audit)
+        )
+
+        if (accepted) {
+            enqueuedTickPersistenceEvents.incrementAndGet()
+
+            val size = tickPersistenceQueue.size
+            maxTickPersistenceQueueSize.updateAndGet { previous ->
+                maxOf(previous, size)
+            }
+        } else {
             val dropped = droppedTickPersistenceEvents.incrementAndGet()
+
             if (dropped == 1L || dropped % 100L == 0L) {
-                onStatus("WARNING | Tick persistence queue full; dropped events=$dropped")
+                onStatus(
+                    "WARNING | Tick persistence queue full; dropped events=$dropped"
+                )
             }
         }
     }
@@ -424,6 +455,13 @@ class KotakNeoLiveFeedService(
                                 saveFailed = if (saved) 0 else 1
                             )
                         )
+
+                        processedTickPersistenceEvents.incrementAndGet()
+                        lastTickPersistenceProcessedAt.set(System.currentTimeMillis())
+
+                        if (event.tick != null && saved != true) {
+                            failedTickPersistenceEvents.incrementAndGet()
+                        }
                     }
 
                     val now = System.currentTimeMillis()
@@ -489,6 +527,10 @@ class KotakNeoLiveFeedService(
         ticks.forEach { tick ->
 
             if (tick.messageCode == 105) {
+                com.sb.backend.market.ExchangeSessionCalendar.updateFromStatus(
+                    exchange = tick.exchange,
+                    status = tick.status
+                )
                 onStatus(
                     "Market status ${tick.exchange}: ${tick.status}"
                 )
@@ -626,37 +668,7 @@ class KotakNeoLiveFeedService(
                     )
                 )
 
-                val candleResult = MarketDataManager.onNewTick(mTick)
-                if (candleResult.finalizedBase.isNotEmpty()) {
-                    val finalizedCandles = candleResult.finalizedBase.map { candle ->
-                        Candle(
-                            symbol = symbol,
-                            timeframe = "1m",
-                            timestamp = candle.timestamp,
-                            open = candle.open,
-                            high = candle.high,
-                            low = candle.low,
-                            close = candle.close,
-                            volume = candle.volume,
-                            isComplete = true
-                        )
-                    }
-                    try {
-                        quoteExecutor.execute {
-                            val saved = marketRepository.saveCandles(
-                                symbol = symbol,
-                                exchange = exchange,
-                                timeframe = "1m",
-                                candles = finalizedCandles
-                            )
-                            if (saved != finalizedCandles.size) {
-                                onStatus("Candle persistence incomplete: $symbol saved=$saved/${finalizedCandles.size}")
-                            }
-                        }
-                    } catch (e: Exception) {
-                        onStatus("Candle persistence scheduling failed: $symbol ${e.message}")
-                    }
-                }
+                MarketDataManager.onNewTick(mTick)
 
                 if (MarketDataManager.currentConnection() !=
                     MarketDataManager.ConnectionState.AUTHENTICATED
@@ -890,6 +902,18 @@ class KotakNeoLiveFeedService(
         client?.isAuthenticated() == true
 
     fun webSocketClient(): KotakNeoWebSocketClient? = client
+
+    fun tickPersistenceMetrics(): TickPersistenceMetrics {
+        return TickPersistenceMetrics(
+            enqueued = enqueuedTickPersistenceEvents.get(),
+            processed = processedTickPersistenceEvents.get(),
+            dropped = droppedTickPersistenceEvents.get(),
+            failed = failedTickPersistenceEvents.get(),
+            queueSize = tickPersistenceQueue.size,
+            maxQueueSize = maxTickPersistenceQueueSize.get(),
+            lastProcessedAt = lastTickPersistenceProcessedAt.get()
+        )
+    }
 
     @Synchronized
     fun disconnect() {

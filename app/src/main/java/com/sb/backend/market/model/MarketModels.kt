@@ -67,8 +67,8 @@ data class MarketTick(
 ) {
     val isValid: Boolean
         get() =
-            ltp.isFinite() &&
-                ltp >= 0.0 &&
+                ltp.isFinite() &&
+                ltp > 0.0 &&
                 isValidOptionalPrice(open) &&
                 isValidOptionalPrice(high) &&
                 isValidOptionalPrice(low) &&

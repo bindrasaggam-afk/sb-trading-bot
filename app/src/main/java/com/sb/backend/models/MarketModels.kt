@@ -35,7 +35,8 @@ data class Candle(
     val low: Double,
     val close: Double,
     val volume: Long = 0L,
-    val isComplete: Boolean = true
+    val isComplete: Boolean = true,
+    val exchange: String = ""
 ) {
     init {
         require(symbol.isNotBlank())

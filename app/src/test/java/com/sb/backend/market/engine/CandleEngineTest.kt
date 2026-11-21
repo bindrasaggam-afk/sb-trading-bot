@@ -1,5 +1,6 @@
 package com.sb.backend.market.engine
 
+import com.sb.backend.market.ExchangeSessionCalendar
 import com.sb.backend.market.TimeframeBuckets
 import com.sb.backend.market.model.InstrumentKey
 import com.sb.backend.market.model.MarketCandle
@@ -232,8 +233,8 @@ class CandleEngineTest {
 
     @Test
     fun futureSeededCandleIsIgnoredAndDoesNotBlockLiveTicks() {
-        val engine = CandleEngine()
-        val now = System.currentTimeMillis()
+        val now = time(9, 15, 0)
+        val engine = CandleEngine { now }
         val future = now + 24L * 60L * 60L * 1_000L
 
         engine.seedBase(
@@ -259,21 +260,19 @@ class CandleEngineTest {
     }
 
     @Test
-    fun higherTimeframeAggregatesSeededAndLiveBase() {
+    fun higherTimeframeUsesItsOwnStoredSeriesAndLiveTicks() {
         val engine = CandleEngine()
 
-        val stored = (0 until 10).map { i ->
-            MarketCandle(
-                timestamp = time(9, 15, 0) + i * 60_000L,
-                open = 100.0 + i,
-                high = 101.0 + i,
-                low = 99.0 + i,
-                close = 100.5 + i,
-                volume = 10L
-            )
-        }
+        val storedFifteenMinute = MarketCandle(
+            timestamp = time(9, 15, 0),
+            open = 100.0,
+            high = 110.0,
+            low = 99.0,
+            close = 109.5,
+            volume = 100L
+        )
 
-        engine.seedBase(nse, stored)
+        engine.seed(nse, MarketTimeframe.MIN_15, listOf(storedFifteenMinute))
         engine.addTick(tick(nse, time(9, 25, 30), 120.0, 200L))
 
         val candle = engine.candles(nse, MarketTimeframe.MIN_15).single()
@@ -454,6 +453,88 @@ class CandleEngineTest {
 
         assertEquals(time(9, 0, 0), TimeframeBuckets.bucketStart(time(9, 0, 59), "1m", "MCX"))
         assertEquals(time(9, 1, 0), TimeframeBuckets.bucketStart(time(9, 1, 0), "1m", "MCX"))
+    }
+
+    @Test
+    fun everyTimeframeIsBuiltDirectlyFromRawTicks() {
+        val engine = CandleEngine()
+
+        engine.addTick(tick(nse, time(9, 15, 10), 100.0, 1_000L))
+        engine.addTick(tick(nse, time(9, 16, 10), 104.0, 1_100L))
+        engine.addTick(tick(nse, time(9, 17, 10), 98.0, 1_200L))
+
+        val oneMinute = engine.candles(nse, MarketTimeframe.MIN_1)
+        val fiveMinute = engine.candles(nse, MarketTimeframe.MIN_5)
+        val fifteenMinute = engine.candles(nse, MarketTimeframe.MIN_15)
+
+        assertEquals(3, oneMinute.size)
+        assertEquals(1, fiveMinute.size)
+        assertEquals(1, fifteenMinute.size)
+
+        assertEquals(100.0, fiveMinute.single().open, 0.0001)
+        assertEquals(104.0, fiveMinute.single().high, 0.0001)
+        assertEquals(98.0, fiveMinute.single().low, 0.0001)
+        assertEquals(98.0, fiveMinute.single().close, 0.0001)
+        assertEquals(200L, fiveMinute.single().volume)
+
+        assertEquals(time(9, 15, 0), fifteenMinute.single().timestamp)
+    }
+
+    @Test
+    fun seedingOneMinuteDoesNotCreateHigherTimeframeSeries() {
+        val engine = CandleEngine()
+
+        engine.seedBase(
+            nse,
+            listOf(
+                MarketCandle(
+                    timestamp = time(9, 15, 0),
+                    open = 100.0,
+                    high = 101.0,
+                    low = 99.0,
+                    close = 100.0,
+                    volume = 10L
+                )
+            )
+        )
+
+        assertEquals(1, engine.candles(nse, MarketTimeframe.MIN_1).size)
+        assertTrue(engine.candles(nse, MarketTimeframe.MIN_5).isEmpty())
+        assertTrue(engine.candles(nse, MarketTimeframe.HOUR_1).isEmpty())
+    }
+
+    @Test
+    fun tickResultCarriesEveryCurrentAndFinalizedTimeframe() {
+        val engine = CandleEngine()
+
+        engine.addTick(tick(nse, time(9, 15, 10), 100.0, 1_000L))
+        engine.addTick(tick(nse, time(9, 16, 10), 101.0, 1_100L))
+
+        val result = engine.addTick(
+            tick(nse, time(9, 20, 10), 102.0, 1_200L)
+        )
+
+        assertTrue(result.accepted)
+        assertEquals(MarketTimeframe.values().size, result.currentCandles.size)
+        assertEquals(MarketTimeframe.values().size, result.finalizedCandles.size)
+
+        assertEquals(1, result.finalized(MarketTimeframe.MIN_1).size)
+        assertEquals(1, result.finalized(MarketTimeframe.MIN_5).size)
+        assertEquals(
+            time(9, 20, 0),
+            result.current(MarketTimeframe.MIN_5)?.timestamp
+        )
+    }
+
+    @Test
+    fun ticksOutsideExchangeSessionAreRejected() {
+        ExchangeSessionCalendar.clear()
+        val engine = CandleEngine()
+
+        assertFalse(
+            engine.addTick(tick(nse, time(15, 31, 0), 100.0, 1_000L)).accepted
+        )
+        assertTrue(engine.candles(nse, MarketTimeframe.MIN_1).isEmpty())
     }
 
     @Test

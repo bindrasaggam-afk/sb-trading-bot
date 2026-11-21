@@ -197,11 +197,13 @@ class InstrumentLiveViewModel(
             if (!result.accepted) return
 
             val activeTimeframe = timeframe.value
-            val target = engine.candleAt(
-                key = key,
-                timeframe = activeTimeframe,
-                timestamp = result.baseTimestamp
-            ) ?: return
+            val target = result.current(activeTimeframe)
+                ?: engine.candleAt(
+                    key = key,
+                    timeframe = activeTimeframe,
+                    timestamp = result.baseTimestamp
+                )
+                ?: return
 
             liveTargetBucket = target.timestamp
             liveActive = true
@@ -229,23 +231,14 @@ class InstrumentLiveViewModel(
                 timeframe = requested.label,
                 limit = MAX_CANDLES
             )
-            val storedBase = if (requested == MarketTimeframe.MIN_1) {
-                storedTarget
-            } else {
-                repository.loadStoredCandles(
-                    key = key,
-                    timeframe = MarketTimeframe.MIN_1.label,
-                    limit = MAX_BASE_CANDLES
-                )
-            }
 
             if (generation.get() != token) return@launch
 
             synchronized(candleLock) {
                 if (!isCurrent(key, requested, token)) return@synchronized
 
-                if (storedBase.isNotEmpty()) {
-                    engine.seedBase(key, storedBase)
+                if (storedTarget.isNotEmpty()) {
+                    engine.seed(key, requested, storedTarget)
                 }
 
                 val live = engine.candles(key, requested)
@@ -424,7 +417,6 @@ class InstrumentLiveViewModel(
 
     private companion object {
         private const val MAX_CANDLES = 2_000
-        private const val MAX_BASE_CANDLES = 6_000
         private const val HISTORICAL_YEARS = 3
     }
 }

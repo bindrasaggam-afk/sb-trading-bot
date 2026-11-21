@@ -940,7 +940,7 @@ class MarketDataService(
     }
 
     private fun normalizeTimeframe(value: String): String {
-        return value.trim().toUpperCase(Locale.ROOT)
+        return value.trim()
     }
 
     private fun normalizeExchange(value: String): String {

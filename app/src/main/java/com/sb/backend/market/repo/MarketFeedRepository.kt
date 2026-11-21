@@ -99,7 +99,8 @@ object MarketFeedRepository {
     fun saveCandles(
         key: InstrumentKey,
         timeframe: String,
-        candles: List<MarketCandle>
+        candles: List<MarketCandle>,
+        isComplete: Boolean = true
     ): Int {
         if (!BackendManager.isInitialized() || candles.isEmpty()) return 0
         return try {
@@ -117,7 +118,8 @@ object MarketFeedRepository {
                         low = it.low,
                         close = it.close,
                         volume = it.volume,
-                        isComplete = true
+                        isComplete = isComplete,
+                        exchange = key.exchange
                     )
                 }
             )

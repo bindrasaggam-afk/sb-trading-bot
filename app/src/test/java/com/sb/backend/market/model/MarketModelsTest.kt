@@ -31,6 +31,34 @@ class MarketModelsTest {
     }
 
     @Test
+    fun marketTickRejectsZeroAndNegativeLtp() {
+        val key = InstrumentKey("NSE", "SBIN")
+
+        val zeroTick = MarketTick(
+            key = key,
+            ltp = 0.0
+        )
+
+        val negativeTick = MarketTick(
+            key = key,
+            ltp = -1.0
+        )
+
+        assertFalse(zeroTick.isValid)
+        assertFalse(negativeTick.isValid)
+    }
+
+    @Test
+    fun marketTickAcceptsPositiveFiniteLtp() {
+        val tick = MarketTick(
+            key = InstrumentKey("NSE", "SBIN"),
+            ltp = 100.0
+        )
+
+        assertTrue(tick.isValid)
+    }
+
+    @Test
     fun marketCandleAcceptsWellFormedCandle() {
         val candle = MarketCandle.create(
             timestamp = 1_700_000_000_000L,

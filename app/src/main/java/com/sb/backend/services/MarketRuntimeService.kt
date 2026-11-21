@@ -34,7 +34,6 @@ object MarketRuntimeService {
         val lastError: String? = null
     )
 
-    private const val BASE_TIMEFRAME_LABEL = "1m"
     private const val SEED_LIMIT = 5_000
     private const val STATUS_INTERVAL_MS = 1_000L
 
@@ -42,15 +41,6 @@ object MarketRuntimeService {
 
     private val tracked =
         ConcurrentHashMap<String, InstrumentKey>()
-
-    private val lastSavedTarget =
-        ConcurrentHashMap<String, Long>()
-
-    private val targetTimeframes = listOf(
-        MarketTimeframe.MIN_5,
-        MarketTimeframe.MIN_15,
-        MarketTimeframe.HOUR_1
-    )
 
     private val running = AtomicBoolean(false)
     private val processedTicks = AtomicLong(0L)
@@ -146,12 +136,6 @@ object MarketRuntimeService {
         if (tracked.remove(id) == null) return
 
         engine.reset(normalized)
-        val savedKeys = lastSavedTarget.keys.iterator()
-        while (savedKeys.hasNext()) {
-            if (savedKeys.next().startsWith("$id|")) {
-                savedKeys.remove()
-            }
-        }
 
         publishStatus(force = true)
     }
@@ -165,8 +149,16 @@ object MarketRuntimeService {
     }
 
     fun seed(key: InstrumentKey, baseCandles: List<MarketCandle>) {
-        if (baseCandles.isEmpty()) return
-        engine.seedBase(normalize(key), baseCandles)
+        seed(key, MarketTimeframe.MIN_1, baseCandles)
+    }
+
+    fun seed(
+        key: InstrumentKey,
+        timeframe: MarketTimeframe,
+        candles: List<MarketCandle>
+    ) {
+        if (candles.isEmpty()) return
+        engine.seed(normalize(key), timeframe, candles)
     }
 
     fun candles(
@@ -185,7 +177,6 @@ object MarketRuntimeService {
 
     fun clear() {
         engine.clear()
-        lastSavedTarget.clear()
         processedTicks.set(0L)
         lastTickAt = 0L
         lastError = null
@@ -219,40 +210,56 @@ object MarketRuntimeService {
         lastTickAt = tick.receivedAt.takeIf { it > 0L }
             ?: System.currentTimeMillis()
 
-        if (result.finalizedBase.isNotEmpty()) {
-            enqueuePersistence(
-                key = key,
-                finalizedBase = result.finalizedBase,
-                latestBaseTimestamp = result.baseTimestamp
-            )
-        }
+        enqueuePersistence(key = key, result = result)
 
         publishStatus(force = false)
     }
 
     private fun enqueuePersistence(
         key: InstrumentKey,
-        finalizedBase: List<MarketCandle>,
-        latestBaseTimestamp: Long
+        result: CandleEngine.TickResult
     ) {
-        if (finalizedBase.isEmpty()) return
+        if (result.currentCandles.isEmpty()) return
 
-        val snapshot = ArrayList(finalizedBase)
+        val finalized = result.finalizedCandles.mapValues { (_, candles) ->
+            ArrayList(candles)
+        }
+        val live = result.currentCandles.mapValues { (_, candle) ->
+            listOf(candle)
+        }
 
         try {
             executor.execute {
                 try {
-                    val baseSaved = saveCandlesWithRetry(
-                        key = key,
-                        timeframe = BASE_TIMEFRAME_LABEL,
-                        candles = snapshot
-                    )
-                    check(baseSaved == snapshot.size) {
-                        "Base candle persistence incomplete: saved " +
-                            baseSaved + " of " + snapshot.size
+                    finalized.forEach { (timeframe, candles) ->
+                        if (candles.isEmpty()) return@forEach
+
+                        val saved = saveCandlesWithRetry(
+                            key = key,
+                            timeframe = timeframe,
+                            candles = candles,
+                            isComplete = true
+                        )
+
+                        check(saved == candles.size) {
+                            "Candle persistence incomplete for $timeframe: " +
+                                "saved $saved of ${candles.size}"
+                        }
                     }
 
-                    persistClosedTargets(key, latestBaseTimestamp)
+                    live.forEach { (timeframe, candles) ->
+                        val saved = saveCandlesWithRetry(
+                            key = key,
+                            timeframe = timeframe,
+                            candles = candles,
+                            isComplete = false
+                        )
+
+                        check(saved == candles.size) {
+                            "Live candle persistence incomplete for " +
+                                "$timeframe: saved $saved of ${candles.size}"
+                        }
+                    }
 
                     SignalScanCoordinator.scan(key)
                 } catch (e: Exception) {
@@ -263,63 +270,11 @@ object MarketRuntimeService {
         }
     }
 
-    private fun persistClosedTargets(
-        key: InstrumentKey,
-        latestBaseTimestamp: Long
-    ) {
-        if (latestBaseTimestamp <= 0L) return
-
-        val id = key.key()
-
-        targetTimeframes.forEach { timeframe ->
-            val savedKey = "$id|${timeframe.label}"
-            val interval = timeframe.seconds * 1_000L
-            val lastSaved = lastSavedTarget[savedKey] ?: run {
-                // Resume from the latest stored bucket instead of rewriting
-                // the full historical series after every app restart.
-                val latestStored = MarketFeedRepository.loadStoredCandles(
-                    key = key,
-                    timeframe = timeframe.label,
-                    limit = 1
-                ).lastOrNull()?.timestamp ?: 0L
-                val resumeAfter = if (latestStored > 0L) {
-                    (latestStored - interval).coerceAtLeast(0L)
-                } else {
-                    0L
-                }
-                lastSavedTarget.putIfAbsent(savedKey, resumeAfter)
-                lastSavedTarget[savedKey] ?: resumeAfter
-            }
-
-            val closed = engine.candles(key, timeframe)
-                .filter { candle ->
-                    candle.timestamp > lastSaved &&
-                        candle.timestamp + interval <= latestBaseTimestamp
-                }
-
-            if (closed.isEmpty()) return@forEach
-
-            val saved = saveCandlesWithRetry(
-                key = key,
-                timeframe = timeframe.label,
-                candles = closed
-            )
-
-            if (saved == closed.size) {
-                lastSavedTarget[savedKey] = closed.last().timestamp
-            }
-        }
-    }
-
-    /**
-     * A candle batch is persisted only when every row is saved.
-     * Retry transient failures and never advance the timeframe cursor
-     * after a partial or failed write.
-     */
     private fun saveCandlesWithRetry(
         key: InstrumentKey,
         timeframe: String,
-        candles: List<MarketCandle>
+        candles: List<MarketCandle>,
+        isComplete: Boolean
     ): Int {
         if (candles.isEmpty()) return 0
 
@@ -331,7 +286,8 @@ object MarketRuntimeService {
             lastSaved = MarketFeedRepository.saveCandles(
                 key = key,
                 timeframe = timeframe,
-                candles = candles
+                candles = candles,
+                isComplete = isComplete
             )
 
             if (lastSaved == candles.size) return lastSaved
@@ -357,14 +313,16 @@ object MarketRuntimeService {
         try {
             executor.execute {
                 try {
-                    val stored = MarketFeedRepository.loadStoredCandles(
-                        key = key,
-                        timeframe = BASE_TIMEFRAME_LABEL,
-                        limit = SEED_LIMIT
-                    )
+                    MarketTimeframe.values().forEach { timeframe ->
+                        val stored = MarketFeedRepository.loadStoredCandles(
+                            key = key,
+                            timeframe = timeframe.label,
+                            limit = SEED_LIMIT
+                        )
 
-                    if (stored.isNotEmpty()) {
-                        engine.seedBase(key, stored)
+                        if (stored.isNotEmpty()) {
+                            engine.seed(key, timeframe, stored)
+                        }
                     }
                 } catch (e: Exception) {
                     recordError(e)

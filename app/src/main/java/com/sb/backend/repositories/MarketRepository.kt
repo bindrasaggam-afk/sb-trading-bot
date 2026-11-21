@@ -52,26 +52,39 @@ class MarketRepository(
     private val retryTable =
         SBDatabaseHelper.TABLE_QUOTE_PERSISTENCE_RETRY
 
+    private enum class QuoteSaveStatus {
+        SAVED,
+        STALE,
+        FAILED
+    }
+
     // ---------------------------------------------------------
     // QUOTE SAVE
     // ---------------------------------------------------------
 
     fun saveQuote(quote: Quote): Boolean {
         return maintenanceGate.withOperation {
-        if (!isValidQuote(quote)) return false
+            if (!isValidQuote(quote)) return@withOperation false
 
-        return try {
-            databaseHelper.writableDatabase.insertWithOnConflict(
-                quotesTable,
-                null,
-                quoteValues(quote),
-                SQLiteDatabase.CONFLICT_REPLACE
-            ) != -1L
-        } catch (e: Exception) {
-            Log.e("MarketRepository", "Quote save failed", e)
-            false
-        }
-    
+            val db = databaseHelper.writableDatabase
+
+            try {
+                db.beginTransaction()
+
+                val saved =
+                    saveQuoteIfNewer(db, quote) == QuoteSaveStatus.SAVED
+
+                if (saved) {
+                    db.setTransactionSuccessful()
+                }
+
+                saved
+            } catch (e: Exception) {
+                Log.e("MarketRepository", "Quote save failed", e)
+                false
+            } finally {
+                if (db.inTransaction()) db.endTransaction()
+            }
         }
     }
 
@@ -87,20 +100,8 @@ class MarketRepository(
             quotes.forEach { quote ->
                 if (!isValidQuote(quote)) return@forEach
 
-                try {
-                    val result = db.insertWithOnConflict(
-                        quotesTable,
-                        null,
-                        quoteValues(quote),
-                        SQLiteDatabase.CONFLICT_REPLACE
-                    )
-                    if (result != -1L) saved++
-                } catch (e: Exception) {
-                    Log.e(
-                        "MarketRepository",
-                        "Batch quote save failed: ${quote.symbol}",
-                        e
-                    )
+                if (saveQuoteIfNewer(db, quote) == QuoteSaveStatus.SAVED) {
+                    saved++
                 }
             }
 
@@ -135,22 +136,10 @@ class MarketRepository(
                     return@forEach
                 }
 
-                try {
-                    val result = db.insertWithOnConflict(
-                        quotesTable,
-                        null,
-                        quoteValues(quote),
-                        SQLiteDatabase.CONFLICT_REPLACE
-                    )
-
-                    if (result == -1L) failed++ else saved++
-                } catch (e: Exception) {
-                    failed++
-                    Log.e(
-                        "MarketRepository",
-                        "Detailed quote save failed: ${quote.symbol}",
-                        e
-                    )
+                when (saveQuoteIfNewer(db, quote)) {
+                    QuoteSaveStatus.SAVED -> saved++
+                    QuoteSaveStatus.STALE -> rejected++
+                    QuoteSaveStatus.FAILED -> failed++
                 }
             }
 
@@ -178,7 +167,7 @@ class MarketRepository(
         error: String
     ): Boolean {
         return maintenanceGate.withOperation {
-        if (!isValidQuote(quote)) return false
+        if (!isValidQuote(quote)) return@withOperation false
 
         val db = databaseHelper.writableDatabase
         val values = quoteValues(quote).apply {
@@ -186,8 +175,30 @@ class MarketRepository(
             put("queued_at", System.currentTimeMillis())
         }
 
-        return try {
+        return@withOperation try {
             db.beginTransaction()
+
+            val existing = db.query(
+                retryTable,
+                quoteProjection,
+                "symbol = ? AND exchange = ?",
+                arrayOf(
+                    normalize(quote.symbol),
+                    normalize(quote.exchange)
+                ),
+                null,
+                null,
+                null,
+                "1"
+            ).use { cursor ->
+                if (cursor.moveToFirst()) readQuote(cursor) else null
+            }
+
+            if (existing != null && !isNewerQuote(quote, existing)) {
+                // Never let an older or equal quote replace a newer retry row.
+                db.setTransactionSuccessful()
+                return@withOperation false
+            }
 
             val updated = db.update(
                 retryTable,
@@ -237,7 +248,6 @@ class MarketRepository(
         } finally {
             if (db.inTransaction()) db.endTransaction()
         }
-    
         }
     }
 
@@ -305,30 +315,43 @@ class MarketRepository(
                 }
 
                 if (currentTimestamp == quote.timestamp) {
-                    val result = db.insertWithOnConflict(
-                        quotesTable,
-                        null,
-                        quoteValues(quote),
-                        SQLiteDatabase.CONFLICT_REPLACE
-                    )
-
-                    if (result != -1L) {
-                        val deleted = db.delete(
-                            retryTable,
-                            """
-                            symbol = ? AND exchange = ? AND timestamp = ?
-                            """.trimIndent(),
-                            arrayOf(
-                                normalize(quote.symbol),
-                                normalize(quote.exchange),
-                                quote.timestamp.toString()
+                    when (saveQuoteIfNewer(db, quote)) {
+                        QuoteSaveStatus.SAVED -> {
+                            val deleted = db.delete(
+                                retryTable,
+                                """
+                                symbol = ? AND exchange = ? AND timestamp = ?
+                                """.trimIndent(),
+                                arrayOf(
+                                    normalize(quote.symbol),
+                                    normalize(quote.exchange),
+                                    quote.timestamp.toString()
+                                )
                             )
-                        )
 
-                        saved = deleted > 0
-                        if (saved) db.setTransactionSuccessful()
-                    } else {
-                        failed = true
+                            saved = deleted > 0
+                            if (saved) db.setTransactionSuccessful()
+                        }
+                        QuoteSaveStatus.STALE -> {
+                            // The persisted quote is already newer or equal.
+                            // Drop the stale retry row so it is not retried
+                            // on every pass.
+                            db.delete(
+                                retryTable,
+                                """
+                                symbol = ? AND exchange = ? AND timestamp = ?
+                                """.trimIndent(),
+                                arrayOf(
+                                    normalize(quote.symbol),
+                                    normalize(quote.exchange),
+                                    quote.timestamp.toString()
+                                )
+                            )
+                            db.setTransactionSuccessful()
+                        }
+                        QuoteSaveStatus.FAILED -> {
+                            failed = true
+                        }
                     }
                 }
 
@@ -803,13 +826,18 @@ class MarketRepository(
                         put("close", candle.close)
                         put("volume", candle.volume)
 
-                        // Candle model does not expose tick metadata.
-                        // Do not invent source tick counts or tick times.
-                        put("status", "FINAL")
+                        put(
+                            "status",
+                            if (candle.isComplete) "COMPLETED" else "LIVE"
+                        )
                         put("source_tick_count", 0)
                         putNull("first_tick_timestamp")
                         putNull("last_tick_timestamp")
-                        put("finalized_at", System.currentTimeMillis())
+                        if (candle.isComplete) {
+                            put("finalized_at", System.currentTimeMillis())
+                        } else {
+                            putNull("finalized_at")
+                        }
                     }
 
                     val result = db.insertWithOnConflict(
@@ -1195,21 +1223,99 @@ class MarketRepository(
     }
 
     private fun readCandle(cursor: Cursor): Candle {
+        val status = cursor.getString(9) ?: "COMPLETED"
+
         return Candle(
             symbol = cursor.getString(0),
-            timeframe = cursor.getString(1),
-            timestamp = cursor.getLong(2),
-            open = cursor.getDouble(3),
-            high = cursor.getDouble(4),
-            low = cursor.getDouble(5),
-            close = cursor.getDouble(6),
-            volume = cursor.getLong(7)
+            exchange = cursor.getString(1) ?: "",
+            timeframe = cursor.getString(2),
+            timestamp = cursor.getLong(3),
+            open = cursor.getDouble(4),
+            high = cursor.getDouble(5),
+            low = cursor.getDouble(6),
+            close = cursor.getDouble(7),
+            volume = cursor.getLong(8),
+            isComplete = status != "LIVE"
         )
     }
 
     // ---------------------------------------------------------
     // VALIDATION
     // ---------------------------------------------------------
+
+    private fun isNewerQuote(
+        incoming: Quote,
+        existing: Quote
+    ): Boolean {
+        val incomingExchangeTime = incoming.exchangeTimestamp
+        val existingExchangeTime = existing.exchangeTimestamp
+
+        if (incomingExchangeTime != null &&
+            existingExchangeTime != null
+        ) {
+            if (incomingExchangeTime != existingExchangeTime) {
+                return incomingExchangeTime > existingExchangeTime
+            }
+            return incoming.receivedAt > existing.receivedAt
+        }
+
+        if (incomingExchangeTime != null &&
+            existingExchangeTime == null
+        ) {
+            return true
+        }
+
+        if (incomingExchangeTime == null &&
+            existingExchangeTime != null
+        ) {
+            return false
+        }
+
+        return incoming.receivedAt > existing.receivedAt
+    }
+
+    private fun saveQuoteIfNewer(
+        db: SQLiteDatabase,
+        quote: Quote
+    ): QuoteSaveStatus {
+        return try {
+            val existing = db.query(
+                quotesTable,
+                quoteProjection,
+                "symbol = ? AND exchange = ?",
+                arrayOf(
+                    normalize(quote.symbol),
+                    normalize(quote.exchange)
+                ),
+                null,
+                null,
+                null,
+                "1"
+            ).use { cursor ->
+                if (cursor.moveToFirst()) readQuote(cursor) else null
+            }
+
+            if (existing != null && !isNewerQuote(quote, existing)) {
+                return QuoteSaveStatus.STALE
+            }
+
+            val result = db.insertWithOnConflict(
+                quotesTable,
+                null,
+                quoteValues(quote),
+                SQLiteDatabase.CONFLICT_REPLACE
+            )
+
+            if (result == -1L) {
+                QuoteSaveStatus.FAILED
+            } else {
+                QuoteSaveStatus.SAVED
+            }
+        } catch (e: Exception) {
+            Log.e("MarketRepository", "Quote save failed", e)
+            QuoteSaveStatus.FAILED
+        }
+    }
 
     private fun isValidQuote(quote: Quote): Boolean {
         return quote.symbol.isNotBlank() &&
@@ -1218,7 +1324,7 @@ class MarketRepository(
             quote.ltp > 0.0 &&
             quote.volume >= 0L &&
             quote.timestamp > 0L &&
-            quote.receivedAt >= 0L
+            quote.receivedAt > 0L
     }
 
     private fun isValidCandle(candle: Candle): Boolean {
@@ -1293,13 +1399,15 @@ class MarketRepository(
 
         private val candleProjection = arrayOf(
             "symbol",
+            "exchange",
             "timeframe",
             "timestamp",
             "open",
             "high",
             "low",
             "close",
-            "volume"
+            "volume",
+            "status"
         )
     }
 }

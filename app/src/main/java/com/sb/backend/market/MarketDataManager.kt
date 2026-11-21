@@ -150,8 +150,10 @@ object MarketDataManager {
 
     fun seedCandles(
         key: InstrumentKey,
-        candles: List<com.sb.backend.market.model.MarketCandle>
-    ) = candleEngine.seedBase(key, candles)
+        candles: List<com.sb.backend.market.model.MarketCandle>,
+        timeframe: com.sb.backend.market.model.MarketTimeframe =
+            com.sb.backend.market.model.MarketTimeframe.MIN_1
+    ) = candleEngine.seed(key, timeframe, candles)
 
     // ------------------------------------------------------------
     // CONNECTION
@@ -170,36 +172,46 @@ object MarketDataManager {
 
     fun onNewTick(tick: MarketTick): CandleEngine.TickResult {
 
+        // Reject invalid ticks before they reach any consumer.
+        if (!tick.isValid) {
+            return CandleEngine.TickResult(accepted = false)
+        }
+
+        // CandleEngine is the authoritative gate for accepted ticks.
+        // It also rejects invalid prices and duplicate/out-of-order events
+        // according to its own processing rules.
+        val result = candleEngine.addTick(tick)
+
+        if (!result.accepted) {
+            return result
+        }
+
         val key = tick.key.key()
 
-        // Keep latest tick immediately available.
+        // Publish only ticks accepted by CandleEngine.
         latestTicks[key] = tick
 
-        // Update per-instrument observers.
         val flow = instrumentFlows.computeIfAbsent(key) {
             MutableStateFlow(latestTicks[key])
         }
 
         flow.value = tick
 
-        // Store history only while subscribers are active.
         if (isSubscribedKeyActive(key)) {
             appendHistory(key, tick)
         }
 
-        // Notify registered listeners safely.
         tickListeners.forEach { listener ->
             try {
                 listener(tick)
             } catch (_: Exception) {
-                // One listener must not interrupt other listeners.
+                // Isolate listener failures.
             }
         }
 
-        // Publish to the shared live stream.
         _tickStream.tryEmit(tick)
 
-        return candleEngine.addTick(tick)
+        return result
     }
 
     private fun appendHistory(
