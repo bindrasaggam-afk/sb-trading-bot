@@ -12,6 +12,7 @@
 *.backup
 *.backup_*
 *.apk
+*.hprof
 *.jks
 *.keystore
 keystore.properties
