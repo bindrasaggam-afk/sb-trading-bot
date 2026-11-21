@@ -6,7 +6,7 @@
 **ब्रांच:** `feature/platform-hardening`
 **इस रन का दायरा:** सिर्फ वे काम जो इस मोबाइल एनवायरनमेंट में चल सकते हैं — compile, JVM unit tests, `assembleDebug`, Git cleanup/commit और दस्तावेज़। लाइव ADB / emulator / Shizuku / `rish` वाले UI/instrumented टेस्ट **नहीं चलाए गए** और लैपटॉप के लिए पेंडिंग हैं।
 
-**मुख्य परिणाम:** `./gradlew test assembleDebug --offline` सफल — Debug 268/268 और Release 268/268 JVM unit tests पास (0 fail, 0 skip); APK 15 MB; 6 लॉजिकल commits (पिछले 5 + इस रन का backup/accuracy commit); Git working tree इस रिपोर्ट के अंतिम commit के बाद साफ़।
+**मुख्य परिणाम:** `./gradlew test assembleDebug --offline` सफल — Debug 291/291 और Release 291/291 JVM unit tests पास (0 fail, 0 skip); APK 15 MB; 7 लॉजिकल commits (पिछले 6 + इस रन का chart persistence/config commit); Git working tree इस रिपोर्ट के अंतिम commit के बाद साफ़।
 
 **स्थिति सारांश:**
 
@@ -17,11 +17,12 @@
 | 3 | दोनों DB अलग-अलग, प्रॉपर init + coordinated facade/shutdown | **कंप्लीट** |
 | 4 | DB backup/restore hardening — JVM safety layer + owner-scoped tests | **कंप्लीट (JVM स्तर)** |
 | 5 | `1m→5m→15m→1h` + chart↔DB cross-check — JVM fixtures | **कंप्लीट (JVM स्तर)** |
-| 6 | `./gradlew test` (268/268 × 2) + `assembleDebug` (15 MB APK) | **कंप्लीट** |
+| 6 | `./gradlew test` (291/291 × 2) + `assembleDebug` (15 MB APK) | **कंप्लीट** |
 | 7 | Shizuku (rish) ताज़ा जाँच — बंद/अनुपलब्ध, इस्तेमाल संभव नहीं | **कंप्लीट (निरीक्षण)** |
-| 8 | लैपटॉप/फ़ोन पर लाइव UI + instrumented टेस्ट | **पेंडिंग** |
-| 9 | Backup gate coverage, independent historical bars, live cross-check samples | **पेंडिंग** |
-| 10 | Advanced चार्ट फीचर्स + प्लेटफ़ॉर्म स्केल/सिक्योरिटी | **पेंडिंग** |
+| 8 | Drawing persistence + configurable indicators — versioned pure-JVM layer, UI hooks | **कंप्लीट (JVM स्तर)** |
+| 9 | लैपटॉप/फ़ोन पर लाइव UI + instrumented टेस्ट | **पेंडिंग** |
+| 10 | Backup gate coverage, independent historical bars, live cross-check samples | **पेंडिंग** |
+| 11 | नए indicators (Ichimoku/ADX/...), price alerts, PNG export + प्लेटफ़ॉर्म स्केल/सिक्योरिटी | **पेंडिंग** |
 
 ---
 
@@ -63,7 +64,8 @@
 | 3 | `49c3c87` | `feat(chart): harden chart data boundary and incremental indicators` — 13 फ़ाइलें (chart core, indicator cache, टेस्ट, accuracy doc) |
 | 4 | `afb5d1f` | `feat(backend): coordinate two database backends and ordered shutdown` — 8 फ़ाइलें (coordinator, shutdown sequence, API server, lifecycle, signals platform, नया टेस्ट) |
 | 5 | `1a95b70` | `docs: refresh Hindi report for dual-database design and verification` |
-| 6 | अंतिम | `feat(db): harden owner-scoped backup and accuracy cross-checks` — backup policy/engine, signals-scoped backup, pure aggregator/row-mapper, 15 नए JVM टेस्ट, docs + ये रिपोर्ट |
+| 6 | `c5c21a5` | `feat(db): harden owner-scoped backup and accuracy cross-checks` — backup policy/engine, signals-scoped backup, pure aggregator/row-mapper, 15 नए JVM टेस्ट, docs + ये रिपोर्ट |
+| 7 | अंतिम | `feat(chart): persist drawings and configure indicators` — drawing/config models, codecs, repositories, non-breaking view/cache hooks, 23 नए JVM टेस्ट, docs + ये रिपोर्ट |
 
 - Commit से पहले `git status`, `git diff`, `git diff --cached` देखे गए; secrets/keystore/shizuku binaries/kotlin compiled artifacts कभी stage नहीं किए गए।
 
@@ -160,14 +162,39 @@
 | चेक | कमांड | परिणाम |
 |---|---|---|
 | Kotlin compile | `JAVA_HOME=/opt/java/jdk-17.0.20.1+1 ./gradlew compileDebugKotlin --offline` | **BUILD SUCCESSFUL** |
-| सभी JVM unit tests + APK | `JAVA_HOME=/opt/java/jdk-17.0.20.1+1 ./gradlew test assembleDebug --offline` | **BUILD SUCCESSFUL** — Debug **268 tests**, Release **268 tests**; दोनों में 0 failures, 0 errors, 0 skipped |
-| APK आउटपुट | `app/build/outputs/apk/debug/app-debug.apk` | **15 MB**, timestamp 21 Nov 11:01 |
+| सभी JVM unit tests + APK | `JAVA_HOME=/opt/java/jdk-17.0.20.1+1 ./gradlew test assembleDebug --offline` | **BUILD SUCCESSFUL** — Debug **291 tests**, Release **291 tests**; दोनों में 0 failures, 0 errors, 0 skipped |
+| APK आउटपुट | `app/build/outputs/apk/debug/app-debug.apk` | **15 MB**, timestamp 21 Nov 16:03 |
+| Android lint | `JAVA_HOME=/opt/java/jdk-17.0.20.1+1 GRADLE_OPTS='-Dorg.gradle.jvmargs=-Xmx2g -XX:MaxMetaspaceSize=512m' ./gradlew lintDebug --offline --no-daemon` | रिपोर्ट बनी; केवल **पहले से मौजूद** `ExpiredTargetSdkVersion` error (`targetSdkVersion 29`) — इस रन में platform/target SDK बदला नहीं गया |
 
-कुल 268 = पिछले 253 + `DatabaseBackupPolicyTest` 4 + `DatabaseFileBackupTest` 6 + `TimeframeAggregatorTest` 3 + `ChartOhlcvEquivalenceTest` 2। डोमेन-वाइज़ कवरेज अब DB backup/restore policy, owner scoping, rollback, timeframe rollup और chart/DB OHLCV equivalence तक बढ़ गया है।
+कुल 291 = पिछले 268 + drawing persistence/config के 23 नए JVM टेस्ट (`ChartDrawingPolicyTest` 3, `ChartDrawingCodecTest` 3, `ChartDrawingRepositoryTest` 2, `ChartDrawingBridgeTest` 3, `IndicatorConfigPolicyTest` 4, `IndicatorConfigCodecTest` 3, `IndicatorConfigRepositoryTest` 1, `IndicatorConfiguredCacheTest` 3, `IndicatorConfigPresetTest` 1)। डोमेन-वाइज़ कवरेज अब DB backup/restore policy, owner scoping, rollback, timeframe rollup, chart/DB OHLCV equivalence, drawing serialization/bridge और configurable indicator/cache parity तक बढ़ गया है।
 
 **नोट:** compile के दौरान कुछ पहले से मौजूद Kotlin warnings आए (deprecated `toUpperCase`, unused variables, opt-in annotation, label shadowing, `MarketRepository` में unreachable-code warnings) — ये **गैर-घातक** हैं, build सफल है।
 
-## 1.7 Shizuku (rish) की ताज़ा जाँच — read-only
+## 1.7 चार्ट drawing persistence + configurable indicators
+
+**नई pure-JVM लेयर:**
+- `app/src/main/java/com/sb/ui/chart/persistence/`: `ChartDrawingModel.kt`, `ChartDrawingCodec.kt`, `ChartDrawingBridge.kt`, `ChartDrawingRepository.kt`, `ChartStateScope.kt`।
+- `app/src/main/java/com/sb/ui/chart/config/`: `IndicatorConfig.kt`, `IndicatorConfigCodec.kt`, `IndicatorConfigPresets.kt`, `IndicatorConfigRepository.kt`।
+- Android storage adapters: `SharedPreferencesChartDrawingStorage.kt`, `SharedPreferencesIndicatorConfigStorage.kt` — दोनों scope-key अलग करते हैं (`exchange|symbol|timeframe`) और `applicationContext` इस्तेमाल करते हैं।
+
+**Drawing persistence:**
+- Drawings अब index-based `ChartDrawing` से timestamp-anchored `ChartDrawingDocument` में बदले जाते हैं, जिससे timeframe/data refresh पर index बदलने पर भी annotations सही candle से जुड़े रहते हैं।
+- `ChartDrawingPolicy` आकार/टूल-वाइज़ point count, id, timestamp, price, text length और duplicates validate करती है; `normalize()` deterministic ordering देती है।
+- `ChartDrawingCodec` `org.json` से stable, escaped JSON बनाता है और invalid/wrong-version दस्तावेज़ reject करता है।
+- `ChartDrawingBridge.export/import` unmappable timestamps वाली drawings drop करते हैं और index↔timestamp mapping सुरक्षित रखते हैं।
+- `ProfessionalChartView` में नए non-breaking तरीके `exportDrawingDocument(...)` और `applyDrawingDocument(...)` जोड़े गए; पुराने private field नाम (`drawings`, `pendingPoints`) और सार्वजनिक signatures वैसे ही रखे गए, क्योंकि instrumented टेस्ट उन पर reflect करते हैं।
+
+**Configurable indicators:**
+- `IndicatorConfig` सभी periods, Bollinger/Supertrend multipliers, source (`CLOSE/OPEN/HIGH/LOW/TYPICAL_PRICE`) और enabled set रखता है; `IndicatorConfigPolicy.validate/normalize/label` नीति तय करते हैं।
+- डिफ़ॉल्ट कॉन्फ़िगरेशन पुराने hardcode मानों के बराबर है: EMA 20, SMA 50, RSI 14, MACD 12/26/9, Bollinger 20×2, Supertrend 10×3, source CLOSE — इसलिए पुराना व्यवहार नहीं बदला।
+- `IndicatorIncrementalCache.update(candles, config)` नया typed overload जोड़ा गया; पुराना `update(candles, indicators, timeframeKey)` उसी पर delegate करता है। config बदलने पर cache full recalculate करता है; reflective fields `indicatorKey`, `timeframeKey`, `result` सुरक्षित हैं।
+- `ProfessionalChartView.indicatorConfig` नया property है, पर पुराना `indicators` setter भी काम करता है। `HeikinAshiChartScreen` में indicator menu से Default/Scalp/Swing/Typical presets चुनने, indicators toggle करने, timeframe बदलने, text annotation जोड़ने, clear करने और detach होने पर state save/load होता है।
+
+**JVM टेस्ट (23):** serialization/escaping, validation, repository load/save/clear, bridge mapping, config policy/codec/repository, presets validity, custom period/source पर cache output और legacy-default parity — सब deterministic, बिना Android/instrumented execution के।
+
+**सीमा:** लाइव UI पर दिखने वाला save/restore cycle अभी instrumented/manual verification के लिए पेंडिंग है; नए indicators (Ichimoku, ADX, Stochastic, OBV, Donchian), alerts और PNG export अभी पेंडिंग हैं।
+
+## 1.8 Shizuku (rish) की ताज़ा जाँच — read-only
 
 यह जाँच सिर्फ निरीक्षण थी; **Shizuku को ज़बरन चलाने की कोशिश नहीं की गई**।
 
@@ -217,10 +244,13 @@
 - **Sample instruments/sessions पर live chart↔DB equivalence** (`:34`, `:79`) — JVM fixture test है, असली DB/UI samples नहीं।
 - **Release gates:** 80–90% directional accuracy अभी सिर्फ research target है; walk-forward/out-of-sample metrics, coverage, costs, drawdown प्रकाशित नहीं हुए — live-trading readiness claim नहीं है।
 
-## 2.4 Advanced चार्ट फीचर्स (पेंडिंग)
+## 2.4 Advanced चार्ट फीचर्स — बचा हुआ हिस्सा
 
-- ड्रॉइंग्स का Room/DB persistence (अभी सिर्फ memory)।
-- Configurable indicator periods — `EMA_20`, `SMA_50`, `RSI_14` hardcode (`ChartModels.kt`)।
+**JVM स्तर कंप्लीट** (सेक्शन 1.7 देखें): drawing persistence timestamp-anchored JSON के साथ, scope-आधारित repository/storage, non-breaking view hooks; configurable indicators, presets, typed cache overload, legacy-default parity।
+
+**अभी पेंडिंग:**
+- लाइव UI/instrumented verification: timeframe बदलने, app restart और multi-scenario पर drawings/config का वास्तविक save/restore cycle।
+- Room/DB persistence या cloud sync चाहिए तो अलग migration/स्टाइल-गाइड तय करनी होगी; अभी SharedPreferences with versioned JSON है।
 - नए indicators — Ichimoku, ADX, Stochastic, OBV, Donchian।
 - Price alerts और chart PNG export/share।
 

@@ -1,6 +1,8 @@
 package com.sb.ui.chart
 
 import com.sb.backend.market.TimeframeBuckets
+import com.sb.ui.chart.config.IndicatorConfig
+import com.sb.ui.chart.config.IndicatorConfigPolicy
 import java.util.ArrayDeque
 import kotlin.math.abs
 import kotlin.math.max
@@ -36,6 +38,7 @@ class IndicatorIncrementalCache {
     private var candles: List<ChartCandle> = emptyList()
     private var indicatorKey: Set<ChartIndicator> = emptySet()
     private var timeframeKey: String = ""
+    private var activeConfig: IndicatorConfig = IndicatorConfigPolicy.DEFAULT
     private var result: Result = emptyResult()
     private var states = States()
     private var beforeLastStates = States()
@@ -47,16 +50,23 @@ class IndicatorIncrementalCache {
         candles: List<ChartCandle>,
         indicators: Set<ChartIndicator>,
         timeframeKey: String = ""
-    ): Result {
-        val key = indicators.toSet()
+    ): Result = update(candles, IndicatorConfigPolicy.fromLegacy(indicators, timeframeKey))
+
+    fun update(candles: List<ChartCandle>, config: IndicatorConfig): Result {
+        val active = IndicatorConfigPolicy.normalize(config)
+        val key = active.enabled
         if (this.candles == candles &&
             this.indicatorKey == key &&
-            this.timeframeKey == timeframeKey
+            this.timeframeKey == active.timeframeKey &&
+            this.activeConfig == active
         ) {
             return result
         }
-        if (this.indicatorKey != key || this.timeframeKey != timeframeKey) {
-            return fullRecalculate(candles, key, timeframeKey)
+        if (this.indicatorKey != key ||
+            this.timeframeKey != active.timeframeKey ||
+            this.activeConfig != active
+        ) {
+            return fullRecalculate(candles, key, active.timeframeKey, active)
         }
 
         val previous = this.candles
@@ -65,7 +75,7 @@ class IndicatorIncrementalCache {
             !hasCompleteStates(beforeLastStates, key) ||
             !hasCompleteResult(previous.size, key)
         ) {
-            return fullRecalculate(candles, key, timeframeKey)
+            return fullRecalculate(candles, key, active.timeframeKey, active)
         }
 
         val isAppend = candles.size == previous.size + 1 &&
@@ -78,12 +88,12 @@ class IndicatorIncrementalCache {
             samePrefix(candles, previous, candles.size - 1)
 
         if (!isAppend && !isLastOnly) {
-            return fullRecalculate(candles, key, timeframeKey)
+            return fullRecalculate(candles, key, active.timeframeKey, active)
         }
 
         val nextStates = if (isAppend) states.copy() else beforeLastStates.copy()
         val lastIndex = candles.size - 1
-        val values = feedLast(candles[lastIndex], lastIndex, nextStates, key)
+        val values = feedLast(candles[lastIndex], lastIndex, nextStates, active)
 
         if (isAppend) {
             beforeLastStates = states.copy()
@@ -128,64 +138,67 @@ class IndicatorIncrementalCache {
         )
         this.candles = ArrayList(candles)
         this.indicatorKey = key
-        this.timeframeKey = timeframeKey
+        this.timeframeKey = active.timeframeKey
+        this.activeConfig = active
         return result
     }
 
     private fun fullRecalculate(
         candles: List<ChartCandle>,
         indicators: Set<ChartIndicator>,
-        timeframeKey: String
+        timeframeKey: String,
+        config: IndicatorConfig
     ): Result {
-        val closes = candles.map { it.close }
+        val closes = config.source.values(candles)
         val full = Result(
             ema20 = if (ChartIndicator.EMA_20 in indicators) {
-                IndicatorMath.ema(closes, EMA_PERIOD)
+                IndicatorMath.ema(closes, config.emaPeriod)
             } else DoubleArray(0),
             sma50 = if (ChartIndicator.SMA_50 in indicators) {
-                IndicatorMath.sma(closes, SMA_PERIOD)
+                IndicatorMath.sma(closes, config.smaPeriod)
             } else DoubleArray(0),
             vwap = if (ChartIndicator.VWAP in indicators) {
                 IndicatorMath.vwap(candles)
             } else DoubleArray(0),
             rsi14 = if (ChartIndicator.RSI_14 in indicators) {
-                IndicatorMath.rsi(closes, RSI_PERIOD)
+                IndicatorMath.rsi(closes, config.rsiPeriod)
             } else DoubleArray(0),
             macd = if (ChartIndicator.MACD in indicators) {
-                IndicatorMath.macd(closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
+                IndicatorMath.macd(closes, config.macdFast, config.macdSlow, config.macdSignal)
             } else null,
             bollinger = if (ChartIndicator.BOLLINGER in indicators) {
-                IndicatorMath.bollinger(closes, BOLLINGER_PERIOD, BOLLINGER_MULTIPLIER)
+                IndicatorMath.bollinger(closes, config.bollingerPeriod, config.bollingerMultiplier)
             } else null,
             supertrend = if (ChartIndicator.SUPERTREND in indicators) {
-                IndicatorMath.supertrend(candles, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
+                IndicatorMath.supertrend(candles, config.supertrendPeriod, config.supertrendMultiplier)
             } else null
         )
 
         val fresh = States()
-        fresh.ema20 = if (ChartIndicator.EMA_20 in indicators) EmaState(EMA_PERIOD) else null
-        fresh.sma50 = if (ChartIndicator.SMA_50 in indicators) SmaState(SMA_PERIOD) else null
+        fresh.ema20 = if (ChartIndicator.EMA_20 in indicators) EmaState(config.emaPeriod) else null
+        fresh.sma50 = if (ChartIndicator.SMA_50 in indicators) SmaState(config.smaPeriod) else null
         fresh.vwap = if (ChartIndicator.VWAP in indicators) VwapState() else null
-        fresh.rsi14 = if (ChartIndicator.RSI_14 in indicators) RsiState(RSI_PERIOD) else null
+        fresh.rsi14 = if (ChartIndicator.RSI_14 in indicators) RsiState(config.rsiPeriod) else null
         fresh.macd = if (ChartIndicator.MACD in indicators) {
-            MacdState(MACD_FAST, MACD_SLOW, MACD_SIGNAL)
+            MacdState(config.macdFast, config.macdSlow, config.macdSignal)
         } else null
         fresh.bollinger = if (ChartIndicator.BOLLINGER in indicators) {
-            BollingerState(BOLLINGER_PERIOD, BOLLINGER_MULTIPLIER)
+            BollingerState(config.bollingerPeriod, config.bollingerMultiplier)
         } else null
         fresh.supertrend = if (ChartIndicator.SUPERTREND in indicators) {
-            SupertrendState(SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
+            SupertrendState(config.supertrendPeriod, config.supertrendMultiplier)
         } else null
 
         var beforeLast = fresh.copy()
         for (index in candles.indices) {
             if (index == candles.size - 1) beforeLast = fresh.copy()
-            feedLast(candles[index], index, fresh, indicators)
+            feedLast(candles[index], index, fresh, config)
         }
 
         this.candles = ArrayList(candles)
         this.indicatorKey = indicators.toSet()
         this.timeframeKey = timeframeKey
+        this.activeConfig = config
         this.result = full
         this.states = fresh
         this.beforeLastStates = beforeLast
@@ -196,9 +209,10 @@ class IndicatorIncrementalCache {
         candle: ChartCandle,
         index: Int,
         target: States,
-        indicators: Set<ChartIndicator>
+        config: IndicatorConfig
     ): LastValues {
-        val close = candle.close
+        val indicators = config.enabled
+        val close = config.source.value(candle)
         val ema = if (ChartIndicator.EMA_20 in indicators) {
             target.ema20?.feed(close) ?: Double.NaN
         } else Double.NaN

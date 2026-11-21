@@ -18,6 +18,10 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.animation.DecelerateInterpolator
 import com.sb.backend.market.TimeframeBuckets
+import com.sb.ui.chart.config.IndicatorConfig
+import com.sb.ui.chart.config.IndicatorConfigPolicy
+import com.sb.ui.chart.persistence.ChartDrawingBridge
+import com.sb.ui.chart.persistence.ChartDrawingDocument
 import com.sb.ui.theme.AppDesign
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -65,6 +69,17 @@ class ProfessionalChartView @JvmOverloads constructor(
         set(value) {
             field = value
             invalidate()
+        }
+
+    var indicatorConfig: IndicatorConfig = IndicatorConfigPolicy.DEFAULT
+        get() = field.copy(enabled = indicators, timeframeKey = timeframeKey)
+        set(value) {
+            val normalized = IndicatorConfigPolicy.normalize(value)
+            field = normalized
+            indicators = normalized.enabled
+            if (normalized.timeframeKey.isNotBlank()) {
+                timeframeKey = normalized.timeframeKey
+            }
         }
 
     var timeframeKey: String = ""
@@ -542,6 +557,28 @@ class ProfessionalChartView @JvmOverloads constructor(
     }
 
     fun drawingCount(): Int = drawings.size
+
+    fun exportDrawingDocument(
+        symbol: String,
+        timeframe: String,
+        exchange: String = "",
+        updatedAt: Long = System.currentTimeMillis()
+    ): ChartDrawingDocument = ChartDrawingBridge.export(
+        source = source,
+        drawings = drawings,
+        symbol = symbol,
+        timeframe = timeframe,
+        exchange = exchange,
+        updatedAt = updatedAt
+    )
+
+    fun applyDrawingDocument(document: ChartDrawingDocument) {
+        val imported = ChartDrawingBridge.import(document, source)
+        drawings.clear()
+        drawings.addAll(imported)
+        pendingPoints.clear()
+        invalidate()
+    }
 
     private fun rebuildDisplayCandles() {
         candles = when (chartStyle) {

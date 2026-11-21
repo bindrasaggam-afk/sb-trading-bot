@@ -30,6 +30,14 @@ import com.sb.ui.chart.ChartTool
 import com.sb.ui.chart.MarketDepthAdapter
 import com.sb.ui.chart.PriceScaleMode
 import com.sb.ui.chart.ProfessionalChartView
+import com.sb.ui.chart.config.IndicatorConfig
+import com.sb.ui.chart.config.IndicatorConfigPolicy
+import com.sb.ui.chart.config.IndicatorConfigPresets
+import com.sb.ui.chart.config.IndicatorConfigRepository
+import com.sb.ui.chart.config.SharedPreferencesIndicatorConfigStorage
+import com.sb.ui.chart.persistence.ChartDrawingRepository
+import com.sb.ui.chart.persistence.ChartStateScope
+import com.sb.ui.chart.persistence.SharedPreferencesChartDrawingStorage
 import com.sb.ui.market.InstrumentLiveViewModel
 import com.sb.ui.theme.AppDesign
 import com.sb.ui.trade.QuickTradeOverlay
@@ -81,6 +89,12 @@ class HeikinAshiChartScreen(
     private val activeIndicators = linkedSetOf<ChartIndicator>()
     private var activeTool = ChartTool.CROSSHAIR
     private var magnetEnabled = false
+
+    private var persistenceScopeKey = ""
+    private var drawingRepository: ChartDrawingRepository? = null
+    private var indicatorConfigRepository: IndicatorConfigRepository? = null
+    private var drawingsRestoredScope: String? = null
+    private var indicatorConfigRestoredScope: String? = null
 
     private val exchangeHint: String =
         exchange.trim().ifBlank {
@@ -562,6 +576,7 @@ class HeikinAshiChartScreen(
                 }
                 setOnClickListener {
                     val changed = label != selectedTimeframe
+                    if (changed) saveChartState()
                     selectedTimeframe = label
                     (anchor as? TextView)?.text = "$label ▾"
                     popup?.dismiss()
@@ -624,6 +639,7 @@ class HeikinAshiChartScreen(
 
         toolbar.addView(toolButton("C", "Clear drawings") {
             chartView.clearDrawings()
+            saveChartState()
         })
 
         refreshToolButtons()
@@ -712,6 +728,25 @@ class HeikinAshiChartScreen(
         list.addView(title)
 
         var popup: PopupWindow? = null
+        val config = currentIndicatorConfig()
+        val presetName = indicatorPresetName(config)
+        val presets = IndicatorConfigPresets.all()
+        val presetIndex = presets.indexOfFirst { it.first == presetName }
+
+        list.addView(
+            AppDesign.text(
+                context,
+                "Preset: $presetName • ${IndicatorConfigPolicy.label(config, ChartIndicator.EMA_20)}",
+                10f,
+                mutedColor
+            ).apply {
+                setPadding(dp(8), dp(4), dp(8), dp(7))
+                setOnClickListener {
+                    val next = presets[(presetIndex + 1) % presets.size].second
+                    applyIndicatorConfig(next, anchor, popup)
+                }
+            }
+        )
 
         ChartIndicator.values().forEach { indicator ->
             val item = AppDesign.text(
@@ -744,6 +779,7 @@ class HeikinAshiChartScreen(
                         null
                     }
                     chartView.indicators = activeIndicators.toSet()
+                    saveChartState()
                 }
             }
             list.addView(
@@ -761,6 +797,7 @@ class HeikinAshiChartScreen(
                 setOnClickListener {
                     activeIndicators.clear()
                     chartView.indicators = emptySet()
+                    saveChartState()
                     popup?.dismiss()
                     showIndicatorMenu(anchor)
                 }
@@ -780,9 +817,48 @@ class HeikinAshiChartScreen(
         popup.showAsDropDown(anchor, -dp(40), dp(2))
     }
 
+    private fun currentIndicatorConfig(): IndicatorConfig =
+        if (::chartView.isInitialized) {
+            chartView.indicatorConfig
+        } else {
+            indicatorConfigRepository?.load() ?: IndicatorConfigPolicy.DEFAULT
+        }
+
+    private fun indicatorPresetName(config: IndicatorConfig): String {
+        val comparable = config.copy(enabled = emptySet(), timeframeKey = "")
+        return IndicatorConfigPresets.all().firstOrNull { (_, preset) ->
+            preset.copy(enabled = emptySet(), timeframeKey = "") == comparable
+        }?.first ?: "Custom"
+    }
+
+    private fun applyIndicatorConfig(
+        config: IndicatorConfig,
+        anchor: View,
+        popup: PopupWindow?
+    ) {
+        if (!::chartView.isInitialized) return
+        ensureChartStateScope()
+        val normalized = IndicatorConfigPolicy.normalize(
+            config.copy(timeframeKey = selectedTimeframe)
+        )
+        if (!IndicatorConfigPolicy.validate(normalized).ok) return
+        chartView.indicatorConfig = normalized
+        activeIndicators.clear()
+        activeIndicators.addAll(normalized.enabled)
+        indicatorConfigRestoredScope = persistenceScopeKey
+        saveChartState()
+        popup?.dismiss()
+        showIndicatorMenu(anchor)
+    }
+
     private fun indicatorRowLabel(indicator: ChartIndicator): String {
         val check = if (indicator in activeIndicators) "✓  " else "     "
-        return check + indicator.label
+        val config = if (::chartView.isInitialized) {
+            chartView.indicatorConfig
+        } else {
+            IndicatorConfigPolicy.DEFAULT
+        }
+        return check + IndicatorConfigPolicy.label(config, indicator)
     }
 
     private fun showTextDrawingDialog(index: Int, price: Double) {
@@ -800,6 +876,7 @@ class HeikinAshiChartScreen(
                     price,
                     input.text?.toString()?.trim().orEmpty().ifBlank { "Note" }
                 )
+                saveChartState()
             }
             .setNegativeButton("Cancel", null)
             .show()
@@ -1055,6 +1132,66 @@ class HeikinAshiChartScreen(
         row.addView(button, params)
     }
 
+    private fun ensureChartStateScope() {
+        val key = ChartStateScope.key(selectedSymbol, selectedTimeframe, exchangeHint)
+        if (key == persistenceScopeKey &&
+            drawingRepository != null &&
+            indicatorConfigRepository != null
+        ) {
+            return
+        }
+        persistenceScopeKey = key
+        drawingRepository = ChartDrawingRepository(
+            SharedPreferencesChartDrawingStorage(context, key)
+        )
+        indicatorConfigRepository = IndicatorConfigRepository(
+            SharedPreferencesIndicatorConfigStorage(context, key)
+        )
+        drawingsRestoredScope = null
+        indicatorConfigRestoredScope = null
+    }
+
+    private fun saveChartState() {
+        if (!::chartView.isInitialized) return
+        ensureChartStateScope()
+
+        if (drawingsRestoredScope == persistenceScopeKey) {
+            drawingRepository?.save(
+                chartView.exportDrawingDocument(
+                    symbol = selectedSymbol,
+                    timeframe = selectedTimeframe,
+                    exchange = exchangeHint
+                )
+            )
+        }
+        if (indicatorConfigRestoredScope == persistenceScopeKey) {
+            val config = chartView.indicatorConfig.copy(timeframeKey = selectedTimeframe)
+            indicatorConfigRepository?.save(config)
+        }
+    }
+
+    private fun restoreChartStateForCurrentScope() {
+        if (!::chartView.isInitialized || currentCandles.isEmpty()) return
+        ensureChartStateScope()
+
+        if (indicatorConfigRestoredScope != persistenceScopeKey) {
+            indicatorConfigRepository?.load()?.let { config ->
+                val scoped = config.copy(timeframeKey = selectedTimeframe)
+                chartView.indicatorConfig = scoped
+                activeIndicators.clear()
+                activeIndicators.addAll(scoped.enabled)
+            }
+            indicatorConfigRestoredScope = persistenceScopeKey
+        }
+
+        if (drawingsRestoredScope != persistenceScopeKey) {
+            drawingRepository?.load()?.let { document ->
+                chartView.applyDrawingDocument(document)
+            }
+            drawingsRestoredScope = persistenceScopeKey
+        }
+    }
+
     private fun updateChart() {
         if (!::chartView.isInitialized) {
             return
@@ -1120,6 +1257,7 @@ class HeikinAshiChartScreen(
                 }
 
                 override fun onViewDetachedFromWindow(v: View) {
+                    saveChartState()
                     stopLiveUpdates()
                 }
             }
@@ -1347,6 +1485,7 @@ class HeikinAshiChartScreen(
                 chartStyle,
                 preserveViewport = !resetViewport
             )
+            restoreChartStateForCurrentScope()
         }
     }
 

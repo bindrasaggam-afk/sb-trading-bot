@@ -33,6 +33,7 @@ Never count multiple updates of the same call as separate wins. Define one prima
 - No candle may appear before its timestamp; ordering must be strictly ascending and unique. **Enforced at the chart boundary by `ChartCandleSeries.canonicalize` and covered by `ChartCandleSeriesTest`.**
 - Verify chart OHLCV against database rows. `ChartOhlcvEquivalenceTest` now covers DB row -> `CandleRowMapper` -> `Candle` -> `CandleSeriesTools.toMarketCandle` -> `ChartCandle` -> `ChartCandleSeries.canonicalize` -> `CandleSeriesAudit` exactMatch on fixed fixtures, including invalid-row dropping and last-row duplicate handling. Sampled live instruments/sessions are **still pending**.
 - Indicators must specify warm-up length, input series and whether current candle is closed. Invalid values now reset indicator warm-up locally instead of poisoning the whole series.
+- Indicator periods, multipliers and input source are now versioned through `IndicatorConfig` with deterministic codec/repository validation. Defaults preserve the former hardcoded values (EMA 20, SMA 50, RSI 14, MACD 12/26/9, Bollinger 20x2, Supertrend 10x3, CLOSE source); `IndicatorConfiguredCacheTest` verifies that custom values recalculate correctly while the legacy cache signature still matches default output.
 
 ## Pattern and analysis gates
 
