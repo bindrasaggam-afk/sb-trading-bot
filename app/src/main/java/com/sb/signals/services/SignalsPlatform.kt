@@ -11,7 +11,9 @@ import androidx.work.WorkManager
 import com.sb.backend.core.BackendManager
 import com.sb.backend.database.DatabaseMaintenanceGate
 import com.sb.signals.data.SignalDatabase
+import com.sb.signals.data.SignalDatabaseBackup
 import com.sb.signals.data.SignalRepository
+import java.io.File
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
@@ -64,6 +66,19 @@ object SignalsPlatform {
         ensureInitialized(context)
         return database
             ?: throw IllegalStateException("Signals database unavailable")
+    }
+
+    fun backup(context: Context): File? {
+        ensureInitialized(context)
+        return SignalDatabaseBackup(context, database).backup()
+    }
+
+    fun restore(context: Context, file: File): Boolean {
+        if (running) return false
+        ensureInitialized(context)
+        val restored = SignalDatabaseBackup(context, database).restore(file)
+        if (restored) closeDatabase()
+        return restored
     }
 
     fun start(context: Context): Boolean = synchronized(lock) {

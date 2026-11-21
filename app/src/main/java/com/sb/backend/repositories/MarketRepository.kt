@@ -7,6 +7,8 @@ import android.database.sqlite.SQLiteDatabase
 import android.util.Log
 import com.sb.backend.database.SBDatabaseHelper
 import com.sb.backend.database.DatabaseMaintenanceGate
+import com.sb.backend.market.analysis.CandleRow
+import com.sb.backend.market.analysis.CandleRowMapper
 import com.sb.backend.market.model.MarketTick
 import com.sb.backend.models.Candle
 import com.sb.backend.models.Quote
@@ -1223,20 +1225,11 @@ class MarketRepository(
     }
 
     private fun readCandle(cursor: Cursor): Candle {
-        val status = cursor.getString(9) ?: "COMPLETED"
-
-        return Candle(
-            symbol = cursor.getString(0),
-            exchange = cursor.getString(1) ?: "",
-            timeframe = cursor.getString(2),
-            timestamp = cursor.getLong(3),
-            open = cursor.getDouble(4),
-            high = cursor.getDouble(5),
-            low = cursor.getDouble(6),
-            close = cursor.getDouble(7),
-            volume = cursor.getLong(8),
-            isComplete = status != "LIVE"
-        )
+        return CandleRowMapper.read(object : CandleRow {
+            override fun string(index: Int): String? = cursor.getString(index)
+            override fun long(index: Int): Long = cursor.getLong(index)
+            override fun double(index: Int): Double = cursor.getDouble(index)
+        })
     }
 
     // ---------------------------------------------------------

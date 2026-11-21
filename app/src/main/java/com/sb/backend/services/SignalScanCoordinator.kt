@@ -1,7 +1,7 @@
 package com.sb.backend.services
 
 import com.sb.backend.core.BackendManager
-import com.sb.backend.market.TimeframeBuckets
+import com.sb.backend.market.analysis.TimeframeAggregator
 import com.sb.backend.market.model.InstrumentKey
 import com.sb.backend.market.model.MarketTimeframe
 import com.sb.backend.models.Candle
@@ -10,8 +10,6 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
-import kotlin.math.max
-import kotlin.math.min
 
 /**
  * Runs [SignalEngine] on candles that are already persisted.
@@ -177,34 +175,12 @@ object SignalScanCoordinator {
         targetTimeframe: MarketTimeframe,
         targetLabel: String,
         exchange: String
-    ): List<Candle> {
-        val buckets = LinkedHashMap<Long, Candle>()
-
-        source.forEach { candle ->
-            val timestamp = TimeframeBuckets.normalizeTimestamp(candle.timestamp)
-            if (timestamp <= 0L) return@forEach
-
-            val bucket = TimeframeBuckets.bucketStart(
-                timestamp = timestamp,
-                timeframe = targetTimeframe,
-                exchange = exchange
-            )
-
-            val existing = buckets[bucket]
-            buckets[bucket] = if (existing == null) {
-                candle.copy(timestamp = bucket, timeframe = targetLabel)
-            } else {
-                existing.copy(
-                    high = max(existing.high, candle.high),
-                    low = min(existing.low, candle.low),
-                    close = candle.close,
-                    volume = existing.volume + candle.volume
-                )
-            }
-        }
-
-        return buckets.values.toList()
-    }
+    ): List<Candle> = TimeframeAggregator.aggregate(
+        source = source,
+        targetTimeframe = targetTimeframe,
+        targetLabel = targetLabel,
+        exchange = exchange
+    )
 
     private fun generate(key: InstrumentKey) {
         try {

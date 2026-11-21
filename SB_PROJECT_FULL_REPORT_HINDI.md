@@ -6,21 +6,22 @@
 **ब्रांच:** `feature/platform-hardening`
 **इस रन का दायरा:** सिर्फ वे काम जो इस मोबाइल एनवायरनमेंट में चल सकते हैं — compile, JVM unit tests, `assembleDebug`, Git cleanup/commit और दस्तावेज़। लाइव ADB / emulator / Shizuku / `rish` वाले UI/instrumented टेस्ट **नहीं चलाए गए** और लैपटॉप के लिए पेंडिंग हैं।
 
-**मुख्य परिणाम:** `./gradlew test` सफल — Debug 253/253 और Release 253/253 JVM unit tests पास (0 fail, 0 skip); `assembleDebug` सफल — APK 14 MB; 5 लॉजिकल commits किए गए; Git working tree साफ़ (सिर्फ ये रिपोर्ट अंतिम commit के लिए बाकी)।
+**मुख्य परिणाम:** `./gradlew test assembleDebug --offline` सफल — Debug 268/268 और Release 268/268 JVM unit tests पास (0 fail, 0 skip); APK 15 MB; 6 लॉजिकल commits (पिछले 5 + इस रन का backup/accuracy commit); Git working tree इस रिपोर्ट के अंतिम commit के बाद साफ़।
 
 **स्थिति सारांश:**
 
 | # | काम | स्थिति |
 |---|---|---|
 | 1 | Deterministic candle engine + session-aware pipeline | **कंप्लीट** |
-| 2 | Repository cleanup (`.hprof`, जंक फ़ाइलें) + 5 logical commits | **कंप्लीट** |
+| 2 | Repository cleanup (`.hprof`, जंक फ़ाइलें) + logical commits | **कंप्लीट** |
 | 3 | दोनों DB अलग-अलग, प्रॉपर init + coordinated facade/shutdown | **कंप्लीट** |
-| 4 | `./gradlew test` (253/253 × 2) + `assembleDebug` (14 MB APK) | **कंप्लीट** |
-| 5 | Shizuku (rish) ताज़ा जाँच — बंद/अनुपलब्ध, इस्तेमाल संभव नहीं | **कंप्लीट (निरीक्षण)** |
-| 6 | लैपटॉप/फ़ोन पर लाइव UI + instrumented टेस्ट | **पेंडिंग** |
-| 7 | DB backup/restore hardening + gate coverage | **पेंडिंग** |
-| 8 | `1m→5m→15m→1h` और chart↔DB cross-check | **पेंडिंग** |
-| 9 | Advanced चार्ट फीचर्स + प्लेटफ़ॉर्म स्केल/सिक्योरिटी | **पेंडिंग** |
+| 4 | DB backup/restore hardening — JVM safety layer + owner-scoped tests | **कंप्लीट (JVM स्तर)** |
+| 5 | `1m→5m→15m→1h` + chart↔DB cross-check — JVM fixtures | **कंप्लीट (JVM स्तर)** |
+| 6 | `./gradlew test` (268/268 × 2) + `assembleDebug` (15 MB APK) | **कंप्लीट** |
+| 7 | Shizuku (rish) ताज़ा जाँच — बंद/अनुपलब्ध, इस्तेमाल संभव नहीं | **कंप्लीट (निरीक्षण)** |
+| 8 | लैपटॉप/फ़ोन पर लाइव UI + instrumented टेस्ट | **पेंडिंग** |
+| 9 | Backup gate coverage, independent historical bars, live cross-check samples | **पेंडिंग** |
+| 10 | Advanced चार्ट फीचर्स + प्लेटफ़ॉर्म स्केल/सिक्योरिटी | **पेंडिंग** |
 
 ---
 
@@ -61,7 +62,8 @@
 | 2 | `4d6af51` | `feat(market): make candle pipeline deterministic and session aware` — 14 फ़ाइलें (engine, session calendar, repos, services, डेटा/इंस्ट्रूमेंटेड टेस्ट) |
 | 3 | `49c3c87` | `feat(chart): harden chart data boundary and incremental indicators` — 13 फ़ाइलें (chart core, indicator cache, टेस्ट, accuracy doc) |
 | 4 | `afb5d1f` | `feat(backend): coordinate two database backends and ordered shutdown` — 8 फ़ाइलें (coordinator, shutdown sequence, API server, lifecycle, signals platform, नया टेस्ट) |
-| 5 | अंतिम | `docs: refresh Hindi report for dual-database design and verification` — ये रिपोर्ट फ़ाइल |
+| 5 | `1a95b70` | `docs: refresh Hindi report for dual-database design and verification` |
+| 6 | अंतिम | `feat(db): harden owner-scoped backup and accuracy cross-checks` — backup policy/engine, signals-scoped backup, pure aggregator/row-mapper, 15 नए JVM टेस्ट, docs + ये रिपोर्ट |
 
 - Commit से पहले `git status`, `git diff`, `git diff --cached` देखे गए; secrets/keystore/shizuku binaries/kotlin compiled artifacts कभी stage नहीं किए गए।
 
@@ -120,20 +122,52 @@
 - एक producer के फेल होने पर भी बाकी producers और दोनों DB close होते हैं; error सूची में कारण दर्ज।
 - gate timeout पर DB close **नहीं** होते (`drained=false`) — अधूरा shutdown झूठे "सफल" की रिपोर्ट नहीं देता।
 
-## 1.4 Compile + Unit Tests + APK Build — सफल
+## 1.4 DB backup/restore hardening — JVM safety layer, दोनों DB अलग रखकर
+
+**नई फ़ाइलें:**
+- `app/src/main/java/com/sb/backend/database/DatabaseBackupPolicy.kt` — `DatabaseSpec`, वर्ज़न कांस्टेंट, checkpoint/validation परिणाम, scope/naming नीति।
+- `app/src/main/java/com/sb/backend/database/DatabaseFileBackup.kt` — gate-protected generic backup/restore engine।
+- `app/src/main/java/com/sb/backend/database/AndroidDatabaseFileInspector.kt` — read-only SQLite inspector (`integrity_check`, `user_version`, `sqlite_master`)।
+- `app/src/main/java/com/sb/signals/data/SignalDatabaseBackup.kt` — सिर्फ `sb_signals.db` के लिए owner-scoped wrapper।
+
+**व्यवहार:**
+- `DatabaseSpecs.BACKEND` → `sb_backend.db`, v11, prefix `sb_backend`, backup dir `db_backups`; `DatabaseSpecs.SIGNALS` → `sb_signals.db`, v4, prefix `sb_signals`, backup dir `db_backups/signals`। **कोई मर्ज या shared path नहीं**; वर्ज़न/टेबल कांस्टेंट owner helper से टेस्ट में मिलाए गए।
+- backup: `DatabaseMaintenanceGate` लेता है; `PRAGMA wal_checkpoint(FULL)` के busy/log/checkpointed परिणाम जाँचता है; file copy के बाद integrity + user_version + required tables validate करता है; टाइमस्टैम्प colliding होने पर suffix जोड़ता है।
+- restore: सिर्फ उसी owner DB पर चलता है; candidate validate; same-directory temp file पर stage; rollback snapshot; `-wal/-shm/-journal` sidecars हटाएँ; atomic replace (fallback copy); replace के बाद फिर validate; किसी भी विफलता पर rollback; सफलता पर rollback cleanup।
+- `DatabaseBackup` पुराना constructor/API संभालते हुए अब backend policy पर delegate करता है। `SignalsPlatform.backup(context)` और `SignalsPlatform.restore(context, file)` जोड़े गए; restore तभी चलेगा जब signals running न हो, और सफल restore पर owner DB close होगा।
+
+**JVM टेस्ट (10):**
+- `DatabaseBackupPolicyTest` (4): spec/owner/scope अलगाव, वर्ज़न सिंक, backup filename collision, checkpoint/integrity/version/schema validator।
+- `DatabaseFileBackupTest` (6): round-trip, backend/signals scope अलगाव, busy checkpoint block, gate held block, corrupt candidate reject, post-replace validation failure rollback।
+- इन सभी में Shizuku/ADB/live DB नहीं — सिर्फ temp files + fake inspector।
+
+## 1.5 Timeframe और chart↔DB cross-checks — JVM fixtures के साथ
+
+**नई/बदली गई फ़ाइलें:**
+- `app/src/main/java/com/sb/backend/market/analysis/TimeframeAggregator.kt` — शुद्ध deterministic aggregator: normalized event time से sort, `timestamp <= 0` skip, `open=first`, `high=max`, `low=min`, `close=last`, `volume=sum`, bucket start और target label लिखता है।
+- `SignalScanCoordinator.aggregateCandles()` अब इसी aggregator पर delegate करता है; पुरानी duplicate logic हटा दी गई।
+- `app/src/main/java/com/sb/backend/market/analysis/CandleRowMapper.kt` — DB cursor के 10 columns को pure `Candle` में बदलता है; `MarketRepository.readCandle()` अब इसी mapper पर delegate करता है।
+- `docs/SIGNAL_ACCURACY_STANDARD.md` — cross-check status सच के अनुसार अपडेट।
+
+**JVM टेस्ट (5):**
+- `TimeframeAggregatorTest` (3): fixed IST timestamps पर 1m→5m→15m→1h चेन (expected OHLCV 100/161/99/160, volume 2370), direct 1h parity, `CandleSeriesTools.aggregate` + `CandleSeriesAudit` से exactMatch; seconds normalization, non-positive skip; unsorted input में timestamp-order close।
+- `ChartOhlcvEquivalenceTest` (2): DB row → `CandleRowMapper` → `Candle` → `CandleSeriesTools.toMarketCandle` → `ChartCandle` → `ChartCandleSeries.canonicalize` → `CandleSeriesAudit` round-trip exactMatch; invalid rows drop और duplicate timestamp पर last-row keep।
+
+**सीमा:** ये cross-check fixed deterministic fixtures पर हैं। बाहरी independently-sourced historical bars और असली instruments/sessions के live samples अभी पेंडिंग हैं; लाइव accuracy claim नहीं किया गया।
+
+## 1.6 Compile + Unit Tests + APK Build — सफल
 
 | चेक | कमांड | परिणाम |
 |---|---|---|
 | Kotlin compile | `JAVA_HOME=/opt/java/jdk-17.0.20.1+1 ./gradlew compileDebugKotlin --offline` | **BUILD SUCCESSFUL** |
-| सभी JVM unit tests | `./gradlew test --offline` | **BUILD SUCCESSFUL** — Debug **253 tests**, Release **253 tests**; दोनों में 0 failures, 0 errors, 0 skipped |
-| APK build | `./gradlew assembleDebug --offline` | **BUILD SUCCESSFUL** |
-| APK आउटपुट | `app/build/outputs/apk/debug/app-debug.apk` | **14 MB**, timestamp 21 Nov 09:13 |
+| सभी JVM unit tests + APK | `JAVA_HOME=/opt/java/jdk-17.0.20.1+1 ./gradlew test assembleDebug --offline` | **BUILD SUCCESSFUL** — Debug **268 tests**, Release **268 tests**; दोनों में 0 failures, 0 errors, 0 skipped |
+| APK आउटपुट | `app/build/outputs/apk/debug/app-debug.apk` | **15 MB**, timestamp 21 Nov 11:01 |
 
-कुल 253 = पहले के 250 + नए `BackendShutdownSequenceTest` के 3 टेस्ट। डोमेन-वाइज़ कवरेज पहले जैसा ही है (डेटा/candle, चार्ट, सिग्नल, पेपर ट्रेडिंग, API/सिक्योरिटी, overview, research, DB gate, Kotak parser)।
+कुल 268 = पिछले 253 + `DatabaseBackupPolicyTest` 4 + `DatabaseFileBackupTest` 6 + `TimeframeAggregatorTest` 3 + `ChartOhlcvEquivalenceTest` 2। डोमेन-वाइज़ कवरेज अब DB backup/restore policy, owner scoping, rollback, timeframe rollup और chart/DB OHLCV equivalence तक बढ़ गया है।
 
-**नोट:** compile के दौरान कुछ पहले से मौजूद Kotlin warnings आए (deprecated `toUpperCase`, unused variables, opt-in annotation, label shadowing) — ये **गैर-घातक** हैं, build सफल है।
+**नोट:** compile के दौरान कुछ पहले से मौजूद Kotlin warnings आए (deprecated `toUpperCase`, unused variables, opt-in annotation, label shadowing, `MarketRepository` में unreachable-code warnings) — ये **गैर-घातक** हैं, build सफल है।
 
-## 1.5 Shizuku (rish) की ताज़ा जाँच — read-only
+## 1.7 Shizuku (rish) की ताज़ा जाँच — read-only
 
 यह जाँच सिर्फ निरीक्षण थी; **Shizuku को ज़बरन चलाने की कोशिश नहीं की गई**।
 
@@ -162,20 +196,25 @@
 - `app/src/androidTest/java/com/sb/ui/chart/ProfessionalChartViewTest.kt` (722 लाइन, 11 टेस्ट) — चार्ट rendering, pan/pinch/zoom, pixel clipping, drawing remap। **लिखे गए पर कभी execute नहीं हुए।**
 - `app/src/androidTest/java/com/sb/backend/database/MarketRepositoryQuoteOrderingTest.kt` (324 लाइन), `DatabaseMigrationsInstrumentedTest.kt`, `LegacyPaperMigrationInstrumentedTest.kt`, `PaperRepositoryInstrumentedTest.kt`, `SignalMigrationsInstrumentedTest.kt` — DB instrumented tests।
 - चलाने के लिए host PC पर: JDK 17 + Android SDK platform-tools (adb) + emulator (API 29) या USB-debug device with RSA authorization; फिर `./gradlew connectedDebugAndroidTest`।
-- APK पहले से तैयार है: `app/build/outputs/apk/debug/app-debug.apk` (14 MB) — लैपटॉप पर `adb install -r`, `adb shell am start -n com.sb/.MainActivity`, screenshot/`uiautomator` से UI प्रमाण।
+- APK पहले से तैयार है: `app/build/outputs/apk/debug/app-debug.apk` (15 MB) — लैपटॉप पर `adb install -r`, `adb shell am start -n com.sb/.MainActivity`, screenshot/`uiautomator` से UI प्रमाण।
 - Shizuku मार्ग तब ही खुलेगा जब बाहरी डिवाइस पर Shizuku ऐप install/start हो, terminal app (`com.m4coding.ide`) को permission मिले, `RISH_APPLICATION_ID` सही set हो और `/system/bin/app_process` सुलभ हो।
 
-## 2.2 DB backup/restore hardening (अभी पेंडिंग)
+## 2.2 DB backup/restore hardening — बचा हुआ हिस्सा
 
-- `DatabaseBackup` सिर्फ `sb_backend.db` को टारगेट करता है; `sb_signals.db` का backup/restore अलग से तय करना है — **दोनों को मर्ज किए बिना** अलग-अलग candidate file और restore path रखने होंगे।
-- WAL checkpoint का पूरा result validate; app-controlled candidate file; same-filesystem temp + atomic replace; rollback snapshot; SQLite integrity/schema check।
-- Isolated instrumented tests (बाहर चलाने होंगे): valid round-trip, corrupt/empty/incompatible reject, failure rollback, concurrent writer exclusion।
+**JVM स्तर कंप्लीट** (सेक्शन 1.4 देखें): owner-scoped specs, checkpoint/validation, staged atomic restore, rollback, sidecar cleanup और 10 deterministic टेस्ट।
+
+**अभी पेंडिंग:**
+- Instrumented round-trip असली Android SQLite पर चलाना: valid backup→restore, corrupt/empty/incompatible reject, concurrent writer exclusion और process-kill के बाद rollback snapshot का व्यवहार।
 - Gate coverage अधूरी है: API के कुछ सीधे `BackendManager.database()` queries और `signals.data.SignalRepository` के UI रीडर अभी `DatabaseMaintenanceGate` से नहीं गुज़रते; coordinated quiescence को पूरी तरह सच बनाने के लिए इन्हें भी operation lease देना है।
+- Restore के बाद owner helper का reopen/refresh व्यवहार live app में verify करना (`DatabaseBackup` और `SignalsPlatform` सफल restore पर owner को बंद करते हैं)।
 
-## 2.3 SIGNAL_ACCURACY_STANDARD.md के cross-check (पेंडिंग)
+## 2.3 SIGNAL_ACCURACY_STANDARD.md — बचा हुआ हिस्सा
 
-- **1m → 5m → 15m → 1h aggregation:** independently-sourced historical bars के विरुद्ध deterministic test बनाना बाकी (`docs/SIGNAL_ACCURACY_STANDARD.md:32`)।
-- **Chart ↔ DB OHLCV equivalence:** sample instruments/sessions के लिए chart boundary और DB rows का मिलान बाकी (`:34`)। Chart-boundary canonicalization (`ChartCandleSeries.canonicalize`) और उसके 3 टेस्ट हो गए हैं; cross-source equivalence अभी pending है (`:79`)।
+**JVM स्तर कंप्लीट** (सेक्शन 1.5 देखें): fixed fixtures पर 1m→5m→15m→1h chain, `CandleSeriesTools`/`CandleSeriesAudit` parity, seconds normalization, unsorted-order close, DB row→chart OHLCV round-trip; `docs/SIGNAL_ACCURACY_STANDARD.md` अपडेट किया गया।
+
+**अभी पेंडिंग:**
+- **Independently-sourced historical bars** के विरुद्ध aggregation मिलान (`docs/SIGNAL_ACCURACY_STANDARD.md:32`) — अभी synthetic deterministic fixtures हैं, बाहरी डेटा source नहीं।
+- **Sample instruments/sessions पर live chart↔DB equivalence** (`:34`, `:79`) — JVM fixture test है, असली DB/UI samples नहीं।
 - **Release gates:** 80–90% directional accuracy अभी सिर्फ research target है; walk-forward/out-of-sample metrics, coverage, costs, drawdown प्रकाशित नहीं हुए — live-trading readiness claim नहीं है।
 
 ## 2.4 Advanced चार्ट फीचर्स (पेंडिंग)
