@@ -28,11 +28,11 @@ Never count multiple updates of the same call as separate wins. Define one prima
 
 ## Chart and timeframe gates
 
-- Chart candles must be derived from the same canonical candle series used by analysis.
-- Verify 1m -> 5m -> 15m -> 1h aggregation against independently sourced historical bars.
-- No candle may appear before its timestamp; ordering must be strictly ascending and unique.
-- Verify chart OHLCV against database rows for sampled instruments and sessions.
-- Indicators must specify warm-up length, input series and whether current candle is closed.
+- Chart candles must be derived from the same canonical candle series used by analysis. The chart boundary (`ChartCandleSeries.canonicalize`) now accepts only finite, positive OHLC, non-negative volume and strictly ascending unique timestamps; duplicate timestamps keep the last row and invalid rows are dropped rather than repaired.
+- Verify 1m -> 5m -> 15m -> 1h aggregation against independently sourced historical bars. **Still pending.**
+- No candle may appear before its timestamp; ordering must be strictly ascending and unique. **Enforced at the chart boundary by `ChartCandleSeries.canonicalize` and covered by `ChartCandleSeriesTest`.**
+- Verify chart OHLCV against database rows for sampled instruments and sessions. The chart boundary guarantees internal consistency; cross-source equivalence is **still pending**.
+- Indicators must specify warm-up length, input series and whether current candle is closed. Invalid values now reset indicator warm-up locally instead of poisoning the whole series.
 
 ## Pattern and analysis gates
 
@@ -76,7 +76,7 @@ A HOLD is not a winning call. Report abstention/coverage separately. Do not opti
 
 1. Canonical candle data pipeline and persistence.
 2. Historical/live reconciliation and timeframe aggregation.
-3. Chart data-source consistency.
+3. Chart data-source consistency (chart-boundary canonicalization done; database cross-check pending).
 4. Pattern definitions and test suite.
 5. Signal event log and immutable evaluation labels.
 6. Backtest/walk-forward evaluator with costs.

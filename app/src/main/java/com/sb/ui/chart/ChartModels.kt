@@ -9,6 +9,32 @@ data class ChartCandle(
     val volume: Long = 0L
 )
 
+object ChartCandleSeries {
+
+    fun canonicalize(input: List<ChartCandle>): List<ChartCandle> {
+        if (input.isEmpty()) return emptyList()
+        val byTimestamp = LinkedHashMap<Long, ChartCandle>()
+        input.forEach { candle ->
+            if (isValid(candle)) {
+                byTimestamp[candle.timestamp] = candle
+            }
+        }
+        return byTimestamp.values.sortedBy { it.timestamp }
+    }
+
+    fun isValid(candle: ChartCandle): Boolean {
+        if (candle.timestamp <= 0L || candle.volume < 0L) return false
+        if (!candle.open.isFinite() || !candle.high.isFinite() ||
+            !candle.low.isFinite() || !candle.close.isFinite()
+        ) return false
+        if (candle.open <= 0.0 || candle.high <= 0.0 ||
+            candle.low <= 0.0 || candle.close <= 0.0
+        ) return false
+        return candle.high >= maxOf(candle.open, candle.close, candle.low) &&
+            candle.low <= minOf(candle.open, candle.close, candle.high)
+    }
+}
+
 enum class ChartStyle(val label: String) {
     CANDLE("CDL"),
     HEIKIN_ASHI("HA"),

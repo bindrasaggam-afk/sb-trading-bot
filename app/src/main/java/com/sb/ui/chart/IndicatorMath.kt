@@ -9,14 +9,22 @@ object IndicatorMath {
 
     fun sma(values: List<Double>, period: Int): DoubleArray {
         val result = DoubleArray(values.size) { Double.NaN }
-        if (period <= 0 || values.size < period || values.any { !it.isFinite() }) return result
+        if (period <= 0 || values.size < period) return result
         var sum = 0.0
+        var validCount = 0
         for (i in values.indices) {
-            sum += values[i]
-            if (i >= period) {
+            val value = values[i]
+            if (!value.isFinite()) {
+                sum = 0.0
+                validCount = 0
+                continue
+            }
+            sum += value
+            validCount++
+            if (validCount > period) {
                 sum -= values[i - period]
             }
-            if (i >= period - 1) {
+            if (validCount >= period) {
                 result[i] = sum / period
             }
         }
@@ -25,17 +33,23 @@ object IndicatorMath {
 
     fun ema(values: List<Double>, period: Int): DoubleArray {
         val result = DoubleArray(values.size) { Double.NaN }
-        if (period <= 0 || values.isEmpty() || values.any { !it.isFinite() }) return result
+        if (period <= 0 || values.isEmpty()) return result
         val multiplier = 2.0 / (period + 1.0)
         var seed = 0.0
         var seedCount = 0
         var previous = Double.NaN
         for (i in values.indices) {
             val value = values[i]
-            if (i < period) {
+            if (!value.isFinite()) {
+                seed = 0.0
+                seedCount = 0
+                previous = Double.NaN
+                continue
+            }
+            if (!previous.isFinite()) {
                 seed += value
                 seedCount++
-                if (i == period - 1) {
+                if (seedCount == period) {
                     previous = seed / seedCount
                     result[i] = previous
                 }
@@ -91,25 +105,43 @@ object IndicatorMath {
 
     fun rsi(values: List<Double>, period: Int = 14): DoubleArray {
         val result = DoubleArray(values.size) { Double.NaN }
-        if (period <= 0 || values.size <= period || values.any { !it.isFinite() }) return result
+        if (period <= 0 || values.size <= period) return result
 
-        var gain = 0.0
-        var loss = 0.0
-        for (i in 1..period) {
-            val change = values[i] - values[i - 1]
-            if (change >= 0.0) gain += change else loss -= change
-        }
-        var averageGain = gain / period
-        var averageLoss = loss / period
-        result[period] = rsiValue(averageGain, averageLoss)
+        var seedGain = 0.0
+        var seedLoss = 0.0
+        var seedCount = 0
+        var averageGain = Double.NaN
+        var averageLoss = Double.NaN
 
-        for (i in period + 1 until values.size) {
-            val change = values[i] - values[i - 1]
+        for (i in 1 until values.size) {
+            val current = values[i]
+            val previous = values[i - 1]
+            if (!current.isFinite() || !previous.isFinite()) {
+                seedGain = 0.0
+                seedLoss = 0.0
+                seedCount = 0
+                averageGain = Double.NaN
+                averageLoss = Double.NaN
+                continue
+            }
+
+            val change = current - previous
             val currentGain = if (change > 0.0) change else 0.0
             val currentLoss = if (change < 0.0) -change else 0.0
-            averageGain = (averageGain * (period - 1) + currentGain) / period
-            averageLoss = (averageLoss * (period - 1) + currentLoss) / period
-            result[i] = rsiValue(averageGain, averageLoss)
+            if (!averageGain.isFinite()) {
+                seedGain += currentGain
+                seedLoss += currentLoss
+                seedCount++
+                if (seedCount == period) {
+                    averageGain = seedGain / period
+                    averageLoss = seedLoss / period
+                    result[i] = rsiValue(averageGain, averageLoss)
+                }
+            } else {
+                averageGain = (averageGain * (period - 1) + currentGain) / period
+                averageLoss = (averageLoss * (period - 1) + currentLoss) / period
+                result[i] = rsiValue(averageGain, averageLoss)
+            }
         }
         return result
     }
@@ -137,7 +169,7 @@ object IndicatorMath {
         val signal = DoubleArray(values.size) { Double.NaN }
         val histogram = DoubleArray(values.size) { Double.NaN }
         if (fastPeriod <= 0 || slowPeriod <= fastPeriod || signalPeriod <= 0 ||
-            values.isEmpty() || values.any { !it.isFinite() }
+            values.isEmpty()
         ) {
             return MacdResult(macd, signal, histogram)
         }
@@ -341,11 +373,17 @@ object IndicatorMath {
             val mean = averages[i]
             if (!mean.isFinite()) continue
             var sum = 0.0
+            var validWindow = true
             for (j in i - period + 1..i) {
-                val diff = values[j] - mean
+                val value = values[j]
+                if (!value.isFinite()) {
+                    validWindow = false
+                    break
+                }
+                val diff = value - mean
                 sum += diff * diff
             }
-            result[i] = sqrt(sum / period)
+            if (validWindow) result[i] = sqrt(sum / period)
         }
         return result
     }

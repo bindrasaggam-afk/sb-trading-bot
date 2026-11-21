@@ -52,7 +52,7 @@ class OverviewLineChartView(context: Context) : View(context) {
         data: List<OverviewHistoryPoint>,
         rangeLabel: String
     ) {
-        this.points = data
+        this.points = data.filter { it.close.isFinite() }
         this.rangeLabel = rangeLabel
         invalidate()
     }
@@ -76,13 +76,16 @@ class OverviewLineChartView(context: Context) : View(context) {
             return
         }
 
-        var minPrice = points.minOf { it.low }
-        var maxPrice = points.maxOf { it.high }
-        if (!minPrice.isFinite() || !maxPrice.isFinite() ||
-            maxPrice <= minPrice
-        ) {
-            minPrice = points.minOf { it.close }
-            maxPrice = points.maxOf { it.close }
+        val closes = points.map { it.close }
+        val finiteLows = points.mapNotNull { it.low.takeIf { value -> value.isFinite() } }
+        val finiteHighs = points.mapNotNull { it.high.takeIf { value -> value.isFinite() } }
+        val lowestClose = closes.minOf { it }
+        val highestClose = closes.maxOf { it }
+        var minPrice = minOf(lowestClose, finiteLows.minOrNull() ?: lowestClose)
+        var maxPrice = maxOf(highestClose, finiteHighs.maxOrNull() ?: highestClose)
+        if (!minPrice.isFinite() || !maxPrice.isFinite() || maxPrice < minPrice) {
+            minPrice = lowestClose
+            maxPrice = highestClose
         }
         if (maxPrice <= minPrice) {
             maxPrice = minPrice + 1.0

@@ -6,7 +6,6 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.text.InputType
 import android.text.TextUtils
-import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
@@ -133,7 +132,7 @@ class HeikinAshiChartScreen(
     private var pendingViewportReset = false
 
     private val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.US)
-    private val chartTimeFormat = SimpleDateFormat("dd MMM HH:mm", Locale.US)
+    private val chartTimeFormat = SimpleDateFormat("EEEE · dd MMM yyyy · hh:mm a", Locale.US)
 
     fun createView(): View {
         // The ViewModel is shared activity-wide; keep the visible timeframe in
@@ -1066,6 +1065,7 @@ class HeikinAshiChartScreen(
         }
 
         liveViewModel?.setTimeframe(selectedTimeframe)
+        chartView.timeframeKey = selectedTimeframe
 
         // A timeframe switch re-renders with a fresh viewport from the
         // incoming candle list. Style/indicator changes keep the viewport.
@@ -1212,7 +1212,10 @@ class HeikinAshiChartScreen(
 
         if (tick == null) {
             lastTick = null
-            if (::chartView.isInitialized) chartView.lastPrice = null
+            if (::chartView.isInitialized) {
+                chartView.lastPrice = null
+                chartView.previousClose = null
+            }
             renderDepth(null)
             livePriceText.text = "LIVE • waiting for tick"
             livePriceText.setTextColor(mutedColor)
@@ -1239,7 +1242,10 @@ class HeikinAshiChartScreen(
         }
 
         lastTick = tick
-        if (::chartView.isInitialized) chartView.lastPrice = tick.ltp
+        if (::chartView.isInitialized) {
+            chartView.lastPrice = tick.ltp
+            chartView.previousClose = tick.previousClose ?: tick.close
+        }
 
         val previousClose = tick.previousClose ?: tick.close
         val change = tick.change
@@ -1316,27 +1322,11 @@ class HeikinAshiChartScreen(
 
     private fun chartPrice(value: Double): String {
         if (!value.isFinite()) return "—"
-        return String.format(Locale.US, "%.2f", value)
+        val decimals = if (abs(value) < 1.0) 4 else 2
+        return String.format(Locale.US, "%.${decimals}f", value)
     }
 
     private fun renderCandles(candles: List<MarketCandle>) {
-        val firstTs = candles.firstOrNull()?.timestamp ?: 0L
-        val lastTs = candles.lastOrNull()?.timestamp ?: 0L
-        Log.i("ChartCandleAudit", "symbol=" + selectedSymbol + " exchange=" + exchangeHint + " timeframe=" + selectedTimeframe + " count=" + candles.size + " first=" + firstTs + " last=" + lastTs)
-        candles.takeLast(5).forEachIndexed { index, candle ->
-            Log.i(
-                "ChartCandleOHLC",
-                "symbol=$selectedSymbol " +
-                    "timeframe=$selectedTimeframe " +
-                    "index=$index " +
-                    "timestamp=${candle.timestamp} " +
-                    "open=${candle.open} " +
-                    "high=${candle.high} " +
-                    "low=${candle.low} " +
-                    "close=${candle.close} " +
-                    "volume=${candle.volume}"
-            )
-        }
         currentCandles = candles.map {
             ChartCandle(
                 timestamp = it.timestamp,
@@ -1351,6 +1341,7 @@ class HeikinAshiChartScreen(
         if (::chartView.isInitialized) {
             val resetViewport = pendingViewportReset
             pendingViewportReset = false
+            chartView.timeframeKey = selectedTimeframe
             chartView.setChartData(
                 currentCandles,
                 chartStyle,

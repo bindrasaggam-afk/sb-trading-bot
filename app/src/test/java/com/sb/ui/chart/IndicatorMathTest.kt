@@ -122,16 +122,47 @@ class IndicatorMathTest {
     }
 
     @Test
-    fun emaRejectsNonFiniteInputInsteadOfPropagatingCorruption() {
-        val result = IndicatorMath.ema(listOf(1.0, 2.0, Double.NaN, 4.0), 2)
-        assertTrue(result.all { it.isNaN() })
+    fun emaReseedsAfterNonFiniteInputWithoutPoisoningEarlierValues() {
+        val result = IndicatorMath.ema(listOf(1.0, 2.0, Double.NaN, 4.0, 5.0, 6.0), 2)
+
+        assertEquals(1.5, result[1], 0.000001)
+        assertTrue(result[2].isNaN())
+        assertEquals(4.5, result[4], 0.000001)
+        assertEquals(5.5, result[5], 0.000001)
     }
 
+    @Test
+    fun smaReseedsAfterNonFiniteInputWithoutPoisoningEarlierValues() {
+        val result = IndicatorMath.sma(listOf(1.0, 3.0, Double.NaN, 10.0, 20.0), 2)
+
+        assertEquals(2.0, result[1], 0.000001)
+        assertTrue(result[2].isNaN())
+        assertTrue(result[3].isNaN())
+        assertEquals(15.0, result[4], 0.000001)
+    }
 
     @Test
-    fun rsiRejectsNonFiniteInput() {
-        val result = IndicatorMath.rsi(listOf(1.0, 2.0, Double.NaN, 4.0), 2)
-        assertTrue(result.all { it.isNaN() })
+    fun rsiReseedsAfterNonFiniteInputWithoutPoisoningEarlierValues() {
+        val values = listOf(1.0, 2.0, 3.0, Double.NaN, 20.0, 21.0, 22.0)
+        val result = IndicatorMath.rsi(values, 2)
+
+        assertEquals(100.0, result[2], 0.000001)
+        assertTrue(result[3].isNaN())
+        assertTrue(result[4].isNaN())
+        assertEquals(100.0, result[6], 0.000001)
+    }
+
+    @Test
+    fun macdRecoversAfterNonFiniteInput() {
+        val values = (1..80).map { index ->
+            if (index == 40) Double.NaN else index.toDouble()
+        }
+        val result = IndicatorMath.macd(values)
+
+        assertTrue(result.macd[25].isFinite())
+        assertTrue(result.macd[39].isNaN())
+        assertTrue(result.macd[79].isFinite())
+        assertTrue(result.signal[79].isFinite())
     }
 
     @Test

@@ -17,14 +17,15 @@ import android.view.VelocityTracker
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.animation.DecelerateInterpolator
+import com.sb.backend.market.TimeframeBuckets
 import com.sb.ui.theme.AppDesign
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
-import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.round
 
 class ProfessionalChartView @JvmOverloads constructor(
     context: Context,
@@ -41,6 +42,13 @@ class ProfessionalChartView @JvmOverloads constructor(
     var activeTool: ChartTool = ChartTool.CROSSHAIR
         set(value) {
             field = value
+            removeCallbacks(crosshairHoldRunnable)
+            recycleVelocityTracker()
+            cancelAnimations()
+            isTouchDown = false
+            crosshairHoldActivated = false
+            isPanning = false
+            isPricePanning = false
             pendingPoints.clear()
             crosshairVisible = false
             onCrosshairChanged?.invoke(null, -1)
@@ -56,17 +64,41 @@ class ProfessionalChartView @JvmOverloads constructor(
     var indicators: Set<ChartIndicator> = emptySet()
         set(value) {
             field = value
-            indicatorSignature = Long.MIN_VALUE
+            invalidate()
+        }
+
+    var timeframeKey: String = ""
+        set(value) {
+            if (field == value) return
+            field = value
             invalidate()
         }
 
     var priceScaleMode: PriceScaleMode = PriceScaleMode.ABSOLUTE
         set(value) {
             field = value
+            relativeReference = Double.NaN
             invalidate()
         }
 
+    private var relativeReference = Double.NaN
+
     var lastPrice: Double? = null
+        set(value) {
+            val next = value?.takeIf { PriceScaleEngine.isUsablePrice(it) }
+            if (field == next) return
+            field = next
+            if (next != null) {
+                startLastPricePulse()
+            } else {
+                lastPricePulseAnimator?.cancel()
+                lastPricePulseAnimator = null
+                lastPricePulse = 0f
+            }
+            invalidate()
+        }
+
+    var previousClose: Double? = null
         set(value) {
             val next = value?.takeIf { PriceScaleEngine.isUsablePrice(it) }
             if (field == next) return
@@ -76,6 +108,8 @@ class ProfessionalChartView @JvmOverloads constructor(
 
     var onCrosshairChanged: ((ChartCandle?, Int) -> Unit)? = null
     var onTextDrawingRequested: ((Int, Double) -> Unit)? = null
+
+    private var priceDecimals = 2
 
     private var source: List<ChartCandle> = emptyList()
     private var candles: List<ChartCandle> = emptyList()
@@ -92,16 +126,54 @@ class ProfessionalChartView @JvmOverloads constructor(
     private var crosshairIndex = -1
 
     private var lastTouchX = 0f
+    private var lastTouchY = 0f
     private var touchStartX = 0f
+    private var touchStartY = 0f
+    private var isTouchDown = false
+    private var crosshairHoldActivated = false
     private var isPanning = false
+    private var isPricePanning = false
+    private var drawingStartValid = false
 
-    private val touchSlop = ViewConfiguration
-        .get(context)
-        .scaledTouchSlop
+    private val viewConfiguration = ViewConfiguration.get(context)
+    private val touchSlop = viewConfiguration.scaledTouchSlop
+    private val minFlingVelocity = viewConfiguration.scaledMinimumFlingVelocity
 
     private var previewX = 0f
     private var previewY = 0f
     private var lastGeometry: Geometry? = null
+
+    private val crosshairHoldRunnable = Runnable {
+        if (!isTouchDown) {
+            return@Runnable
+        }
+
+        val geometry = computeGeometry() ?: return@Runnable
+
+        if (!isInsideChartArea(previewX, previewY, geometry)) {
+            return@Runnable
+        }
+
+        crosshairHoldActivated = true
+        isPanning = false
+        isPricePanning = false
+
+        crosshairVisible = true
+        crosshairX = previewX.coerceIn(geometry.left, geometry.right)
+        crosshairY = previewY.coerceIn(
+            geometry.priceTop,
+            geometry.priceBottom
+        )
+
+        crosshairIndex = indexAt(crosshairX, geometry)
+
+        onCrosshairChanged?.invoke(
+            source.getOrNull(crosshairIndex),
+            crosshairIndex
+        )
+
+        invalidate()
+    }
 
     private var manualPriceRange: PriceRange? = null
     private var horizontalOverscroll = 0f
@@ -111,15 +183,17 @@ class ProfessionalChartView @JvmOverloads constructor(
     private var axisLastY = 0f
     private var axisStartRange = PriceRange(0.0, 1.0)
     private var axisAnchorPrice = 0.0
+    private var axisAnchorRatio = 0.5
     private var axisMinSpan = 0.0
     private var axisMaxSpan = 0.0
     private var suppressNextAxisDown = false
     private var velocityTracker: VelocityTracker? = null
     private var scrollAnimator: ValueAnimator? = null
     private var priceAnimator: ValueAnimator? = null
+    private var lastPricePulseAnimator: ValueAnimator? = null
+    private var lastPricePulse = 0f
 
-    private var sourceVersion = 0L
-    private var indicatorSignature = Long.MIN_VALUE
+    private val indicatorCache = IndicatorIncrementalCache()
     private var ema20: DoubleArray = DoubleArray(0)
     private var sma50: DoubleArray = DoubleArray(0)
     private var vwap: DoubleArray = DoubleArray(0)
@@ -129,9 +203,18 @@ class ProfessionalChartView @JvmOverloads constructor(
     private var supertrendResult: IndicatorMath.SupertrendResult? = null
 
     private val density = context.resources.displayMetrics.density
-    private val timeFormat = SimpleDateFormat("dd MMM yyyy HH:mm", Locale.US)
-    private val axisTimeFormat = SimpleDateFormat("dd MMM yyyy", Locale.US)
-    private val axisIntradayFormat = SimpleDateFormat("HH:mm", Locale.US)
+    private val timeFormat = SimpleDateFormat("EEEE · dd MMM yyyy · hh:mm a", Locale.US).apply {
+        timeZone = TimeframeBuckets.IST
+    }
+    private val axisTimeFormat = SimpleDateFormat("dd MMM yyyy", Locale.US).apply {
+        timeZone = TimeframeBuckets.IST
+    }
+    private val axisIntradayFormat = SimpleDateFormat("HH:mm", Locale.US).apply {
+        timeZone = TimeframeBuckets.IST
+    }
+    private val axisIntradayWithDateFormat = SimpleDateFormat("dd MMM HH:mm", Locale.US).apply {
+        timeZone = TimeframeBuckets.IST
+    }
 
     private val bullishColor = AppDesign.positive
     private val bearishColor = AppDesign.negative
@@ -260,7 +343,13 @@ class ProfessionalChartView @JvmOverloads constructor(
         style = Paint.Style.STROKE
         pathEffect = DashPathEffect(floatArrayOf(dp(5f), dp(3f)), 0f)
     }
-    private val ltpTagPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val referenceLinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = AppDesign.textMuted
+        strokeWidth = dp(0.9f)
+        style = Paint.Style.STROKE
+        pathEffect = DashPathEffect(floatArrayOf(dp(4f), dp(3f)), 0f)
+    }
+    private val lastPriceHighlightPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
     }
 
@@ -288,64 +377,32 @@ class ProfessionalChartView @JvmOverloads constructor(
 
                 val geometry = computeGeometry() ?: return false
 
-                // Keep the zoom anchor within the chart's price area.
                 val focusX = detector.focusX.coerceIn(
                     geometry.left,
                     geometry.right
                 )
+                val anchorIndex = geometry.startFloat +
+                    (focusX - geometry.left - horizontalOverscroll) / geometry.slot
 
-                // Find the exact fractional candle position under the fingers.
-                val anchorPosition =
-                    (focusX - geometry.left) / geometry.slot
+                val maxLimit = max(MIN_VISIBLE, candles.size.toFloat())
+                val newVisibleCount = (visibleCount / detector.scaleFactor)
+                    .coerceIn(MIN_VISIBLE, maxLimit)
+                if (newVisibleCount == visibleCount) return true
 
-                val anchorIndex =
-                    geometry.start + anchorPosition
-
-                // Calculate the new zoom level.
-                val maxLimit = max(
-                    MIN_VISIBLE,
-                    candles.size.toFloat()
-                )
-
-                val newVisibleCount = (
-                    visibleCount / detector.scaleFactor
-                ).coerceIn(
-                    MIN_VISIBLE,
-                    maxLimit
-                )
-
-                if (newVisibleCount == visibleCount) {
-                    return true
-                }
-
+                val effectiveVisible = min(newVisibleCount, candles.size.toFloat())
+                    .coerceAtLeast(1f)
+                val newSlot = (geometry.right - geometry.left) / effectiveVisible
                 visibleCount = newVisibleCount
-
-                // Calculate the new candle slot width after zoom.
-                val newVisible = max(
-                    1,
-                    min(candles.size, visibleCount.toInt())
+                scrollOffset = PriceScaleEngine.anchoredStart(
+                    anchorIndex = anchorIndex,
+                    focusX = focusX,
+                    left = geometry.left,
+                    newSlot = newSlot,
+                    candleCount = candles.size,
+                    newVisible = effectiveVisible
                 )
 
-                val newSlot =
-                    (geometry.right - geometry.left) / newVisible.toFloat()
-
-                // Keep the same candle beneath the fingers.
-                val newStart =
-                    anchorIndex - (focusX - geometry.left) / newSlot
-
-                val maxStart = max(
-                    0f,
-                    candles.size - newVisible.toFloat()
-                )
-
-                scrollOffset = newStart.coerceIn(
-                    0f,
-                    maxStart
-                )
-
-                // Manual zoom should preserve the selected viewport.
                 followLatest = false
-
                 invalidate()
                 return true
             }
@@ -363,16 +420,71 @@ class ProfessionalChartView @JvmOverloads constructor(
         style: ChartStyle,
         preserveViewport: Boolean = false
     ) {
-        source = data
-        sourceVersion++
-        indicatorSignature = Long.MIN_VALUE
-        chartStyle = style
-        if (!preserveViewport || crosshairIndex !in candles.indices) {
-            crosshairVisible = false
-            crosshairIndex = -1
+        val nextSource = ChartCandleSeries.canonicalize(data)
+        val oldSource = source
+
+        if (!sameSource(oldSource, nextSource)) {
+            if (preserveViewport && oldSource.isNotEmpty() && nextSource.isNotEmpty()) {
+
+                fun remapIndex(oldIndex: Int): Int {
+                    val timestamp = oldSource.getOrNull(oldIndex)?.timestamp
+                        ?: return -1
+
+                    return nextSource.indexOfFirst {
+                        it.timestamp == timestamp
+                    }
+                }
+
+                if (crosshairIndex >= 0) {
+                    val mapped = remapIndex(crosshairIndex)
+                    if (mapped >= 0) {
+                        crosshairIndex = mapped
+                    } else {
+                        crosshairIndex = -1
+                        crosshairVisible = false
+                    }
+                }
+
+                val remappedDrawings = drawings.mapNotNull { drawing ->
+                    val mappedPoints = drawing.points.mapNotNull { point ->
+                        val mappedIndex = remapIndex(point.index)
+                        if (mappedIndex < 0) null
+                        else ChartPoint(mappedIndex, point.price)
+                    }
+
+                    if (mappedPoints.size != drawing.points.size) {
+                        null
+                    } else {
+                        drawing.copy(points = mappedPoints.toMutableList())
+                    }
+                }
+
+                drawings.clear()
+                drawings.addAll(remappedDrawings)
+
+                val remappedPending = pendingPoints.mapNotNull { point ->
+                    val mappedIndex = remapIndex(point.index)
+                    if (mappedIndex < 0) null
+                    else ChartPoint(mappedIndex, point.price)
+                }
+
+                pendingPoints.clear()
+                pendingPoints.addAll(remappedPending)
+            } else if (preserveViewport) {
+                crosshairVisible = false
+                crosshairIndex = -1
+                drawings.clear()
+                pendingPoints.clear()
+            }
+
+            source = nextSource
         }
 
+        chartStyle = style
+
         if (!preserveViewport) {
+            crosshairVisible = false
+            crosshairIndex = -1
             visibleCount = 40f
             followLatest = true
             drawings.clear()
@@ -383,8 +495,10 @@ class ProfessionalChartView @JvmOverloads constructor(
             cancelAnimations()
         }
 
+        relativeReference = Double.NaN
+
         if (followLatest) {
-            scrollOffset = max(0f, candles.size - visibleCount)
+            scrollOffset = PriceScaleEngine.maxScroll(candles.size, visibleCount)
         }
 
         rebuildDisplayCandles()
@@ -396,7 +510,7 @@ class ProfessionalChartView @JvmOverloads constructor(
         scrollAnimator?.cancel()
         scrollAnimator = null
         followLatest = true
-        scrollOffset = max(0f, candles.size - visibleCount)
+        scrollOffset = PriceScaleEngine.maxScroll(candles.size, visibleCount)
         horizontalOverscroll = 0f
         crosshairVisible = false
         crosshairIndex = -1
@@ -434,10 +548,27 @@ class ProfessionalChartView @JvmOverloads constructor(
             ChartStyle.HEIKIN_ASHI -> buildHeikinAshi(source)
             ChartStyle.CANDLE, ChartStyle.LINE, ChartStyle.BAR -> ArrayList(source)
         }
-        indicatorSignature = 0
         if (followLatest) {
-            scrollOffset = max(0f, candles.size - visibleCount)
+            scrollOffset = PriceScaleEngine.maxScroll(candles.size, visibleCount)
         }
+    }
+
+    private fun sameSource(a: List<ChartCandle>, b: List<ChartCandle>): Boolean {
+        if (a.size != b.size) return false
+        for (index in a.indices) {
+            val first = a[index]
+            val second = b[index]
+            if (first.timestamp != second.timestamp ||
+                first.open != second.open ||
+                first.high != second.high ||
+                first.low != second.low ||
+                first.close != second.close ||
+                first.volume != second.volume
+            ) {
+                return false
+            }
+        }
+        return true
     }
 
     private fun buildHeikinAshi(input: List<ChartCandle>): List<ChartCandle> {
@@ -475,49 +606,14 @@ class ProfessionalChartView @JvmOverloads constructor(
     }
 
     private fun ensureIndicators() {
-        // Indicators must always use the original market OHLCV series.
-        // "candles" is a presentation series and may contain Heikin-Ashi values.
-        val signature = sourceVersion * 31L + indicators.hashCode().toLong()
-        if (signature == indicatorSignature) return
-        indicatorSignature = signature
-
-        val indicatorCandles = source
-        val closes = indicatorCandles.map { it.close }
-        ema20 = if (ChartIndicator.EMA_20 in indicators) {
-            IndicatorMath.ema(closes, 20)
-        } else {
-            DoubleArray(0)
-        }
-        sma50 = if (ChartIndicator.SMA_50 in indicators) {
-            IndicatorMath.sma(closes, 50)
-        } else {
-            DoubleArray(0)
-        }
-        vwap = if (ChartIndicator.VWAP in indicators) {
-            IndicatorMath.vwap(indicatorCandles)
-        } else {
-            DoubleArray(0)
-        }
-        rsi14 = if (ChartIndicator.RSI_14 in indicators) {
-            IndicatorMath.rsi(closes, 14)
-        } else {
-            DoubleArray(0)
-        }
-        macdResult = if (ChartIndicator.MACD in indicators) {
-            IndicatorMath.macd(closes)
-        } else {
-            null
-        }
-        bollingerResult = if (ChartIndicator.BOLLINGER in indicators) {
-            IndicatorMath.bollinger(closes)
-        } else {
-            null
-        }
-        supertrendResult = if (ChartIndicator.SUPERTREND in indicators) {
-            IndicatorMath.supertrend(indicatorCandles)
-        } else {
-            null
-        }
+        val calculated = indicatorCache.update(source, indicators, timeframeKey)
+        ema20 = calculated.ema20
+        sma50 = calculated.sma50
+        vwap = calculated.vwap
+        rsi14 = calculated.rsi14
+        macdResult = calculated.macd
+        bollingerResult = calculated.bollinger
+        supertrendResult = calculated.supertrend
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -533,6 +629,7 @@ class ProfessionalChartView @JvmOverloads constructor(
         ensureIndicators()
         val geometry = computeGeometry() ?: return
         lastGeometry = geometry
+        updateRelativeReference(geometry)
 
         drawPriceGrid(canvas, geometry)
         drawVolume(canvas, geometry)
@@ -555,62 +652,55 @@ class ProfessionalChartView @JvmOverloads constructor(
         val bottom = height - dp(18f)
         if (right <= left || bottom <= top) return null
 
-        val visible = max(1, min(candles.size, visibleCount.toInt()))
-        val maxStart = max(0, candles.size - visible)
-        val start = min(maxStart, max(0, scrollOffset.toInt()))
-        val end = min(candles.size, start + visible)
-        if (start >= end) return null
+        val candleRange = PriceScaleEngine.candleRange(
+            scrollOffset = scrollOffset,
+            visibleCount = visibleCount,
+            candleCount = candles.size,
+            left = left,
+            right = right
+        ) ?: return null
 
-        val usable = bottom - top
         val subIndicators = ArrayList<ChartIndicator>()
         if (ChartIndicator.RSI_14 in indicators) subIndicators.add(ChartIndicator.RSI_14)
         if (ChartIndicator.MACD in indicators) subIndicators.add(ChartIndicator.MACD)
-        val priceRatio = when (subIndicators.size) {
-            0 -> 0.78f
-            1 -> 0.60f
-            else -> 0.48f
-        }
-        val volumeRatio = if (subIndicators.isEmpty()) 0.18f else 0.10f
 
-        val priceTop = top
-        val priceBottom = priceTop + usable * priceRatio
-        val volumeTop = priceBottom
-        val volumeBottom = min(bottom, volumeTop + usable * volumeRatio)
+        val layout = PriceScaleEngine.verticalLayout(
+            top = top,
+            bottom = bottom,
+            subCount = subIndicators.size,
+            minPanel = dp(MIN_PANEL_HEIGHT_DP),
+            gap = dp(2f),
+            minMain = dp(MIN_MAIN_HEIGHT_DP),
+            minVolume = dp(MIN_VOLUME_HEIGHT_DP)
+        ) ?: return null
 
-        val subCharts = ArrayList<SubChartArea>()
-        if (subIndicators.isNotEmpty()) {
-            val subTop = volumeBottom + dp(2f)
-            val subHeight = max(dp(28f), (bottom - subTop) / subIndicators.size)
-            subIndicators.forEachIndexed { index, indicator ->
-                val areaTop = subTop + subHeight * index
-                subCharts.add(
-                    SubChartArea(
-                        indicator = indicator,
-                        top = areaTop,
-                        bottom = min(bottom, areaTop + subHeight - dp(2f))
-                    )
-                )
-            }
-        }
-
-        val autoRange = computeAutoPriceRange(start, end)
+        val autoRange = computeAutoPriceRange(candleRange.start, candleRange.end)
         val range = manualPriceRange
             ?.takeIf { it.isValid() }
             ?: autoRange
+
+        val subCharts = layout.panels.mapNotNull { panel ->
+            subIndicators.getOrNull(panel.index)?.let { indicator ->
+                SubChartArea(indicator, panel.top, panel.bottom)
+            }
+        }
 
         return Geometry(
             left = left,
             right = right,
             top = top,
             bottom = bottom,
-            priceTop = priceTop,
-            priceBottom = priceBottom,
-            volumeTop = volumeTop,
-            volumeBottom = volumeBottom,
-            start = start,
-            end = end,
-            visible = visible,
-            slot = (right - left) / visible.toFloat(),
+            priceTop = layout.priceTop,
+            priceBottom = layout.priceBottom,
+            volumeTop = layout.volumeTop,
+            volumeBottom = layout.volumeBottom,
+            start = candleRange.start,
+            end = candleRange.end,
+            visible = max(1, candleRange.end - candleRange.start),
+            slot = candleRange.slot,
+            range = candleRange,
+            startFloat = candleRange.startFloat,
+            visibleFloat = candleRange.visibleFloat,
             minPrice = range.min,
             maxPrice = range.max,
             subCharts = subCharts
@@ -676,25 +766,47 @@ class ProfessionalChartView @JvmOverloads constructor(
     }
 
     private fun xFor(index: Int, geometry: Geometry): Float {
-        return geometry.left +
-            (index - geometry.start + 0.5f) * geometry.slot +
-            horizontalOverscroll
+        return PriceScaleEngine.xFor(
+            index = index,
+            range = geometry.range,
+            left = geometry.left,
+            overscroll = horizontalOverscroll
+        )
     }
 
     private fun indexAt(x: Float, geometry: Geometry): Int {
-        val raw = geometry.start + ((x - geometry.left) / geometry.slot).toInt()
-        return raw.coerceIn(geometry.start, geometry.end - 1)
+        return PriceScaleEngine.indexAt(
+            x = x,
+            range = geometry.range,
+            left = geometry.left,
+            overscroll = horizontalOverscroll
+        )
     }
 
-    private fun isInsidePriceArea(
+    private fun isInsidePricePlotArea(
+        x: Float,
+        y: Float,
+        geometry: Geometry
+    ): Boolean {
+        return PriceScaleEngine.isInsidePlot(
+            x = x,
+            y = y,
+            left = geometry.left,
+            right = geometry.right,
+            top = geometry.priceTop,
+            bottom = geometry.priceBottom
+        )
+    }
+
+    private fun isInsideChartArea(
         x: Float,
         y: Float,
         geometry: Geometry
     ): Boolean {
         return x >= geometry.left &&
             x <= geometry.right &&
-            y >= geometry.priceTop &&
-            y <= geometry.priceBottom
+            y >= geometry.top &&
+            y <= geometry.bottom
     }
 
     private fun isInsidePriceAxis(
@@ -715,6 +827,32 @@ class ProfessionalChartView @JvmOverloads constructor(
             geometry.priceTop,
             geometry.priceBottom
         )
+    }
+
+    private fun timeGridIndices(geometry: Geometry): List<Int> {
+        val last = geometry.end - 1
+        if (last < geometry.start) return emptyList()
+        val step = (last - geometry.start).toFloat() / 3f
+        return (0..3).map { position ->
+            (geometry.start + round(position * step)).toInt().coerceIn(geometry.start, last)
+        }.distinct()
+    }
+
+    private fun drawVerticalGrid(
+        canvas: Canvas,
+        geometry: Geometry,
+        top: Float,
+        bottom: Float
+    ) {
+        if (bottom <= top) return
+        val saveCount = canvas.save()
+        canvas.clipRect(geometry.left, top, geometry.right, bottom)
+        timeGridIndices(geometry).forEach { index ->
+            val x = xFor(index, geometry)
+            if (x < geometry.left || x > geometry.right) return@forEach
+            canvas.drawLine(x, top, x, bottom, gridPaint)
+        }
+        canvas.restoreToCount(saveCount)
     }
 
     private fun drawPriceGrid(canvas: Canvas, geometry: Geometry) {
@@ -754,21 +892,42 @@ class ProfessionalChartView @JvmOverloads constructor(
             )
         }
 
-        for (index in 1..3) {
-            val ratio = index / 4f
-            val x = geometry.left +
-                (geometry.right - geometry.left) * ratio +
-                horizontalOverscroll
-            canvas.drawLine(
-                x,
-                geometry.priceTop,
-                x,
-                geometry.priceBottom,
-                gridPaint
-            )
+        if (priceScaleMode == PriceScaleMode.RELATIVE) {
+            val reference = relativeReference.takeIf { isUsableRelativeReference(it) }
+            if (reference != null) {
+                val y = priceY(reference, geometry)
+                if (y >= geometry.priceTop && y <= geometry.priceBottom) {
+                    canvas.drawLine(
+                        geometry.left,
+                        y,
+                        geometry.right,
+                        y,
+                        referenceLinePaint
+                    )
+                }
+            }
         }
 
         canvas.restoreToCount(saveCount)
+        drawVerticalGrid(canvas, geometry, geometry.priceTop, geometry.priceBottom)
+
+        priceDecimals = tickSet.decimals
+        val ltpPrice = lastPrice?.takeIf {
+            it >= geometry.minPrice && it <= geometry.maxPrice
+        }
+        val ltpY = ltpPrice?.let { priceY(it, geometry) }?.takeIf {
+            it >= geometry.priceTop && it <= geometry.priceBottom
+        }
+        val previousClose = previousCloseForLastPrice()
+        val ltpColor = if (ltpPrice != null && previousClose != null &&
+            ltpPrice >= previousClose
+        ) {
+            bullishColor
+        } else {
+            bearishColor
+        }
+        val pulse = lastPricePulse.coerceIn(0f, 1f)
+        val highlightAlpha = (55f + 120f * pulse).toInt().coerceIn(0, 255)
 
         var lastLabelY = Float.NEGATIVE_INFINITY
         tickSet.ticks.asReversed().forEach { tick ->
@@ -776,14 +935,18 @@ class ProfessionalChartView @JvmOverloads constructor(
             if (y < geometry.priceTop - dp(2f) || y > geometry.priceBottom + dp(2f)) {
                 return@forEach
             }
+            if (ltpY != null && abs(y - ltpY) < labelSpacing) return@forEach
             if (y - lastLabelY < labelSpacing) return@forEach
             lastLabelY = y
 
-            val text = if (priceScaleMode == PriceScaleMode.RELATIVE) {
+            val text = if (priceScaleMode == PriceScaleMode.RELATIVE &&
+                isUsableRelativeReference(relativeReference)
+            ) {
                 formatPrice(tick.price)
             } else {
                 tick.label
             }
+
             canvas.drawText(
                 text,
                 width - dp(4f),
@@ -791,31 +954,95 @@ class ProfessionalChartView @JvmOverloads constructor(
                 axisPaint
             )
         }
+
+        ltpPrice?.let { price ->
+            val y = ltpY ?: return@let
+            lastPriceHighlightPaint.color = Color.argb(
+                highlightAlpha,
+                Color.red(ltpColor),
+                Color.green(ltpColor),
+                Color.blue(ltpColor)
+            )
+            canvas.drawRect(
+                geometry.right + dp(1f),
+                y - dp(7f),
+                width.toFloat(),
+                y + dp(7f),
+                lastPriceHighlightPaint
+            )
+            axisPaint.color = ltpColor
+            axisPaint.isFakeBoldText = true
+            val label = if (priceScaleMode == PriceScaleMode.RELATIVE &&
+                !isUsableRelativeReference(relativeReference)
+            ) {
+                PriceScaleEngine.formatPrice(price, priceDecimals)
+            } else {
+                formatPrice(price)
+            }
+            canvas.drawText(
+                label,
+                width - dp(4f),
+                y + dp(3.5f),
+                axisPaint
+            )
+            axisPaint.isFakeBoldText = false
+            axisPaint.color = AppDesign.textMuted
+        }
     }
 
     private fun drawVolume(canvas: Canvas, geometry: Geometry) {
-        var maxVolume = 1L
+        val saveCount = canvas.save()
+
+        canvas.clipRect(
+            geometry.left,
+            geometry.volumeTop,
+            geometry.right,
+            geometry.volumeBottom
+        )
+
+        var maxVolume = 0L
+
         for (index in geometry.start until geometry.end) {
-            if (candles[index].volume > maxVolume) maxVolume = candles[index].volume
+            val volume = candles[index].volume
+            if (volume > maxVolume) maxVolume = volume
         }
 
         val candleWidth = min(
             dp(12f),
             geometry.slot * 0.72f
         ).coerceAtLeast(dp(0.5f))
-        for (index in geometry.start until geometry.end) {
-            val candle = candles[index]
-            val x = xFor(index, geometry)
-            val height = (candle.volume.toFloat() / maxVolume) * (geometry.volumeBottom - geometry.volumeTop)
-            val color = if (candle.close >= candle.open) bullishColor else bearishColor
-            volumePaint.color = Color.argb(95, Color.red(color), Color.green(color), Color.blue(color))
-            canvas.drawRect(
-                x - candleWidth / 2f,
-                geometry.volumeBottom - height,
-                x + candleWidth / 2f,
-                geometry.volumeBottom,
-                volumePaint
-            )
+
+        if (maxVolume > 0L) {
+            for (index in geometry.start until geometry.end) {
+                val candle = candles[index]
+                if (candle.volume <= 0L) continue
+
+                val x = xFor(index, geometry)
+                val barHeight =
+                    (candle.volume.toDouble() / maxVolume.toDouble()).toFloat() *
+                        (geometry.volumeBottom - geometry.volumeTop)
+
+                val color = if (candle.close >= candle.open) {
+                    bullishColor
+                } else {
+                    bearishColor
+                }
+
+                volumePaint.color = Color.argb(
+                    95,
+                    Color.red(color),
+                    Color.green(color),
+                    Color.blue(color)
+                )
+
+                canvas.drawRect(
+                    x - candleWidth / 2f,
+                    (geometry.volumeBottom - barHeight).coerceAtLeast(geometry.volumeTop),
+                    x + candleWidth / 2f,
+                    geometry.volumeBottom,
+                    volumePaint
+                )
+            }
         }
 
         canvas.drawLine(
@@ -825,6 +1052,15 @@ class ProfessionalChartView @JvmOverloads constructor(
             geometry.volumeTop,
             gridPaint
         )
+
+        drawVerticalGrid(
+            canvas,
+            geometry,
+            geometry.volumeTop,
+            geometry.volumeBottom
+        )
+
+        canvas.restoreToCount(saveCount)
     }
 
     private fun drawPriceSeries(canvas: Canvas, geometry: Geometry) {
@@ -919,8 +1155,6 @@ class ProfessionalChartView @JvmOverloads constructor(
             geometry.slot * 0.72f
         ).coerceAtLeast(dp(0.5f))
 
-        val minimumBody = dp(1.2f)
-
         // Keep candle bodies and wicks inside the price chart area.
         val saveCount = canvas.save()
         canvas.clipRect(
@@ -963,37 +1197,24 @@ class ProfessionalChartView @JvmOverloads constructor(
                 wickPaint
             )
 
-            // Calculate the actual Open-Close body.
-            val actualTop = min(openY, closeY)
-            val actualBottom = max(openY, closeY)
-            val actualHeight = actualBottom - actualTop
-
-            // Expand tiny bodies equally around their actual center.
-            // This keeps Doji candles visually centered.
-            val bodyCenter = (openY + closeY) / 2f
-
-            val bodyHeight = max(
-                actualHeight,
-                minimumBody
-            )
-
-            val bodyTop = (bodyCenter - bodyHeight / 2f).coerceAtLeast(
-                geometry.priceTop
-            )
-
-            val bodyBottom = (bodyCenter + bodyHeight / 2f).coerceAtMost(
-                geometry.priceBottom
-            )
+            // Candle body must represent the exact Open-Close price distance.
+            // Do not apply artificial minimum height.
+            val bodyTop = min(openY, closeY)
+            val bodyBottom = max(openY, closeY)
 
             candlePaint.color = color
 
-            canvas.drawRect(
-                x - candleWidth / 2f,
-                bodyTop,
-                x + candleWidth / 2f,
-                bodyBottom,
-                candlePaint
-            )
+            // A true Doji has zero body height.
+            // Its price is still represented by the wick.
+            if (bodyBottom > bodyTop) {
+                canvas.drawRect(
+                    x - candleWidth / 2f,
+                    bodyTop,
+                    x + candleWidth / 2f,
+                    bodyBottom,
+                    candlePaint
+                )
+            }
         }
 
         canvas.restoreToCount(saveCount)
@@ -1002,26 +1223,41 @@ class ProfessionalChartView @JvmOverloads constructor(
     private fun drawLineSeries(canvas: Canvas, geometry: Geometry) {
         val path = Path()
         val fillPath = Path()
-        var started = false
+        var inSegment = false
+        var segmentLastX = 0f
+        var hasPoints = false
 
         for (index in geometry.start until geometry.end) {
+            val close = candles[index].close
+            if (!close.isFinite()) {
+                if (inSegment) {
+                    fillPath.lineTo(segmentLastX, geometry.priceBottom)
+                    fillPath.close()
+                    inSegment = false
+                }
+                continue
+            }
+
             val x = xFor(index, geometry)
-            val y = priceY(candles[index].close, geometry)
-            if (!started) {
+            val y = priceY(close, geometry)
+            if (!inSegment) {
                 path.moveTo(x, y)
                 fillPath.moveTo(x, geometry.priceBottom)
                 fillPath.lineTo(x, y)
-                started = true
+                inSegment = true
             } else {
                 path.lineTo(x, y)
                 fillPath.lineTo(x, y)
             }
+            segmentLastX = x
+            hasPoints = true
         }
 
-        if (!started) return
-
-        fillPath.lineTo(xFor(geometry.end - 1, geometry), geometry.priceBottom)
-        fillPath.close()
+        if (!hasPoints) return
+        if (inSegment) {
+            fillPath.lineTo(segmentLastX, geometry.priceBottom)
+            fillPath.close()
+        }
         lineFillPaint.shader = LinearGradient(
             0f,
             geometry.priceTop,
@@ -1031,8 +1267,16 @@ class ProfessionalChartView @JvmOverloads constructor(
             Color.TRANSPARENT,
             Shader.TileMode.CLAMP
         )
+        val saveCount = canvas.save()
+        canvas.clipRect(
+            geometry.left,
+            geometry.priceTop,
+            geometry.right,
+            geometry.priceBottom
+        )
         canvas.drawPath(fillPath, lineFillPaint)
         canvas.drawPath(path, linePaint)
+        canvas.restoreToCount(saveCount)
     }
 
     private fun drawOverlays(canvas: Canvas, geometry: Geometry) {
@@ -1055,7 +1299,7 @@ class ProfessionalChartView @JvmOverloads constructor(
         val y = priceY(price, geometry)
         if (y < geometry.priceTop || y > geometry.priceBottom) return
 
-        val reference = candles.getOrNull(geometry.end - 1)?.close
+        val reference = previousCloseForLastPrice()
         val isBullish = reference == null || price >= reference
         val color = if (isBullish) bullishColor else bearishColor
 
@@ -1069,16 +1313,18 @@ class ProfessionalChartView @JvmOverloads constructor(
         ltpPaint.color = color
         canvas.drawLine(geometry.left, y, geometry.right, y, ltpPaint)
         canvas.restoreToCount(saveCount)
+    }
 
-        ltpTagPaint.color = color
-        drawAxisTag(
-            canvas = canvas,
-            geometry = geometry,
-            y = y,
-            text = formatPrice(price),
-            background = ltpTagPaint,
-            textColor = Color.WHITE
-        )
+    private fun startLastPricePulse() {
+        lastPricePulseAnimator?.cancel()
+        lastPricePulseAnimator = ValueAnimator.ofFloat(1f, 0f).apply {
+            duration = 650L
+            addUpdateListener { animation ->
+                lastPricePulse = animation.animatedValue as Float
+                invalidate()
+            }
+            start()
+        }
     }
 
     private fun drawSupertrend(
@@ -1089,10 +1335,17 @@ class ProfessionalChartView @JvmOverloads constructor(
         var previousX = Float.NaN
         var previousY = Float.NaN
         var previousDirection = 0
+        val saveCount = canvas.save()
+        canvas.clipRect(
+            geometry.left,
+            geometry.priceTop,
+            geometry.right,
+            geometry.priceBottom
+        )
 
         for (index in geometry.start until geometry.end) {
-            val value = result.line[index]
-            val direction = result.direction[index]
+            val value = result.line.getOrNull(index) ?: break
+            val direction = result.direction.getOrNull(index) ?: break
             if (!value.isFinite() || direction == 0) {
                 previousX = Float.NaN
                 previousY = Float.NaN
@@ -1117,6 +1370,7 @@ class ProfessionalChartView @JvmOverloads constructor(
             previousY = y
             previousDirection = direction
         }
+        canvas.restoreToCount(saveCount)
     }
 
     private fun drawSeries(
@@ -1128,6 +1382,13 @@ class ProfessionalChartView @JvmOverloads constructor(
     ) {
         val path = Path()
         var started = false
+        val saveCount = canvas.save()
+        canvas.clipRect(
+            geometry.left,
+            geometry.priceTop,
+            geometry.right,
+            geometry.priceBottom
+        )
         for (index in geometry.start until geometry.end) {
             val value = values.getOrNull(index) ?: continue
             if (!value.isFinite()) {
@@ -1144,6 +1405,7 @@ class ProfessionalChartView @JvmOverloads constructor(
             }
         }
         canvas.drawPath(path, paint)
+        canvas.restoreToCount(saveCount)
     }
 
     private fun drawSubCharts(canvas: Canvas, geometry: Geometry) {
@@ -1169,21 +1431,37 @@ class ProfessionalChartView @JvmOverloads constructor(
             val y = rsiY(level)
             gridPaint.color = if (level == 50.0) AppDesign.divider else Color.argb(48, 244, 67, 54)
             canvas.drawLine(geometry.left, y, geometry.right, y, gridPaint)
-            labelPaint.color = AppDesign.textMuted
-            canvas.drawText(level.toInt().toString(), geometry.left + dp(2f), y - dp(2f), labelPaint)
+            if (height >= dp(38f)) {
+                labelPaint.color = AppDesign.textMuted
+                canvas.drawText(level.toInt().toString(), geometry.left + dp(2f), y - dp(2f), labelPaint)
+            }
         }
         gridPaint.color = AppDesign.divider
+        drawVerticalGrid(canvas, geometry, area.top, area.bottom)
+
+        val saveCount = canvas.save()
+
+        canvas.clipRect(
+            geometry.left,
+            area.top,
+            geometry.right,
+            area.bottom
+        )
 
         val path = Path()
         var started = false
+
         for (index in geometry.start until geometry.end) {
             val value = rsi14.getOrNull(index) ?: continue
+
             if (!value.isFinite()) {
                 started = false
                 continue
             }
+
             val x = xFor(index, geometry)
-            val y = rsiY(value)
+            val y = rsiY(value).coerceIn(area.top, area.bottom)
+
             if (!started) {
                 path.moveTo(x, y)
                 started = true
@@ -1191,7 +1469,9 @@ class ProfessionalChartView @JvmOverloads constructor(
                 path.lineTo(x, y)
             }
         }
+
         canvas.drawPath(path, rsiPaint)
+        canvas.restoreToCount(saveCount)
 
         val lastValue = rsi14.getOrNull(geometry.end - 1)
         labelPaint.color = rsiPaint.color
@@ -1200,7 +1480,10 @@ class ProfessionalChartView @JvmOverloads constructor(
         } else {
             "RSI 14"
         }
-        canvas.drawText(text, geometry.left + dp(2f), area.top + dp(10f), labelPaint)
+        val previousAlign = labelPaint.textAlign
+        labelPaint.textAlign = Paint.Align.RIGHT
+        canvas.drawText(text, geometry.right - dp(2f), area.top + dp(10f), labelPaint)
+        labelPaint.textAlign = previousAlign
     }
 
     private fun drawMacd(canvas: Canvas, geometry: Geometry, area: SubChartArea) {
@@ -1241,29 +1524,48 @@ class ProfessionalChartView @JvmOverloads constructor(
         canvas.drawLine(geometry.left, area.top, geometry.right, area.top, gridPaint)
         val zeroY = macdY(0.0)
         canvas.drawLine(geometry.left, zeroY, geometry.right, zeroY, gridPaint)
+        drawVerticalGrid(canvas, geometry, area.top, area.bottom)
 
-        val candleWidth = max(dp(1f), min(dp(10f), geometry.slot * 0.45f))
+        val saveCount = canvas.save()
+
+        canvas.clipRect(
+            geometry.left,
+            area.top,
+            geometry.right,
+            area.bottom
+        )
+
+        val candleWidth = max(
+            dp(1f),
+            min(dp(10f), geometry.slot * 0.45f)
+        )
+
         for (index in geometry.start until geometry.end) {
             val value = result.histogram.getOrNull(index) ?: continue
             if (!value.isFinite()) continue
+
             val x = xFor(index, geometry)
             val y = macdY(value)
+
             histogramPaint.color = if (value >= 0.0) {
                 Color.argb(130, 34, 197, 94)
             } else {
                 Color.argb(130, 239, 68, 68)
             }
+
             canvas.drawRect(
                 x - candleWidth / 2f,
-                min(zeroY, y),
+                min(zeroY, y).coerceIn(area.top, area.bottom),
                 x + candleWidth / 2f,
-                max(zeroY, y),
+                max(zeroY, y).coerceIn(area.top, area.bottom),
                 histogramPaint
             )
         }
 
         drawMacdSeries(canvas, result.macd, geometry, macdPaint, ::macdY)
         drawMacdSeries(canvas, result.signal, geometry, signalPaint, ::macdY)
+
+        canvas.restoreToCount(saveCount)
 
         val lastMacd = result.macd.getOrNull(geometry.end - 1)
         labelPaint.color = macdPaint.color
@@ -1282,16 +1584,33 @@ class ProfessionalChartView @JvmOverloads constructor(
         paint: Paint,
         mapper: (Double) -> Float
     ) {
+        val area = geometry.subCharts.firstOrNull {
+            it.indicator == ChartIndicator.MACD
+        } ?: return
+
+        val saveCount = canvas.save()
+
+        canvas.clipRect(
+            geometry.left,
+            area.top,
+            geometry.right,
+            area.bottom
+        )
+
         val path = Path()
         var started = false
+
         for (index in geometry.start until geometry.end) {
             val value = values.getOrNull(index) ?: continue
+
             if (!value.isFinite()) {
                 started = false
                 continue
             }
+
             val x = xFor(index, geometry)
-            val y = mapper(value)
+            val y = mapper(value).coerceIn(area.top, area.bottom)
+
             if (!started) {
                 path.moveTo(x, y)
                 started = true
@@ -1299,10 +1618,20 @@ class ProfessionalChartView @JvmOverloads constructor(
                 path.lineTo(x, y)
             }
         }
+
         canvas.drawPath(path, paint)
+        canvas.restoreToCount(saveCount)
     }
 
     private fun drawDrawings(canvas: Canvas, geometry: Geometry) {
+        val saveCount = canvas.save()
+        canvas.clipRect(
+            geometry.left,
+            geometry.priceTop,
+            geometry.right,
+            geometry.priceBottom
+        )
+
         drawings.forEach { drawing ->
             when (drawing.tool) {
                 ChartTool.HORIZONTAL -> drawHorizontal(canvas, geometry, drawing)
@@ -1323,7 +1652,24 @@ class ProfessionalChartView @JvmOverloads constructor(
                 activeTool == ChartTool.FIBONACCI ||
                 activeTool == ChartTool.RULER
             ) {
-                canvas.drawLine(x1, y1, previewX, previewY, pendingPaint)
+                canvas.drawLine(
+                    x1,
+                    y1,
+                    previewX.coerceIn(geometry.left, geometry.right),
+                    previewY.coerceIn(geometry.priceTop, geometry.priceBottom),
+                    pendingPaint
+                )
+            }
+        }
+
+        canvas.restoreToCount(saveCount)
+
+        drawings.forEach { drawing ->
+            if (drawing.tool != ChartTool.HORIZONTAL) return@forEach
+            val point = drawing.points.firstOrNull() ?: return@forEach
+            val y = priceY(point.price, geometry)
+            if (y >= geometry.priceTop && y <= geometry.priceBottom) {
+                drawPriceTag(canvas, geometry, y, point.price)
             }
         }
     }
@@ -1332,7 +1678,6 @@ class ProfessionalChartView @JvmOverloads constructor(
         val point = drawing.points.firstOrNull() ?: return
         val y = priceY(point.price, geometry)
         canvas.drawLine(geometry.left, y, geometry.right, y, drawingPaint)
-        drawPriceTag(canvas, geometry, y, point.price)
     }
 
     private fun drawTrendline(canvas: Canvas, geometry: Geometry, points: List<ChartPoint>) {
@@ -1397,7 +1742,11 @@ class ProfessionalChartView @JvmOverloads constructor(
         )
 
         val delta = points[1].price - points[0].price
-        val percent = if (points[0].price != 0.0) delta / points[0].price * 100.0 else 0.0
+        val percent = if (abs(points[0].price) > RELATIVE_REFERENCE_EPS) {
+            delta / abs(points[0].price) * 100.0
+        } else {
+            0.0
+        }
         labelPaint.color = drawingPaint.color
         val text = "${formatAbsolutePrice(delta)}  (${String.format(Locale.US, "%.2f", percent)}%)"
         canvas.drawText(text, min(x1, x2) + dp(4f), min(y1, y2) - dp(4f), labelPaint)
@@ -1454,18 +1803,36 @@ class ProfessionalChartView @JvmOverloads constructor(
             val gap = candles[index].timestamp - candles[index - 1].timestamp
             if (gap > 0L && gap < smallestGap) smallestGap = gap
         }
-        val intraday = smallestGap < 86_400_000L
-        val formatter = if (intraday) axisIntradayFormat else axisTimeFormat
+        val key = timeframeKey.trim().lowercase(Locale.US)
 
-        val indices = intArrayOf(geometry.start, (geometry.start + geometry.end) / 2, geometry.end - 1)
+        val timeframeIsIntraday =
+            key.endsWith("m") ||
+            key.endsWith("min") ||
+            key.endsWith("h") ||
+            key.contains("intraday")
+
+        val intraday =
+            smallestGap < 86_400_000L ||
+                (smallestGap == Long.MAX_VALUE && timeframeIsIntraday)
+        val formatter = when {
+            !intraday -> axisTimeFormat
+            PriceScaleEngine.needsDateLabel(
+                candles[geometry.start].timestamp,
+                candles[geometry.end - 1].timestamp
+            ) -> axisIntradayWithDateFormat
+            else -> axisIntradayFormat
+        }
+
+        val indices = timeGridIndices(geometry)
+        val lastPosition = indices.lastIndex
         indices.forEachIndexed { position, index ->
             val candle = candles.getOrNull(index) ?: return@forEachIndexed
             if (candle.timestamp <= 0L) return@forEachIndexed
-            val x = xFor(index, geometry)
+            val x = xFor(index, geometry).coerceIn(geometry.left, geometry.right)
             val text = formatter.format(Date(candle.timestamp))
             axisPaint.textAlign = when (position) {
                 0 -> Paint.Align.LEFT
-                2 -> Paint.Align.RIGHT
+                lastPosition -> Paint.Align.RIGHT
                 else -> Paint.Align.CENTER
             }
             canvas.drawText(text, x, height - dp(4f), axisPaint)
@@ -1613,6 +1980,11 @@ class ProfessionalChartView @JvmOverloads constructor(
 
                 MotionEvent.ACTION_UP -> {
                     val velocityY = consumeVelocity().second
+                    removeCallbacks(crosshairHoldRunnable)
+                    isTouchDown = false
+                    crosshairHoldActivated = false
+                    isPricePanning = false
+                    crosshairIndex = -1
                     finishAxisZoom(velocityY, cancelled = false)
                     crosshairVisible = false
                     onCrosshairChanged?.invoke(null, -1)
@@ -1622,6 +1994,11 @@ class ProfessionalChartView @JvmOverloads constructor(
                 }
 
                 MotionEvent.ACTION_CANCEL -> {
+                    removeCallbacks(crosshairHoldRunnable)
+                    isTouchDown = false
+                    crosshairHoldActivated = false
+                    isPricePanning = false
+                    crosshairIndex = -1
                     finishAxisZoom(0f, cancelled = true)
                     crosshairVisible = false
                     onCrosshairChanged?.invoke(null, -1)
@@ -1634,9 +2011,20 @@ class ProfessionalChartView @JvmOverloads constructor(
         scaleDetector.onTouchEvent(event)
 
         if (scaleDetector.isInProgress) {
+            if (event.actionMasked == MotionEvent.ACTION_UP ||
+                event.actionMasked == MotionEvent.ACTION_CANCEL
+            ) {
+                recycleVelocityTracker()
+            }
+            removeCallbacks(crosshairHoldRunnable)
+            isTouchDown = false
+            crosshairHoldActivated = false
             isPanning = false
+            isPricePanning = false
             lastTouchX = event.x
+            lastTouchY = event.y
             touchStartX = event.x
+            touchStartY = event.y
             horizontalOverscroll = 0f
             crosshairVisible = false
             onCrosshairChanged?.invoke(null, -1)
@@ -1648,46 +2036,38 @@ class ProfessionalChartView @JvmOverloads constructor(
             MotionEvent.ACTION_DOWN -> {
                 cancelAnimations()
                 lastTouchX = event.x
+                lastTouchY = event.y
                 touchStartX = event.x
-                isPanning = false
-                panRawOffset = scrollOffset
-                horizontalOverscroll = 0f
+                touchStartY = event.y
+                    isPanning = false
+                    isPricePanning = false
+                    drawingStartValid = false
+                    panRawOffset = scrollOffset
+                    horizontalOverscroll = 0f
 
-                previewX = event.x
-                previewY = event.y
+                    previewX = event.x
+                    previewY = event.y
 
-                val geometry = computeGeometry()
-                if (geometry != null &&
-                    isInsidePriceAxis(event.x, event.y, geometry)
-                ) {
+                    val geometry = computeGeometry()
+                    if (geometry != null &&
+                        isInsidePricePlotArea(event.x, event.y, geometry)
+                    ) {
+                        drawingStartValid = true
+                    }
+                    if (geometry != null &&
+                        isInsidePriceAxis(event.x, event.y, geometry)
+                    ) {
                     startAxisZoom(event.y, geometry)
                     invalidate()
                     return true
                 }
 
-                if (activeTool == ChartTool.CROSSHAIR) {
-                    if (geometry != null &&
-                        isInsidePriceArea(event.x, event.y, geometry)
-                    ) {
-                        crosshairVisible = true
-                        crosshairX = event.x
-                        crosshairY = event.y.coerceIn(
-                            geometry.priceTop,
-                            geometry.priceBottom
-                        )
+                isTouchDown = true
+                crosshairHoldActivated = false
+                crosshairVisible = false
+                crosshairIndex = -1
 
-                        crosshairIndex = indexAt(event.x, geometry)
-
-                        onCrosshairChanged?.invoke(
-                            source.getOrNull(crosshairIndex),
-                            crosshairIndex
-                        )
-                    } else {
-                        crosshairVisible = false
-                        crosshairIndex = -1
-                        onCrosshairChanged?.invoke(null, -1)
-                    }
-                }
+                postDelayed(crosshairHoldRunnable, 3_000L)
 
                 invalidate()
                 return true
@@ -1697,88 +2077,96 @@ class ProfessionalChartView @JvmOverloads constructor(
                 previewX = event.x
                 previewY = event.y
 
-                if (activeTool == ChartTool.CROSSHAIR) {
-                    val totalDrag = abs(event.x - touchStartX)
+                val movedX = abs(event.x - touchStartX)
+                val movedY = abs(event.y - touchStartY)
 
-                    if (!isPanning && totalDrag > touchSlop) {
-                        isPanning = true
-                        panRawOffset = scrollOffset
-                        lastTouchX = event.x
-                        crosshairVisible = false
-                        crosshairIndex = -1
-                        onCrosshairChanged?.invoke(null, -1)
+                if (!crosshairHoldActivated &&
+                    (movedX > touchSlop || movedY > touchSlop)
+                ) {
+                    removeCallbacks(crosshairHoldRunnable)
+                }
+
+                if (crosshairHoldActivated) {
+                    val geometry = computeGeometry()
+
+                    if (geometry != null) {
+                        crosshairX = event.x.coerceIn(
+                            geometry.left,
+                            geometry.right
+                        )
+
+                        crosshairY = event.y.coerceIn(
+                            geometry.priceTop,
+                            geometry.priceBottom
+                        )
+
+                        crosshairIndex = indexAt(crosshairX, geometry)
+
+                        onCrosshairChanged?.invoke(
+                            source.getOrNull(crosshairIndex),
+                            crosshairIndex
+                        )
                     }
 
-                    if (isPanning) {
-                        val deltaX = event.x - lastTouchX
-                        val geometry = lastGeometry ?: computeGeometry()
+                    invalidate()
+                    return true
+                }
 
-                        if (geometry != null && geometry.slot > 0f) {
-                            panRawOffset -= deltaX / geometry.slot
-                            applyPanOffset(geometry)
-                        }
-                    } else if (crosshairVisible) {
-                        val currentGeometry = computeGeometry()
+                if (!isPanning &&
+                    (movedX > touchSlop || movedY > touchSlop)
+                ) {
+                    removeCallbacks(crosshairHoldRunnable)
+                    isPanning = true
+                    panRawOffset = scrollOffset
+                    lastTouchX = event.x
 
-                        if (currentGeometry != null) {
-                            crosshairX = event.x.coerceIn(
-                                currentGeometry.left,
-                                currentGeometry.right
-                            )
+                    crosshairVisible = false
+                    crosshairIndex = -1
+                    onCrosshairChanged?.invoke(null, -1)
+                }
 
-                            crosshairY = event.y.coerceIn(
-                                currentGeometry.priceTop,
-                                currentGeometry.priceBottom
-                            )
+                if (isPanning) {
+                    val deltaX = event.x - lastTouchX
+                    val geometry = lastGeometry ?: computeGeometry()
 
-                            crosshairIndex = indexAt(crosshairX, currentGeometry)
-
-                            onCrosshairChanged?.invoke(
-                                source.getOrNull(crosshairIndex),
-                                crosshairIndex
-                            )
-                        }
-                    }
-                } else {
-                    val totalDrag = abs(event.x - touchStartX)
-
-                    if (totalDrag > touchSlop) {
-                        if (!isPanning) {
-                            panRawOffset = scrollOffset
-                            lastTouchX = event.x
-                        }
-                        isPanning = true
-                    }
-
-                    if (isPanning) {
-                        val deltaX = event.x - lastTouchX
-                        val geometry = lastGeometry ?: computeGeometry()
-
-                        if (geometry != null && geometry.slot > 0f) {
-                            panRawOffset -= deltaX / geometry.slot
-                            applyPanOffset(geometry)
-                        }
+                    if (geometry != null && geometry.slot > 0f) {
+                        panRawOffset -= deltaX / geometry.slot
+                        applyPanOffset(geometry)
                     }
                 }
 
                 lastTouchX = event.x
+                lastTouchY = event.y
                 invalidate()
                 return true
             }
 
             MotionEvent.ACTION_UP -> {
                 val velocityX = consumeVelocity().first
+                val wasCrosshair = crosshairHoldActivated
 
-                if (isPanning) {
-                    finishPan(velocityX, lastGeometry ?: computeGeometry())
-                } else if (activeTool != ChartTool.CROSSHAIR) {
-                    handleDrawingTap(event.x, event.y)
-                }
-
+                removeCallbacks(crosshairHoldRunnable)
+                isTouchDown = false
+                crosshairHoldActivated = false
+                crosshairIndex = -1
                 crosshairVisible = false
                 onCrosshairChanged?.invoke(null, -1)
 
+                val releaseGeometry = lastGeometry ?: computeGeometry()
+                if (isPanning) {
+                    finishPan(velocityX, releaseGeometry)
+                } else if (!isPricePanning &&
+                    !wasCrosshair &&
+                    activeTool != ChartTool.CROSSHAIR &&
+                    drawingStartValid &&
+                    releaseGeometry != null &&
+                    isInsidePricePlotArea(event.x, event.y, releaseGeometry)
+                ) {
+                    handleDrawingTap(event.x, event.y)
+                }
+
                 isPanning = false
+                isPricePanning = false
                 previewX = 0f
                 previewY = 0f
 
@@ -1790,14 +2178,20 @@ class ProfessionalChartView @JvmOverloads constructor(
             MotionEvent.ACTION_CANCEL -> {
                 recycleVelocityTracker()
 
+                removeCallbacks(crosshairHoldRunnable)
+                isTouchDown = false
+                crosshairHoldActivated = false
+                drawingStartValid = false
+                crosshairIndex = -1
+                crosshairVisible = false
+                onCrosshairChanged?.invoke(null, -1)
+
                 if (isPanning) {
                     finishPan(0f, lastGeometry ?: computeGeometry())
                 }
 
-                crosshairVisible = false
-                onCrosshairChanged?.invoke(null, -1)
-
                 isPanning = false
+                isPricePanning = false
                 previewX = 0f
                 previewY = 0f
 
@@ -1814,12 +2208,16 @@ class ProfessionalChartView @JvmOverloads constructor(
 
         val autoRange = computeAutoPriceRange(geometry.start, geometry.end)
         val currentRange = manualPriceRange?.takeIf { it.isValid() } ?: autoRange
+        val height = max(1f, geometry.priceBottom - geometry.priceTop)
+        val anchorRatio = ((geometry.priceBottom - y) / height).coerceIn(0f, 1f)
 
         isAxisZooming = true
+        isPricePanning = true
         axisStartY = y
         axisLastY = y
         axisStartRange = currentRange
-        axisAnchorPrice = (currentRange.min + currentRange.max) / 2.0
+        axisAnchorPrice = priceAt(y, geometry)
+        axisAnchorRatio = anchorRatio.toDouble()
         axisMinSpan = PriceScaleEngine.minZoomSpan(autoRange)
         axisMaxSpan = PriceScaleEngine.maxZoomSpan(autoRange)
 
@@ -1830,19 +2228,16 @@ class ProfessionalChartView @JvmOverloads constructor(
 
     private fun updateAxisZoom(y: Float) {
         val geometry = lastGeometry ?: computeGeometry() ?: return
-        val height = max(1f, geometry.priceBottom - geometry.priceTop)
-        val travel = axisStartY - y
-        val factor = exp((travel / height * AXIS_ZOOM_SENSITIVITY).toDouble())
-        val rawSpan = axisStartRange.span * factor
-        val elasticSpan = PriceScaleEngine.elasticSpan(
-            rawSpan,
-            axisMinSpan,
-            axisMaxSpan
-        )
-
-        manualPriceRange = PriceScaleEngine.rangeWithAnchor(
-            axisAnchorPrice,
-            elasticSpan
+        manualPriceRange = PriceScaleEngine.axisZoomRange(
+            startRange = axisStartRange,
+            travel = PriceScaleEngine.axisZoomTravel(axisStartY, y, 0f),
+            height = geometry.priceBottom - geometry.priceTop,
+            anchorPrice = axisAnchorPrice,
+            anchorRatio = axisAnchorRatio,
+            minSpan = axisMinSpan,
+            maxSpan = axisMaxSpan,
+            sensitivity = AXIS_ZOOM_SENSITIVITY,
+            elastic = true
         )
         invalidate()
     }
@@ -1850,6 +2245,7 @@ class ProfessionalChartView @JvmOverloads constructor(
     private fun finishAxisZoom(velocityY: Float, cancelled: Boolean) {
         if (!isAxisZooming) return
         isAxisZooming = false
+        isPricePanning = false
 
         val geometry = lastGeometry ?: computeGeometry()
         val currentRange = manualPriceRange ?: axisStartRange
@@ -1861,18 +2257,22 @@ class ProfessionalChartView @JvmOverloads constructor(
             return
         }
 
-        val height = max(1f, geometry.priceBottom - geometry.priceTop)
+        val height = geometry.priceBottom - geometry.priceTop
         val travel = if (cancelled) {
-            axisStartY - axisLastY
+            PriceScaleEngine.axisZoomTravel(axisStartY, axisLastY, 0f)
         } else {
-            axisStartY - axisLastY + velocityY * AXIS_VELOCITY_PROJECTION
+            PriceScaleEngine.axisZoomTravel(axisStartY, axisLastY, velocityY, AXIS_VELOCITY_PROJECTION)
         }
-        val factor = exp((travel / height * AXIS_ZOOM_SENSITIVITY).toDouble())
-        val projectedSpan = axisStartRange.span * factor
-        val targetSpan = projectedSpan.coerceIn(axisMinSpan, axisMaxSpan)
-        val targetRange = PriceScaleEngine.rangeWithAnchor(
-            axisAnchorPrice,
-            targetSpan
+        val targetRange = PriceScaleEngine.axisZoomRange(
+            startRange = axisStartRange,
+            travel = travel,
+            height = height,
+            anchorPrice = axisAnchorPrice,
+            anchorRatio = axisAnchorRatio,
+            minSpan = axisMinSpan,
+            maxSpan = axisMaxSpan,
+            sensitivity = AXIS_ZOOM_SENSITIVITY,
+            elastic = false
         )
 
         if (manualPriceRange == null &&
@@ -1922,21 +2322,18 @@ class ProfessionalChartView @JvmOverloads constructor(
     }
 
     private fun applyPanOffset(geometry: Geometry) {
-        val maxScroll = max(0f, candles.size.toFloat() - visibleCount)
-        val clamped = panRawOffset.coerceIn(0f, maxScroll)
-        val overscrollPx = (panRawOffset - clamped) * geometry.slot
-        val overscrollDimension = max(
-            dp(48f),
-            (geometry.right - geometry.left) * 0.35f
-        ).toDouble()
+        val maxScroll = PriceScaleEngine.maxScroll(candles.size, visibleCount)
+        val result = PriceScaleEngine.panOffset(
+            rawOffset = panRawOffset,
+            slot = geometry.slot,
+            maxScroll = maxScroll,
+            plotWidth = geometry.right - geometry.left,
+            maxOverscrollPx = dp(48f)
+        )
 
-        scrollOffset = clamped
-        horizontalOverscroll = -PriceScaleEngine.rubberBandSigned(
-            overscrollPx.toDouble(),
-            overscrollDimension
-        ).toFloat()
-        followLatest = clamped >= maxScroll - 0.01f &&
-            abs(horizontalOverscroll) < 0.5f
+        scrollOffset = result.scrollOffset
+        horizontalOverscroll = result.overscroll
+        followLatest = result.atEnd
     }
 
     private fun finishPan(velocityX: Float, geometry: Geometry?) {
@@ -1945,10 +2342,15 @@ class ProfessionalChartView @JvmOverloads constructor(
             return
         }
 
-        val maxScroll = max(0f, candles.size.toFloat() - visibleCount)
-        val projected = scrollOffset -
-            velocityX * PAN_VELOCITY_PROJECTION / geometry.slot
-        val target = projected.coerceIn(0f, maxScroll)
+        val maxScroll = PriceScaleEngine.maxScroll(candles.size, visibleCount)
+        val effectiveVelocity = if (abs(velocityX) >= minFlingVelocity) velocityX else 0f
+        val target = PriceScaleEngine.flingTargetOffset(
+            currentOffset = scrollOffset,
+            velocityX = effectiveVelocity,
+            slot = geometry.slot,
+            maxScroll = maxScroll,
+            projection = PAN_VELOCITY_PROJECTION
+        )
         val startScroll = scrollOffset
         val startOverscroll = horizontalOverscroll
 
@@ -2018,6 +2420,14 @@ class ProfessionalChartView @JvmOverloads constructor(
     }
 
     override fun onDetachedFromWindow() {
+        removeCallbacks(crosshairHoldRunnable)
+        isTouchDown = false
+        crosshairHoldActivated = false
+        isPanning = false
+        isPricePanning = false
+        drawingStartValid = false
+        lastPricePulseAnimator?.cancel()
+        lastPricePulseAnimator = null
         cancelAnimations()
         recycleVelocityTracker()
         super.onDetachedFromWindow()
@@ -2025,6 +2435,7 @@ class ProfessionalChartView @JvmOverloads constructor(
 
     private fun handleDrawingTap(x: Float, y: Float) {
         val geometry = computeGeometry() ?: return
+        if (!isInsidePricePlotArea(x, y, geometry)) return
         val index = indexAt(x, geometry)
         var price = priceAt(y, geometry)
         if (magnetEnabled) {
@@ -2071,13 +2482,40 @@ class ProfessionalChartView @JvmOverloads constructor(
         return candidates.minByOrNull { abs(it - price) } ?: price
     }
 
+    private fun isUsableRelativeReference(value: Double): Boolean {
+        return value.isFinite() && abs(value) > RELATIVE_REFERENCE_EPS
+    }
+
+    private fun updateRelativeReference(geometry: Geometry) {
+        if (priceScaleMode != PriceScaleMode.RELATIVE) {
+            relativeReference = Double.NaN
+            return
+        }
+        var reference = Double.NaN
+        for (index in geometry.start until geometry.end) {
+            val close = candles.getOrNull(index)?.close ?: continue
+            if (isUsableRelativeReference(close)) {
+                reference = close
+                break
+            }
+        }
+        relativeReference = reference
+    }
+
+    private fun previousCloseForLastPrice(): Double? {
+        return previousClose?.takeIf { PriceScaleEngine.isUsablePrice(it) }
+            ?: source.getOrNull(source.lastIndex - 1)?.close
+                ?.takeIf { PriceScaleEngine.isUsablePrice(it) }
+            ?: source.lastOrNull()?.close
+                ?.takeIf { PriceScaleEngine.isUsablePrice(it) }
+    }
+
     private fun formatPrice(value: Double): String {
         if (!value.isFinite()) return "—"
         if (priceScaleMode == PriceScaleMode.RELATIVE) {
-            val reference = source.firstOrNull { candidate ->
-                candidate.close.isFinite() && candidate.close > 0.0
-            }?.close ?: return "—"
-            val percent = (value - reference) / reference * 100.0
+            val reference = relativeReference.takeIf { isUsableRelativeReference(it) }
+                ?: return "—"
+            val percent = (value - reference) / abs(reference) * 100.0
             val sign = if (percent > 0.0) "+" else ""
             return String.format(Locale.US, "%s%.2f%%", sign, percent)
         }
@@ -2085,13 +2523,7 @@ class ProfessionalChartView @JvmOverloads constructor(
     }
 
     private fun formatAbsolutePrice(value: Double): String {
-        if (!value.isFinite()) return "—"
-        val decimals = when {
-            abs(value) >= 1000.0 -> 2
-            abs(value) >= 1.0 -> 2
-            else -> 4
-        }
-        return String.format(Locale.US, "%.${decimals}f", value)
+        return PriceScaleEngine.formatPrice(value, priceDecimals)
     }
 
     private fun formatQuantity(value: Long): String {
@@ -2129,6 +2561,9 @@ class ProfessionalChartView @JvmOverloads constructor(
         val end: Int,
         val visible: Int,
         val slot: Float,
+        val range: PriceScaleEngine.CandleRange,
+        val startFloat: Float,
+        val visibleFloat: Float,
         val minPrice: Double,
         val maxPrice: Double,
         val subCharts: List<SubChartArea>
@@ -2136,9 +2571,13 @@ class ProfessionalChartView @JvmOverloads constructor(
 
     private companion object {
         const val MIN_VISIBLE = 6f
-        const val AXIS_ZOOM_SENSITIVITY = 2.0f
-        const val AXIS_VELOCITY_PROJECTION = 0.10f
-        const val PAN_VELOCITY_PROJECTION = 0.16f
+        const val MIN_PANEL_HEIGHT_DP = 24f
+        const val MIN_MAIN_HEIGHT_DP = 60f
+        const val MIN_VOLUME_HEIGHT_DP = 12f
+        const val RELATIVE_REFERENCE_EPS = 1.0e-6
+        const val AXIS_ZOOM_SENSITIVITY = PriceScaleEngine.AXIS_ZOOM_SENSITIVITY
+        const val AXIS_VELOCITY_PROJECTION = PriceScaleEngine.AXIS_VELOCITY_PROJECTION
+        const val PAN_VELOCITY_PROJECTION = PriceScaleEngine.PAN_VELOCITY_PROJECTION
         const val MAX_FLING_VELOCITY_DP = 8000f
         const val PRICE_ANIMATION_MS = 280L
         const val PAN_ANIMATION_MS = 260L
