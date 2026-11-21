@@ -531,37 +531,7 @@ object BackendManager {
 
         KotakSessionCoordinator.shutdown()
         MarketRuntimeService.shutdown()
-
-        synchronized(lock) {
-            if (!initialized) {
-                return DatabaseBackup(context).restore(file)
-            }
-            if (::paperTradeMonitor.isInitialized) {
-                paperTradeMonitor.stop()
-            }
-            val worker = executor
-            executor = null
-            worker?.shutdown()
-            if (worker != null) {
-                try {
-                    if (!worker.awaitTermination(10, TimeUnit.SECONDS)) {
-                        worker.shutdownNow()
-                    }
-                } catch (_: InterruptedException) {
-                    worker.shutdownNow()
-                    Thread.currentThread().interrupt()
-                }
-            }
-            if (::marketDataService.isInitialized) {
-                marketDataService.shutdown()
-            }
-            if (::dbHelper.isInitialized) {
-                dbHelper.close()
-            }
-            initialized = false
-            started = false
-            ready = false
-        }
+        stop()
 
         val restored = DatabaseBackup(context).restore(file)
         initialize(context)
@@ -579,22 +549,12 @@ object BackendManager {
     fun stop() {
         synchronized(lock) {
             if (!initialized) return
+            ready = false
+            started = false
             if (::paperTradeMonitor.isInitialized) {
                 paperTradeMonitor.stop()
             }
-            val worker = executor
-            executor = null
-            worker?.shutdown()
-            if (worker != null) {
-                try {
-                    if (!worker.awaitTermination(10, TimeUnit.SECONDS)) {
-                        worker.shutdownNow()
-                    }
-                } catch (_: InterruptedException) {
-                    worker.shutdownNow()
-                    Thread.currentThread().interrupt()
-                }
-            }
+            shutdownWorkerLocked()
             if (::marketDataService.isInitialized) {
                 marketDataService.shutdown()
             }
@@ -602,9 +562,23 @@ object BackendManager {
                 dbHelper.close()
             }
             initialized = false
-            started = false
-            ready = false
             appContext = null
+        }
+    }
+
+    private fun shutdownWorkerLocked() {
+        val worker = executor
+        executor = null
+        worker?.shutdown()
+        if (worker != null) {
+            try {
+                if (!worker.awaitTermination(10, TimeUnit.SECONDS)) {
+                    worker.shutdownNow()
+                }
+            } catch (_: InterruptedException) {
+                worker.shutdownNow()
+                Thread.currentThread().interrupt()
+            }
         }
     }
 

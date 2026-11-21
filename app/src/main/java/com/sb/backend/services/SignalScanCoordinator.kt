@@ -7,7 +7,9 @@ import com.sb.backend.market.model.MarketTimeframe
 import com.sb.backend.models.Candle
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.math.max
 import kotlin.math.min
 
@@ -33,14 +35,53 @@ object SignalScanCoordinator {
         "1h" to listOf("15m", "5m", "1m")
     )
 
-    private val executor = Executors.newSingleThreadExecutor()
+    private val executorLock = Any()
+
+    @Volatile
+    private var executor: ExecutorService? = null
+
+    @Volatile
+    private var stopped = false
+
     private val lastScanAt = ConcurrentHashMap<String, Long>()
     private val inFlight = Collections.newSetFromMap(
         ConcurrentHashMap<String, Boolean>()
     )
 
+    private fun worker(): ExecutorService = synchronized(executorLock) {
+        if (executor?.isShutdown != false) {
+            stopped = false
+            executor = Executors.newSingleThreadExecutor { runnable ->
+                Thread(runnable, "sb-signal-scan").apply { isDaemon = true }
+            }
+        }
+        executor!!
+    }
+
+    fun shutdown() {
+        stopped = true
+        val current = synchronized(executorLock) {
+            val active = executor
+            executor = null
+            active
+        }
+        inFlight.clear()
+        lastScanAt.clear()
+        current?.shutdown()
+        if (current != null) {
+            try {
+                if (!current.awaitTermination(5, TimeUnit.SECONDS)) {
+                    current.shutdownNow()
+                }
+            } catch (_: InterruptedException) {
+                current.shutdownNow()
+                Thread.currentThread().interrupt()
+            }
+        }
+    }
+
     fun scan(key: InstrumentKey, force: Boolean = false) {
-        if (!BackendManager.isInitialized()) return
+        if (stopped || !BackendManager.isInitialized()) return
         if (key.symbol.isBlank() || key.exchange.isBlank()) return
 
         val id = key.key()
@@ -50,7 +91,7 @@ object SignalScanCoordinator {
         if (!inFlight.add(id)) return
 
         lastScanAt[id] = now
-        executor.execute {
+        worker().execute {
             try {
                 if (ensureTargets(key, 0)) {
                     generate(key)

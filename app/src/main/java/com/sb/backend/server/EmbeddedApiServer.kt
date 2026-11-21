@@ -16,7 +16,10 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.SocketTimeoutException
 import java.net.Socket
+import java.util.Collections
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
@@ -31,9 +34,16 @@ class EmbeddedApiServer(
 ) {
     private var serverSocket: ServerSocket? = null
     private val running = AtomicBoolean(false)
-    private val executor = Executors.newFixedThreadPool(
-        ApiSecurityPolicy.MAX_CONCURRENT_REQUESTS + 1
+    private val activeSockets = Collections.newSetFromMap(
+        ConcurrentHashMap<Socket, Boolean>()
     )
+
+    @Volatile
+    private var acceptExecutor: ExecutorService? = null
+
+    @Volatile
+    private var workerExecutor: ExecutorService? = null
+
     private val requestPermits = Semaphore(
         ApiSecurityPolicy.MAX_CONCURRENT_REQUESTS
     )
@@ -53,15 +63,35 @@ class EmbeddedApiServer(
                 InetAddress.getByName(ApiSecurityPolicy.LOOPBACK_HOST)
             )
 
+            val acceptor = Executors.newSingleThreadExecutor { runnable ->
+                Thread(runnable, "sb-api-accept").apply { isDaemon = true }
+            }
+            val workers = Executors.newFixedThreadPool(
+                ApiSecurityPolicy.MAX_CONCURRENT_REQUESTS + 1
+            ) { runnable ->
+                Thread(runnable, "sb-api-worker").apply { isDaemon = true }
+            }
+
             serverSocket = socket
+            acceptExecutor = acceptor
+            workerExecutor = workers
             running.set(true)
 
-            executor.execute {
+            acceptor.execute {
                 while (running.get()) {
                     try {
                         val client = socket.accept()
-                        executor.execute {
-                            handleClient(client)
+                        activeSockets.add(client)
+                        workers.execute {
+                            try {
+                                handleClient(client)
+                            } finally {
+                                activeSockets.remove(client)
+                                try {
+                                    client.close()
+                                } catch (_: Exception) {
+                                }
+                            }
                         }
                     } catch (error: Exception) {
                         if (running.get()) {
@@ -1440,15 +1470,36 @@ class EmbeddedApiServer(
             serverSocket?.close()
         } catch (_: Exception) {
         }
-
         serverSocket = null
-        executor.shutdown()
+
+        activeSockets.forEach { socket ->
+            try {
+                socket.close()
+            } catch (_: Exception) {
+            }
+        }
+
+        val acceptor = acceptExecutor
+        val workers = workerExecutor
+        acceptExecutor = null
+        workerExecutor = null
+
+        acceptor?.shutdownNow()
+        awaitTermination(acceptor, 5)
+        workers?.shutdown()
+        awaitTermination(workers, 10)
+
+        activeSockets.clear()
+    }
+
+    private fun awaitTermination(service: ExecutorService?, seconds: Long) {
+        if (service == null) return
         try {
-            if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
-                executor.shutdownNow()
+            if (!service.awaitTermination(seconds, TimeUnit.SECONDS)) {
+                service.shutdownNow()
             }
         } catch (_: InterruptedException) {
-            executor.shutdownNow()
+            service.shutdownNow()
             Thread.currentThread().interrupt()
         }
     }

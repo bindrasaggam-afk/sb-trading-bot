@@ -10,12 +10,10 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import com.sb.backend.core.BackendManager
-import com.sb.backend.market.MarketDataManager
+import com.sb.backend.core.BackendRuntimeCoordinator
 import com.sb.backend.security.LocalApiToken
 import com.sb.backend.server.ApiSecurityPolicy
 import com.sb.backend.server.EmbeddedApiServer
-import com.sb.signals.services.SignalsPlatform
 import java.util.concurrent.Executors
 
 class MarketForegroundService : Service() {
@@ -123,10 +121,8 @@ class MarketForegroundService : Service() {
         try {
             startApiServer()
 
-            BackendManager.initialize(applicationContext)
-
-            BackendManager.start(
-                seedBuiltInMasters = true,
+            BackendRuntimeCoordinator.start(
+                context = applicationContext,
                 onReady = {
                     val proceed = synchronized(MarketForegroundService::class.java) {
                         if (runtimeState == RuntimeState.STARTING) {
@@ -137,24 +133,12 @@ class MarketForegroundService : Service() {
                         }
                     }
                     if (proceed) {
-                        try {
-                            KotakSessionCoordinator.initialize(
-                                applicationContext
-                            )
-
-                            MarketRuntimeService.start()
-                            SignalsPlatform.start(applicationContext)
-
-                            KotakSessionCoordinator.startIfEnabled()
-
-                            Log.d(
-                                TAG,
-                                "Backend ready; Kotak feed startup requested"
-                            )
-                        } catch (error: Exception) {
-                            Log.e(TAG, "Kotak feed startup failed", error)
-                        }
+                        Log.d(
+                            TAG,
+                            "Backend ready; Kotak feed startup requested"
+                        )
                     }
+                    proceed
                 },
                 onError = { error ->
                     Log.e(TAG, "Backend initialization failed", error)
@@ -253,12 +237,19 @@ class MarketForegroundService : Service() {
     override fun onDestroy() {
         Log.w(TAG, "Foreground service destroyed")
 
-        stopApiServer()
-        SignalsPlatform.stop()
-        KotakSessionCoordinator.shutdown()
-        MarketRuntimeService.shutdown()
-        BackendManager.stop()
-        MarketDataManager.shutdown()
+        synchronized(MarketForegroundService::class.java) {
+            runtimeState = RuntimeState.STOPPED
+        }
+        val result = BackendRuntimeCoordinator.shutdown {
+            stopApiServer()
+        }
+        if (result != null) {
+            Log.d(
+                TAG,
+                "Shutdown drained=${result.drained} " +
+                    "steps=${result.completedSteps} errors=${result.errors}"
+            )
+        }
         resetRuntimeState()
         runtimeExecutor.shutdownNow()
 

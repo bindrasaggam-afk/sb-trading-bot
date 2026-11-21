@@ -9,6 +9,7 @@ import androidx.work.NetworkType
 import androidx.work.PeriodicWorkRequest
 import androidx.work.WorkManager
 import com.sb.backend.core.BackendManager
+import com.sb.backend.database.DatabaseMaintenanceGate
 import com.sb.signals.data.SignalDatabase
 import com.sb.signals.data.SignalRepository
 import java.util.concurrent.ExecutorService
@@ -45,6 +46,13 @@ object SignalsPlatform {
 
     @Volatile
     private var running: Boolean = false
+
+    @Volatile
+    private var accepting: Boolean = true
+
+    fun initialize(context: Context) {
+        ensureInitialized(context)
+    }
 
     fun repository(context: Context): SignalRepository {
         ensureInitialized(context)
@@ -84,6 +92,7 @@ object SignalsPlatform {
 
         executor = worker
         scheduler = scanScheduler
+        accepting = true
         running = true
 
         worker.execute {
@@ -111,12 +120,43 @@ object SignalsPlatform {
     }
 
     fun stop() = synchronized(lock) {
+        accepting = false
         running = false
-        scheduler?.shutdownNow()
-        executor?.shutdownNow()
+        val currentScheduler = scheduler
+        val currentExecutor = executor
         scheduler = null
         executor = null
         analysisService = null
+        currentScheduler?.shutdownNow()
+        currentExecutor?.shutdownNow()
+        awaitTermination(currentScheduler)
+        awaitTermination(currentExecutor)
+    }
+
+    fun closeDatabase() {
+        synchronized(lock) {
+            if (running) return
+            try {
+                database?.close()
+            } finally {
+                database = null
+                signalRepository = null
+                analysisService = null
+                appContext = null
+            }
+        }
+    }
+
+    private fun awaitTermination(service: ExecutorService?) {
+        if (service == null) return
+        try {
+            if (!service.awaitTermination(5, TimeUnit.SECONDS)) {
+                service.shutdownNow()
+            }
+        } catch (_: InterruptedException) {
+            service.shutdownNow()
+            Thread.currentThread().interrupt()
+        }
     }
 
     fun isRunning(): Boolean = running
@@ -125,6 +165,10 @@ object SignalsPlatform {
         context: Context,
         onComplete: (AnalysisSummary?) -> Unit = {}
     ): Boolean {
+        if (!accepting) {
+            onComplete(null)
+            return false
+        }
         if (!start(context)) {
             onComplete(null)
             return false
@@ -203,9 +247,22 @@ object SignalsPlatform {
     }
 
     private fun runAnalysis(): AnalysisSummary? {
+        if (!accepting) return null
+        return try {
+            DatabaseMaintenanceGate.shared.withOperation {
+                runAnalysisGuarded()
+            }
+        } catch (error: Exception) {
+            Log.e(TAG, "Signal analysis gate unavailable", error)
+            null
+        }
+    }
+
+    private fun runAnalysisGuarded(): AnalysisSummary? {
         val service = synchronized(lock) {
             analysisService
         } ?: return null
+        if (!accepting) return null
         return synchronized(analysisLock) {
             val summary = try {
                 service.seedStrategyVersions()
@@ -241,6 +298,7 @@ object SignalsPlatform {
     }
 
     fun execute(context: Context, task: () -> Unit): Boolean {
+        if (!accepting) return false
         ensureInitialized(context)
         val worker = executor
         if (worker == null || worker.isShutdown) {
