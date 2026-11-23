@@ -338,7 +338,7 @@ class KotakScripMasterService(
             .distinct()
             .size
 
-        val cashMatched = cashUpdatesBySegment.values.sumOfCompat { it.size }
+        val cashMatched = cashUpdatesBySegment.values.fold(0) { total, updates -> total + updates.size }
         val result = ScripMasterSyncResult(
             downloadedSegments = downloaded,
             parsedRecords = parsed,
@@ -368,11 +368,6 @@ class KotakScripMasterService(
         return result
     }
 
-    private inline fun <K, V> Map<K, V>.sumOfCompat(selector: (V) -> Int): Int {
-        var total = 0
-        values.forEach { total += selector(it) }
-        return total
-    }
 
     // =================================================================
     // FILE PATH DISCOVERY
