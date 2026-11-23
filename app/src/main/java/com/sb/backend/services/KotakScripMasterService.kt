@@ -26,6 +26,19 @@ data class KotakScripToken(
     val expiryMillis: Long? = null
 )
 
+data class SegmentSyncStats(
+    val segment: String,
+    val downloaded: Boolean = false,
+    val parsedRows: Int = 0,
+    val validRows: Int = 0,
+    val invalidTokenRows: Int = 0,
+    val invalidSymbolRows: Int = 0,
+    val filteredRows: Int = 0,
+    val selectedRows: Int = 0,
+    val updatedRows: Int = 0,
+    val error: String? = null
+)
+
 data class ScripMasterSyncResult(
     val downloadedSegments: Int = 0,
     val parsedRecords: Int = 0,
@@ -36,7 +49,8 @@ data class ScripMasterSyncResult(
     val mcxExpiredDeactivated: Int = 0,
     val mcxStaleDeactivated: Int = 0,
     val mcxActiveContracts: Int = 0,
-    val errors: List<String> = emptyList()
+    val errors: List<String> = emptyList(),
+    val segmentStats: List<SegmentSyncStats> = emptyList()
 )
 
 class KotakScripMasterService(
@@ -71,6 +85,42 @@ class KotakScripMasterService(
         val expiryMillis: Long?
     )
 
+    private data class SegmentParseResult(
+        val rows: List<ScripRow>,
+        val parsedRows: Int,
+        val invalidTokenRows: Int,
+        val invalidSymbolRows: Int,
+        val filteredRows: Int
+    )
+
+    private class MutableSegmentStats(val name: String) {
+        var downloaded: Boolean = false
+        var parsedRows: Int = 0
+        var invalidTokenRows: Int = 0
+        var invalidSymbolRows: Int = 0
+        var filteredRows: Int = 0
+        var selectedRows: Int = 0
+        var updatedRows: Int = 0
+        var error: String? = null
+
+        fun snapshot(): SegmentSyncStats {
+            val valid = (parsedRows - invalidTokenRows -
+                invalidSymbolRows - filteredRows).coerceAtLeast(0)
+            return SegmentSyncStats(
+                segment = name,
+                downloaded = downloaded,
+                parsedRows = parsedRows,
+                validRows = valid,
+                invalidTokenRows = invalidTokenRows,
+                invalidSymbolRows = invalidSymbolRows,
+                filteredRows = filteredRows,
+                selectedRows = selectedRows,
+                updatedRows = updatedRows,
+                error = error
+            )
+        }
+    }
+
     private val segments = listOf(
         SegmentConfig(
             name = "nse_cm",
@@ -104,72 +154,69 @@ class KotakScripMasterService(
     fun sync(): ScripMasterSyncResult {
 
         val accessToken = secureStore.getAccessToken()
-
         require(accessToken.isNotBlank()) {
             "Kotak Access Token missing"
         }
 
-        val filePaths = fetchFilePaths(accessToken)
-
-        val cashUpdates =
-            LinkedHashMap<String, KotakScripToken>()
-
-        val mcxContracts =
-            LinkedHashMap<String, Instrument>()
-
         val errors = ArrayList<String>()
+        val segmentStats = segments.associate { it.name to MutableSegmentStats(it.name) }
+        val filePaths = try {
+            fetchFilePaths(accessToken)
+        } catch (e: Exception) {
+            val message = "Master file-path discovery failed: ${e.message ?: "Unknown error"}"
+            errors.add(message)
+            Log.e(TAG, message, e)
+            emptyMap()
+        }
+
+        val cashUpdatesBySegment = LinkedHashMap<String, LinkedHashMap<String, KotakScripToken>>()
+        segments.filter { it.cash }.forEach {
+            cashUpdatesBySegment[it.name] = LinkedHashMap()
+        }
+        val mcxContracts = LinkedHashMap<String, Instrument>()
 
         var downloaded = 0
         var parsed = 0
-
         var mcxMasterDownloaded = false
         var mcxMasterHasValidContracts = false
 
         segments.forEach { config ->
-
+            val stats = segmentStats.getValue(config.name)
             val url = filePaths[config.name]
 
             if (url.isNullOrBlank()) {
-                val message =
-                    "${config.name}: master file path missing"
-
+                val message = "${config.name}: master file path missing"
+                stats.error = message
                 errors.add(message)
-
                 Log.e(TAG, message)
-
                 return@forEach
             }
 
             try {
-
-                val rows = downloadSegment(config, url)
-
+                val parsedResult = downloadSegment(config, url)
+                stats.downloaded = true
                 downloaded++
-                parsed += rows.size
+                stats.parsedRows = parsedResult.parsedRows
+                stats.invalidTokenRows = parsedResult.invalidTokenRows
+                stats.invalidSymbolRows = parsedResult.invalidSymbolRows
+                stats.filteredRows = parsedResult.filteredRows
+                parsed += parsedResult.parsedRows
 
                 val selected = if (config.cash) {
-                    selectCashRows(rows)
+                    selectCashRows(parsedResult.rows)
                 } else {
-                    selectFrontMonthRows(config, rows)
+                    selectFrontMonthRows(config, parsedResult.rows)
                 }
+                stats.selectedRows = selected.size
 
                 if (!config.cash) {
-
                     mcxMasterDownloaded = true
-
-                    // Empty/invalid MCX data must never deactivate
-                    // previously stored valid futures contracts.
-                    mcxMasterHasValidContracts =
-                        selected.isNotEmpty()
+                    mcxMasterHasValidContracts = selected.isNotEmpty()
                 }
 
                 selected.forEach { row ->
-
                     if (config.cash) {
-
-                        val identity =
-                            normalizeSymbol(row.symbol)
-
+                        val identity = normalizeSymbol(row.symbol)
                         val key = buildString {
                             append(row.exchange)
                             append('|')
@@ -177,31 +224,20 @@ class KotakScripMasterService(
                             append('|')
                             append(config.databaseSegments.joinToString(","))
                         }
-
-                        cashUpdates[key] = KotakScripToken(
-                            symbol = row.symbol,
-                            token = row.token,
-                            exchange = row.exchange,
-                            segments = config.databaseSegments,
-                            tradingSymbol = row.tradingSymbol,
-                            expiryMillis = row.expiryMillis
-                        )
-
+                        cashUpdatesBySegment.getValue(config.name)[key] =
+                            KotakScripToken(
+                                symbol = row.symbol,
+                                token = row.token,
+                                exchange = row.exchange,
+                                segments = config.databaseSegments,
+                                tradingSymbol = row.tradingSymbol,
+                                expiryMillis = row.expiryMillis
+                            )
                     } else {
-
-                        val expiry = row.expiryMillis
-                            ?: return@forEach
-
-                        val tradingSymbol =
-                            row.tradingSymbol.trim()
-
-                        if (tradingSymbol.isBlank()) {
-                            return@forEach
-                        }
-
-                        val key =
-                            "${row.exchange}|${normalizeSymbol(tradingSymbol)}"
-
+                        val expiry = row.expiryMillis ?: return@forEach
+                        val tradingSymbol = row.tradingSymbol.trim()
+                        if (tradingSymbol.isBlank()) return@forEach
+                        val key = "${row.exchange}|${normalizeSymbol(tradingSymbol)}"
                         mcxContracts[key] = Instrument(
                             symbol = tradingSymbol,
                             name = row.symbol,
@@ -217,83 +253,74 @@ class KotakScripMasterService(
 
                 Log.d(
                     TAG,
-                    "${config.name}: " +
-                        "parsed=${rows.size}, selected=${selected.size}"
+                    "${config.name}: parsed=${stats.parsedRows}, " +
+                        "valid=${stats.snapshot().validRows}, " +
+                        "selected=${stats.selectedRows}, " +
+                        "invalidToken=${stats.invalidTokenRows}, " +
+                        "invalidSymbol=${stats.invalidSymbolRows}, " +
+                        "filtered=${stats.filteredRows}"
                 )
-
             } catch (e: Exception) {
-
-                val message =
-                    "${config.name}: ${e.message ?: "Unknown error"}"
-
+                val message = "${config.name}: ${e.message ?: "Unknown error"}"
+                stats.error = message
                 errors.add(message)
-
                 if (!config.cash) {
                     mcxMasterDownloaded = false
                     mcxMasterHasValidContracts = false
                 }
-
-                Log.e(
-                    TAG,
-                    "Scrip master segment failed: $message",
-                    e
-                )
+                Log.e(TAG, "Scrip master segment failed: $message", e)
             }
         }
 
-        expandNseAliases(cashUpdates)
+        var cashUpdatedRows = 0
+        cashUpdatesBySegment.forEach { (segmentName, updates) ->
+            if (updates.isEmpty()) return@forEach
+            try {
+                expandNseAliases(updates)
+                val updated = instrumentRepository.applyKotakScripTokens(updates.values.toList())
+                cashUpdatedRows += updated
+                segmentStats.getValue(segmentName).updatedRows += updated
+            } catch (e: Exception) {
+                val message = "$segmentName: repository token update failed: ${e.message ?: "Unknown error"}"
+                segmentStats.getValue(segmentName).error = message
+                errors.add(message)
+                Log.e(TAG, message, e)
+            }
+        }
 
-        // ------------------------------------------------------------
-        // NSE / BSE CASH TOKEN UPDATE
-        // ------------------------------------------------------------
-
-        val cashUpdatedRows =
-            if (cashUpdates.isNotEmpty()) {
-                instrumentRepository.applyKotakScripTokens(
-                    cashUpdates.values.toList()
-                )
-            } else {
+        val mcxUpdatedRows = if (mcxContracts.isNotEmpty()) {
+            try {
+                val updated = instrumentRepository.upsertMcxContracts(mcxContracts.values.toList())
+                segmentStats["mcx_fo"]?.updatedRows = updated
+                updated
+            } catch (e: Exception) {
+                val message = "mcx_fo: repository contract update failed: ${e.message ?: "Unknown error"}"
+                segmentStats["mcx_fo"]?.error = message
+                errors.add(message)
+                Log.e(TAG, message, e)
                 0
             }
+        } else {
+            0
+        }
 
-        // ------------------------------------------------------------
-        // MCX CONTRACT UPSERT
-        // ------------------------------------------------------------
-
-        val mcxUpdatedRows =
-            if (mcxContracts.isNotEmpty()) {
-                instrumentRepository.upsertMcxContracts(
-                    mcxContracts.values.toList()
-                )
-            } else {
-                0
-            }
-
-        // ------------------------------------------------------------
-        // EXPIRED MCX CONTRACTS
-        // ------------------------------------------------------------
-
-        // Expired contracts can be deactivated independently of the
-        // current master download because their stored expiry is known.
+        // Expired contracts are safe to deactivate from their stored expiry,
+        // independently of whether today's MCX master download succeeded.
         val mcxExpiredDeactivated =
             instrumentRepository.deactivateExpiredMcxContracts()
 
-        // ------------------------------------------------------------
-        // MCX STALE CONTRACT PROTECTION
-        // ------------------------------------------------------------
-
+        // Never deactivate current MCX contracts from an empty, invalid,
+        // partially failed, or unusable master download.
         val mcxStaleDeactivated = if (
             mcxMasterDownloaded &&
             mcxMasterHasValidContracts &&
-            mcxContracts.isNotEmpty()
+            mcxContracts.isNotEmpty() &&
+            segmentStats["mcx_fo"]?.error == null
         ) {
-
             instrumentRepository.deactivateMcxFuturesNotIn(
                 mcxContracts.values.map { it.symbol }
             )
-
         } else {
-
             Log.w(
                 TAG,
                 "MCX stale deactivation skipped. " +
@@ -301,53 +328,50 @@ class KotakScripMasterService(
                     "validContracts=$mcxMasterHasValidContracts, " +
                     "savedCandidates=${mcxContracts.size}"
             )
-
             0
         }
 
-        // ------------------------------------------------------------
-        // FINAL COUNTS
-        // ------------------------------------------------------------
-
-        val mcxActiveContracts =
-            instrumentRepository.countActiveMcxFutures()
-
+        val mcxActiveContracts = instrumentRepository.countActiveMcxFutures()
         val mcxCommodityCount = mcxContracts.values
             .map { normalizeSymbol(it.name) }
             .filter { it.isNotBlank() }
             .distinct()
             .size
 
+        val cashMatched = cashUpdatesBySegment.values.sumOfCompat { it.size }
         val result = ScripMasterSyncResult(
             downloadedSegments = downloaded,
             parsedRecords = parsed,
-            matchedRecords = cashUpdates.size + mcxContracts.size,
+            matchedRecords = cashMatched + mcxContracts.size,
             updatedRows = cashUpdatedRows + mcxUpdatedRows,
             mcxContractsSaved = mcxUpdatedRows,
             mcxCommodities = mcxCommodityCount,
             mcxExpiredDeactivated = mcxExpiredDeactivated,
             mcxStaleDeactivated = mcxStaleDeactivated,
             mcxActiveContracts = mcxActiveContracts,
-            errors = errors
+            errors = errors,
+            segmentStats = segmentStats.values.map { it.snapshot() }
         )
 
         Log.d(
             TAG,
-            "Scrip master sync: " +
-                "segments=${result.downloadedSegments}, " +
-                "parsed=${result.parsedRecords}, " +
-                "matched=${result.matchedRecords}, " +
-                "cashUpdated=$cashUpdatedRows, " +
-                "mcxSaved=$mcxUpdatedRows, " +
+            "Scrip master sync: segments=${result.downloadedSegments}, " +
+                "parsed=${result.parsedRecords}, matched=${result.matchedRecords}, " +
+                "cashUpdated=$cashUpdatedRows, mcxSaved=$mcxUpdatedRows, " +
                 "mcxCommodities=$mcxCommodityCount, " +
                 "mcxExpiredDeactivated=$mcxExpiredDeactivated, " +
                 "mcxStaleDeactivated=$mcxStaleDeactivated, " +
                 "mcxActiveContracts=$mcxActiveContracts, " +
-                "totalUpdated=${result.updatedRows}, " +
-                "errors=${result.errors.size}"
+                "errors=${result.errors.size}, " +
+                "segmentStats=${result.segmentStats}"
         )
-
         return result
+    }
+
+    private inline fun <K, V> Map<K, V>.sumOfCompat(selector: (V) -> Int): Int {
+        var total = 0
+        values.forEach { total += selector(it) }
+        return total
     }
 
     // =================================================================
@@ -478,7 +502,7 @@ class KotakScripMasterService(
     private fun downloadSegment(
         config: SegmentConfig,
         url: String
-    ): List<ScripRow> {
+    ): SegmentParseResult {
 
         validateHttpsUrl(url)
 
@@ -588,7 +612,7 @@ class KotakScripMasterService(
     private fun parseCsv(
         reader: BufferedReader,
         config: SegmentConfig
-    ): List<ScripRow> {
+    ): SegmentParseResult {
 
         val headerLine = reader.readLine()
             ?: throw Exception(
@@ -625,12 +649,14 @@ class KotakScripMasterService(
         }
 
         val result = ArrayList<ScripRow>()
+        var parsedRows = 0
+        var invalidTokenRows = 0
+        var invalidSymbolRows = 0
+        var filteredRows = 0
 
         reader.forEachLine { line ->
-
-            if (line.isBlank()) {
-                return@forEachLine
-            }
+            if (line.isBlank()) return@forEachLine
+            parsedRows++
 
             val columns = parseCsvLine(line)
 
@@ -658,18 +684,14 @@ class KotakScripMasterService(
             val optionType = value("poptiontype")
                 .uppercase(Locale.ROOT)
 
-            if (
-                token.isBlank() ||
-                symbol.isBlank()
-            ) {
+            if (symbol.isBlank()) {
+                invalidSymbolRows++
                 return@forEachLine
             }
 
-            if (token.toLongOrNull() == null) {
-                return@forEachLine
-            }
-
-            if (token.toLong() <= 0L) {
+            val numericToken = token.toLongOrNull()
+            if (numericToken == null || numericToken <= 0L) {
+                invalidTokenRows++
                 return@forEachLine
             }
 
@@ -695,6 +717,7 @@ class KotakScripMasterService(
                 }
 
                 if (!validGroup) {
+                    filteredRows++
                     return@forEachLine
                 }
 
@@ -703,13 +726,12 @@ class KotakScripMasterService(
                 // Only actual commodity futures.
                 // Options and index futures are excluded.
                 if (instrumentType != "FUTCOM") {
+                    filteredRows++
                     return@forEachLine
                 }
 
-                if (
-                    optionType == "CE" ||
-                    optionType == "PE"
-                ) {
+                if (optionType == "CE" || optionType == "PE") {
+                    filteredRows++
                     return@forEachLine
                 }
             }
@@ -719,6 +741,7 @@ class KotakScripMasterService(
                 .ifBlank { config.exchange }
 
             if (!exchange.equals(config.exchange, true)) {
+                filteredRows++
                 return@forEachLine
             }
 
@@ -751,7 +774,13 @@ class KotakScripMasterService(
             )
         }
 
-        return result
+        return SegmentParseResult(
+            rows = result,
+            parsedRows = parsedRows,
+            invalidTokenRows = invalidTokenRows,
+            invalidSymbolRows = invalidSymbolRows,
+            filteredRows = filteredRows
+        )
     }
 
     /**
