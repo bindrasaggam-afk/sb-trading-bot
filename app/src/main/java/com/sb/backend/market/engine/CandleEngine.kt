@@ -2,12 +2,13 @@ package com.sb.backend.market.engine
 
 import com.sb.backend.market.ExchangeSessionCalendar
 import com.sb.backend.market.TimeframeBuckets
+import com.sb.backend.market.TickTimePolicy
 import com.sb.backend.market.model.InstrumentKey
 import com.sb.backend.market.model.MarketCandle
 import com.sb.backend.market.model.MarketTick
 import com.sb.backend.market.model.MarketTimeframe
-import java.util.LinkedHashSet
 import java.util.Locale
+import java.util.logging.Logger
 import kotlin.math.max
 import kotlin.math.min
 
@@ -52,6 +53,15 @@ class CandleEngine(
             finalizedCandles[timeframe.label].orEmpty()
     }
 
+    data class Diagnostics(
+        val accepted: Long = 0L,
+        val duplicatesRejected: Long = 0L,
+        val invalidRejected: Long = 0L,
+        val exchangeTradeTicks: Long = 0L,
+        val exchangeUpdateTicks: Long = 0L,
+        val deviceFallbackTicks: Long = 0L
+    )
+
     private class TimeframeSeries {
         val candles = ArrayList<MarketCandle>()
         val firstTick = HashMap<Long, Long>()
@@ -63,7 +73,7 @@ class CandleEngine(
 
     private class Series {
         val byTimeframe = HashMap<String, TimeframeSeries>()
-        val processed = LinkedHashSet<String>()
+        val processed = LinkedHashMap<String, Long>()
 
         var previousVolume = -1L
         var previousVolumeTime = 0L
@@ -83,6 +93,27 @@ class CandleEngine(
 
     private val seriesByInstrument = HashMap<String, Series>()
 
+    private val logger = Logger.getLogger(CandleEngine::class.java.name)
+
+    private var diagnostics = Diagnostics()
+
+    @Synchronized
+    fun diagnostics(): Diagnostics = diagnostics
+
+    private fun logDiagnostic(message: String) {
+        if (diagnostics.accepted % 250L == 0L) {
+            logger.info(message)
+        }
+    }
+
+    private fun rejectInvalid(message: String? = null): TickResult {
+        diagnostics = diagnostics.copy(
+            invalidRejected = diagnostics.invalidRejected + 1L
+        )
+        if (message != null) logDiagnostic(message)
+        return TickResult(false)
+    }
+
     // ------------------------------------------------------------
     // LIVE TICK
     // ------------------------------------------------------------
@@ -91,27 +122,56 @@ class CandleEngine(
     fun addTick(tick: MarketTick): TickResult {
         val normalizedKey = normalizeKey(tick.key)
         if (normalizedKey.isEmpty()) {
-            return TickResult(false)
+            return rejectInvalid()
         }
 
         val ltp = tick.ltp
 
         if (!ltp.isFinite() || ltp <= 0.0) {
-            return TickResult(false)
+            return rejectInvalid()
         }
 
         if (tick.volume < 0L || tick.lastTradeQty < 0L) {
-            return TickResult(false)
+            return rejectInvalid()
         }
 
-        val eventTime = eventTimeMillis(tick)
+        val resolution = if (tick.receivedAt > 0L) {
+            tick.timestampResolution
+        } else {
+            TickTimePolicy.resolve(
+                tradeTime = tick.lastTradeTime,
+                updateTime = tick.exchangeTime,
+                receivedAt = clock(),
+                exchange = tick.key.exchange
+            )
+        }
+        val eventTime = resolution.eventTimeMillis
 
         if (eventTime <= 0L) {
-            return TickResult(false)
+            return rejectInvalid(resolution.reason)
         }
 
         if (!ExchangeSessionCalendar.isTradingTime(eventTime, tick.key.exchange)) {
-            return TickResult(false)
+            return rejectInvalid()
+        }
+
+        diagnostics = when (resolution.source) {
+            TickTimePolicy.Source.EXCHANGE_TRADE -> diagnostics.copy(
+                exchangeTradeTicks = diagnostics.exchangeTradeTicks + 1L
+            )
+            TickTimePolicy.Source.EXCHANGE_UPDATE -> diagnostics.copy(
+                exchangeUpdateTicks = diagnostics.exchangeUpdateTicks + 1L
+            )
+            TickTimePolicy.Source.DEVICE_RECEIVE -> {
+                logDiagnostic(
+                    "Fallback to device receive time for " +
+                        tick.key.key() + ": " + resolution.reason
+                )
+                diagnostics.copy(
+                    deviceFallbackTicks = diagnostics.deviceFallbackTicks + 1L
+                )
+            }
+            TickTimePolicy.Source.NONE -> diagnostics
         }
 
         val bucket = TimeframeBuckets.bucketStart(
@@ -121,26 +181,36 @@ class CandleEngine(
         )
 
         if (bucket <= 0L) {
-            return TickResult(false)
+            return rejectInvalid()
         }
 
         val series = seriesFor(normalizedKey)
 
         if (series.base.openBucket > 0L && bucket < series.base.openBucket) {
-            return TickResult(false)
+            return rejectInvalid()
         }
 
         if (bucket < series.base.lastClosedBucket) {
-            return TickResult(false)
+            return rejectInvalid()
         }
 
         val signature = signature(tick, eventTime)
 
-        if (!series.processed.add(signature)) {
-            return TickResult(false)
+        if (signature != null) {
+            val previous = series.processed[signature]
+            if (previous != null) {
+                diagnostics = diagnostics.copy(
+                    duplicatesRejected = diagnostics.duplicatesRejected + 1L
+                )
+                logDiagnostic(
+                    "Duplicate tick ignored for " + tick.key.key() +
+                        " at " + eventTime
+                )
+                return TickResult(false)
+            }
+            series.processed[signature] = eventTime
+            pruneProcessed(series, eventTime)
         }
-
-        trimProcessed(series)
 
         val session = TimeframeBuckets.sessionKey(eventTime)
 
@@ -182,7 +252,11 @@ class CandleEngine(
         }
 
         val currentBase = currentCandles[MarketTimeframe.MIN_1.label]
-            ?: return TickResult(false)
+            ?: return rejectInvalid()
+
+        diagnostics = diagnostics.copy(
+            accepted = diagnostics.accepted + 1L
+        )
 
         return TickResult(
             accepted = true,
@@ -278,7 +352,14 @@ class CandleEngine(
                 series
             )
 
-            return 0L
+            return if (
+                tick.lastTradeQty > 0L &&
+                cumulativeVolume == tick.lastTradeQty
+            ) {
+                tick.lastTradeQty
+            } else {
+                0L
+            }
         }
 
         if (eventTime < series.previousVolumeTime) {
@@ -439,6 +520,7 @@ class CandleEngine(
     @Synchronized
     fun clear() {
         seriesByInstrument.clear()
+        diagnostics = Diagnostics()
     }
 
     // ------------------------------------------------------------
@@ -485,55 +567,6 @@ class CandleEngine(
         return finalized
     }
 
-    // ------------------------------------------------------------
-    // EVENT TIME
-    // ------------------------------------------------------------
-
-    private fun eventTimeMillis(tick: MarketTick): Long {
-        val received = TimeframeBuckets.normalizeTimestamp(
-            tick.receivedAt.takeIf { it > 0L }
-                ?: clock()
-        )
-
-        if (received <= 0L) {
-            return 0L
-        }
-
-        val candidates = listOfNotNull(
-            tick.lastTradeTime,
-            tick.exchangeTime
-        )
-
-        for (raw in candidates) {
-            val normalized = TimeframeBuckets.normalizeTimestamp(raw)
-
-            if (isPlausibleEventTimestamp(normalized, received)) {
-                return normalized
-            }
-        }
-
-        return received
-    }
-
-    private fun isPlausibleEventTimestamp(
-        eventTime: Long,
-        reference: Long
-    ): Boolean {
-        if (eventTime <= 0L || reference <= 0L) {
-            return false
-        }
-
-        val latestAllowed = safeAdd(
-            reference,
-            MAX_FUTURE_SKEW_MILLIS
-        )
-
-        val earliestAllowed =
-            (reference - MAX_STALE_PAST_MILLIS).coerceAtLeast(1L)
-
-        return eventTime in earliestAllowed..latestAllowed
-    }
-
     private fun isPlausibleStoredTimestamp(
         timestamp: Long,
         now: Long
@@ -551,22 +584,52 @@ class CandleEngine(
     private fun signature(
         tick: MarketTick,
         eventTime: Long
-    ): String {
-        return normalizeKey(tick.key) + "|" +
-            eventTime + "|" +
-            java.lang.Double.doubleToLongBits(tick.ltp) + "|" +
-            tick.volume + "|" +
-            tick.lastTradeQty
+    ): String? {
+        val hasIdentity =
+            tick.volume > 0L ||
+                tick.lastTradeQty > 0L ||
+                tick.bidPrice != null ||
+                tick.askPrice != null ||
+                tick.totalBuyQty > 0L ||
+                tick.totalSellQty > 0L ||
+                tick.oi > 0L
+
+        if (!hasIdentity) return null
+
+        return listOf(
+            normalizeKey(tick.key),
+            eventTime.toString(),
+            java.lang.Double.doubleToLongBits(tick.ltp).toString(),
+            tick.volume.toString(),
+            tick.lastTradeQty.toString(),
+            bits(tick.bidPrice),
+            tick.bidQty?.toString().orEmpty(),
+            bits(tick.askPrice),
+            tick.askQty?.toString().orEmpty(),
+            tick.totalBuyQty.toString(),
+            tick.totalSellQty.toString(),
+            tick.oi.toString()
+        ).joinToString("|")
     }
 
-    private fun trimProcessed(series: Series) {
+    private fun bits(value: Double?): String =
+        value?.let { java.lang.Double.doubleToLongBits(it).toString() }
+            ?: ""
+
+    private fun pruneProcessed(series: Series, eventTime: Long) {
+        val byTime = series.processed.entries.iterator()
+        while (byTime.hasNext()) {
+            val entry = byTime.next()
+            if (eventTime - entry.value > DEDUPE_WINDOW_MILLIS) {
+                byTime.remove()
+            }
+        }
+
         while (series.processed.size > MAX_REMEMBERED_TICKS) {
-            val iterator = series.processed.iterator()
-
-            if (!iterator.hasNext()) break
-
-            iterator.next()
-            iterator.remove()
+            val oldest = series.processed.entries.iterator()
+            if (!oldest.hasNext()) break
+            oldest.next()
+            oldest.remove()
         }
     }
 
@@ -690,11 +753,9 @@ class CandleEngine(
     private companion object {
         private const val MAX_CANDLES_PER_TIMEFRAME = 12_000
         private const val MAX_REMEMBERED_TICKS = 5_000
+        private const val DEDUPE_WINDOW_MILLIS = 2L * 60L * 1_000L
 
         private const val MAX_FUTURE_SKEW_MILLIS =
             10L * 60L * 1_000L
-
-        private const val MAX_STALE_PAST_MILLIS =
-            7L * 24L * 60L * 60L * 1_000L
     }
 }

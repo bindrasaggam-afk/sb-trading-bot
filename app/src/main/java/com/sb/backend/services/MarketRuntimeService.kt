@@ -37,8 +37,6 @@ object MarketRuntimeService {
     private const val SEED_LIMIT = 5_000
     private const val STATUS_INTERVAL_MS = 1_000L
 
-    private val engine = CandleEngine()
-
     private val tracked =
         ConcurrentHashMap<String, InstrumentKey>()
 
@@ -69,20 +67,21 @@ object MarketRuntimeService {
     private val _status = MutableStateFlow(RuntimeStatus())
     val status: StateFlow<RuntimeStatus> = _status.asStateFlow()
 
-    private val tickListener: (MarketTick) -> Unit = { tick ->
-        handleTick(tick)
-    }
+    private val candleResultListener:
+        (MarketTick, CandleEngine.TickResult) -> Unit = { tick, result ->
+            handleTick(tick, result)
+        }
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
         MarketDataManager.start()
-        MarketDataManager.addTickListener(tickListener)
+        MarketDataManager.addCandleResultListener(candleResultListener)
         publishStatus(force = true)
     }
 
     fun stop() {
         if (!running.compareAndSet(true, false)) return
-        MarketDataManager.removeTickListener(tickListener)
+        MarketDataManager.removeCandleResultListener(candleResultListener)
         publishStatus(force = true)
     }
 
@@ -135,8 +134,6 @@ object MarketRuntimeService {
 
         if (tracked.remove(id) == null) return
 
-        engine.reset(normalized)
-
         publishStatus(force = true)
     }
 
@@ -158,34 +155,37 @@ object MarketRuntimeService {
         candles: List<MarketCandle>
     ) {
         if (candles.isEmpty()) return
-        engine.seed(normalize(key), timeframe, candles)
+        MarketDataManager.seedCandles(normalize(key), candles, timeframe)
     }
 
     fun candles(
         key: InstrumentKey,
         timeframe: MarketTimeframe
     ): List<MarketCandle> {
-        return engine.candles(normalize(key), timeframe)
+        return MarketDataManager.getCandles(normalize(key), timeframe)
     }
 
     fun latestCandle(
         key: InstrumentKey,
         timeframe: MarketTimeframe
     ): MarketCandle? {
-        return engine.candles(normalize(key), timeframe).lastOrNull()
+        return MarketDataManager.latestCandle(normalize(key), timeframe)
     }
 
     fun clear() {
-        engine.clear()
+        MarketDataManager.clearCandles()
         processedTicks.set(0L)
         lastTickAt = 0L
         lastError = null
         publishStatus(force = true)
     }
 
-    private fun handleTick(tick: MarketTick) {
+    private fun handleTick(
+        tick: MarketTick,
+        result: CandleEngine.TickResult
+    ) {
         if (!running.get()) return
-        if (!tick.isValid) return
+        if (!result.accepted) return
 
         val key = normalize(tick.key)
         val id = key.key()
@@ -196,15 +196,6 @@ object MarketRuntimeService {
         if (tracked.putIfAbsent(id, key) == null) {
             seedFromStore(key)
         }
-
-        val result = try {
-            engine.addTick(tick)
-        } catch (e: Exception) {
-            recordError(e)
-            return
-        }
-
-        if (!result.accepted) return
 
         processedTicks.incrementAndGet()
         lastTickAt = tick.receivedAt.takeIf { it > 0L }
@@ -321,7 +312,11 @@ object MarketRuntimeService {
                         )
 
                         if (stored.isNotEmpty()) {
-                            engine.seed(key, timeframe, stored)
+                            MarketDataManager.seedCandles(
+                                key = key,
+                                candles = stored,
+                                timeframe = timeframe
+                            )
                         }
                     }
                 } catch (e: Exception) {

@@ -549,6 +549,133 @@ class CandleEngineTest {
         assertEquals(time(9, 15, 0), result.finalizedBase.first().timestamp)
     }
 
+    @Test
+    fun exchangeTradeTimestampWinsAndSecondsAreNormalized() {
+        val engine = CandleEngine()
+        val received = time(9, 18, 5)
+        val tradeSeconds = time(9, 17, 42) / 1_000L
+
+        val tick = MarketTick(
+            key = nse,
+            ltp = 100.0,
+            volume = 100L,
+            lastTradeTime = tradeSeconds,
+            exchangeTime = time(9, 18, 4),
+            receivedAt = received
+        )
+        val result = engine.addTick(tick)
+
+        assertTrue(result.accepted)
+        assertEquals("EXCHANGE_TRADE", tick.timestampSource)
+        assertEquals(time(9, 17, 0), result.baseTimestamp)
+    }
+
+    @Test
+    fun staleExchangeTimestampFallsBackToDeviceReceiveTime() {
+        val engine = CandleEngine()
+        val received = time(9, 15, 20)
+
+        val tick = MarketTick(
+            key = nse,
+            ltp = 100.0,
+            volume = 10L,
+            lastTradeTime = time(8, 0, 0),
+            receivedAt = received
+        )
+        val result = engine.addTick(tick)
+
+        assertTrue(result.accepted)
+        assertEquals("DEVICE_RECEIVE", tick.timestampSource)
+        assertEquals(time(9, 15, 0), result.baseTimestamp)
+    }
+
+    @Test
+    fun samePriceWithDifferentVolumeIsNotTreatedAsDuplicate() {
+        val engine = CandleEngine()
+        val timestamp = time(9, 15, 10)
+
+        assertTrue(engine.addTick(tick(nse, timestamp, 100.0, 1_000L)).accepted)
+        val second = engine.addTick(tick(nse, timestamp, 100.0, 1_050L))
+
+        assertTrue(second.accepted)
+        assertEquals(50L, engine.candles(nse, MarketTimeframe.MIN_1).single().volume)
+    }
+
+    @Test
+    fun firstTradeQuantityEstablishesVolumeOnlyWhenCumulativeEqualsQuantity() {
+        val engine = CandleEngine()
+        val result = engine.addTick(
+            tick(nse, time(9, 15, 10), 100.0, 250L, lastTradeQty = 250L)
+        )
+
+        assertTrue(result.accepted)
+        assertEquals(250L, result.currentBase?.volume)
+    }
+
+    @Test
+    fun diagnosticsTrackAcceptedDuplicateAndFallbackTicks() {
+        val engine = CandleEngine()
+        val first = tick(nse, time(9, 15, 10), 100.0, 1_000L)
+
+        engine.addTick(first)
+        engine.addTick(first)
+        engine.addTick(
+            MarketTick(
+                key = nse,
+                ltp = 101.0,
+                volume = 1_100L,
+                lastTradeTime = time(8, 0, 0),
+                receivedAt = time(9, 16, 5)
+            )
+        )
+
+        val diagnostics = engine.diagnostics()
+        assertEquals(2L, diagnostics.accepted)
+        assertEquals(1L, diagnostics.duplicatesRejected)
+        assertEquals(1L, diagnostics.deviceFallbackTicks)
+        assertEquals(0L, diagnostics.exchangeUpdateTicks)
+    }
+
+    @Test
+    fun cdsIntradayBucketsUseCdsSessionOpen() {
+        assertEquals(
+            time(9, 0, 0),
+            TimeframeBuckets.bucketStart(time(9, 7, 30), "15m", "CDS")
+        )
+        assertEquals(
+            time(9, 15, 0),
+            TimeframeBuckets.bucketStart(time(9, 17, 0), "15m", "CDS")
+        )
+    }
+
+    @Test
+    fun preOpenIntradayTicksUseSameSessionAnchoredGrid() {
+        assertEquals(
+            time(9, 0, 0),
+            TimeframeBuckets.bucketStart(time(9, 14, 59), "15m", "NSE")
+        )
+        assertEquals(
+            time(9, 15, 0),
+            TimeframeBuckets.bucketStart(time(9, 15, 0), "15m", "NSE")
+        )
+    }
+
+    @Test
+    fun unsupportedTimeframeLabelDoesNotProduceBucket() {
+        assertEquals(
+            0L,
+            TimeframeBuckets.bucketStart(time(9, 15, 10), "banana", "NSE")
+        )
+    }
+
+    @Test
+    fun minuteAliasesDoNotBreakMinuteMonthDistinction() {
+        assertEquals(MarketTimeframe.MIN_5, MarketTimeframe.fromLabel("5min"))
+        assertEquals(MarketTimeframe.HOUR_1, MarketTimeframe.fromLabel("60m"))
+        assertEquals(null, MarketTimeframe.fromLabel("5M"))
+        assertEquals(MarketTimeframe.MONTH_1, MarketTimeframe.fromLabel("1M"))
+    }
+
     private fun tick(
         key: InstrumentKey,
         timestamp: Long,

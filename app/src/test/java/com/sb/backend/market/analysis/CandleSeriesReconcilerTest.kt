@@ -1,9 +1,11 @@
 package com.sb.backend.market.analysis
 
+import com.sb.backend.market.TimeframeBuckets
 import com.sb.backend.market.model.MarketCandle
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.Calendar
 
 class CandleSeriesReconcilerTest {
 
@@ -36,6 +38,22 @@ class CandleSeriesReconcilerTest {
         assertEquals(103.0, result.last().close, 0.0001)
     }
 
+    @Test fun bucketAlignmentPreventsDuplicateNearBoundary() {
+        val bucket = ist(9, 15, 0)
+        val historical = c(ist(9, 17, 59), 100.0, 101.0, 99.0, 100.5)
+        val live = c(bucket, 101.0, 108.0, 95.0, 107.0, 20L)
+
+        val merged = CandleSeriesReconciler.merge(
+            sources = listOf(listOf(historical), listOf(live)),
+            timeframeLabel = "15m",
+            exchange = "NSE"
+        )
+
+        assertEquals(1, merged.size)
+        assertEquals(bucket, merged.single().timestamp)
+        assertEquals(live, merged.single())
+    }
+
     @Test fun limitKeepsNewestCandles() {
         val result = CandleSeriesReconciler.merge(
             listOf((1L..5L).map { c(1_700_000_000_000L + (it - 1L) * 60_000L, 100.0, 101.0, 99.0, 100.5) }),
@@ -44,4 +62,10 @@ class CandleSeriesReconcilerTest {
         assertEquals(listOf(1_700_000_180_000L, 1_700_000_240_000L), result.map { it.timestamp })
         assertTrue(result.all { it.isValid })
     }
+
+    private fun ist(hour: Int, minute: Int, second: Int): Long =
+        Calendar.getInstance(TimeframeBuckets.IST).apply {
+            clear()
+            set(2026, Calendar.JANUARY, 5, hour, minute, second)
+        }.timeInMillis
 }

@@ -51,6 +51,7 @@ object KotakSessionCoordinator {
 
     private val syncing = AtomicBoolean(false)
     private val connecting = AtomicBoolean(false)
+    private val reloginIssued = AtomicBoolean(false)
 
     @Volatile
     private var started = false
@@ -96,6 +97,7 @@ object KotakSessionCoordinator {
     }
 
     fun startAutoLogin() {
+        reloginIssued.set(false)
         val store = store()
 
         synchronized(lock) {
@@ -671,6 +673,21 @@ object KotakSessionCoordinator {
         Log.d(TAG, message)
 
         val lower = message.toLowerCase()
+
+        if (lower.contains("authenticated")) {
+            reloginIssued.set(false)
+        } else if (
+            lower.contains("authentication failed") &&
+            !reloginIssued.getAndSet(true)
+        ) {
+            synchronized(lock) {
+                val manager = autoLoginManager
+                if (manager?.isRunning() == true) {
+                    manager.loginNow()
+                }
+            }
+        }
+
         when {
             lower.contains("live ticks") || lower.contains("authenticated") ->
                 MarketDataManager.updateConnection(MarketDataManager.ConnectionState.AUTHENTICATED)

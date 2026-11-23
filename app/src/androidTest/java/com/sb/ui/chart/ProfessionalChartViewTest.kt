@@ -57,7 +57,7 @@ class ProfessionalChartViewTest {
     }
 
     @Test
-    fun verticalDragDoesNotScalePriceRange() {
+    fun verticalDragPansPriceRangeWithoutChangingSpan() {
         val view = createView()
         val geometry = geometry(view)
         val left = geometry.float("left")
@@ -66,27 +66,81 @@ class ProfessionalChartViewTest {
         val bottom = geometry.float("priceBottom")
         val centerX = (left + right) / 2f
         val centerY = (top + bottom) / 2f
-        val startSpan = geometry.double("maxPrice") - geometry.double("minPrice")
+        val startMin = geometry.double("minPrice")
+        val startSpan = geometry.double("maxPrice") - startMin
         val initialOffset = view.float("scrollOffset")
         val slop = ViewConfiguration.get(view.context).scaledTouchSlop.toFloat()
         val triggerY = centerY - slop - 1f
+        val dragDistance = 120f
 
         val events = Events()
         view.dispatchTouchEvent(events.down(centerX, centerY))
         view.dispatchTouchEvent(events.move(centerX, triggerY))
-        view.dispatchTouchEvent(events.move(centerX, triggerY - 120f))
-        view.dispatchTouchEvent(events.cancel(centerX, triggerY - 120f))
+        view.dispatchTouchEvent(events.move(centerX, triggerY - dragDistance))
+        view.dispatchTouchEvent(events.cancel(centerX, triggerY - dragDistance))
 
         render(view)
         val after = geometry(view)
+        val manual = view.any("manualPriceRange") as? PriceRange
+        assertNotNull(manual)
         assertEquals(initialOffset, view.float("scrollOffset"), 0.0001f)
         assertEquals(0f, view.float("horizontalOverscroll"), 0.0001f)
-        assertNull(view.any("manualPriceRange"))
         assertEquals(
             startSpan,
             after.double("maxPrice") - after.double("minPrice"),
-            startSpan * 0.0001
+            startSpan * 0.001
         )
+        assertEquals(
+            startMin - dragDistance / (bottom - top) * startSpan,
+            after.double("minPrice"),
+            startSpan * 0.01
+        )
+    }
+
+    @Test
+    fun longPressActivatesCrosshairAndBlocksPanningUntilRelease() {
+        val view = createView()
+        val geometry = geometry(view)
+        val centerX = (geometry.float("left") + geometry.float("right")) / 2f
+        val centerY = (geometry.float("priceTop") + geometry.float("priceBottom")) / 2f
+        val initialOffset = view.float("scrollOffset")
+
+        val events = Events()
+        view.dispatchTouchEvent(events.down(centerX, centerY))
+        assertFalse(view.boolean("crosshairVisible"))
+        assertTrue(view.boolean("isTouchDown"))
+
+        (view.any("crosshairHoldRunnable") as Runnable).run()
+        assertTrue(view.boolean("crosshairVisible"))
+        assertFalse(view.boolean("isPanning"))
+        assertFalse(view.boolean("isPricePanning"))
+        assertTrue(view.int("crosshairIndex") >= 0)
+
+        view.dispatchTouchEvent(events.move(centerX + 80f, centerY - 40f))
+        assertEquals(initialOffset, view.float("scrollOffset"), 0.0001f)
+        assertNull(view.any("manualPriceRange"))
+        assertTrue(view.boolean("crosshairVisible"))
+
+        view.dispatchTouchEvent(events.up(centerX + 80f, centerY - 40f))
+        assertFalse(view.boolean("crosshairVisible"))
+        assertEquals(-1, view.int("crosshairIndex"))
+    }
+
+    @Test
+    fun livePriceOutsideManualRangeShiftsRangeWithoutChangingSpan() {
+        val view = createView()
+        val geometry = geometry(view)
+        val min = geometry.double("minPrice")
+        val max = geometry.double("maxPrice")
+        val span = max - min
+        setField(view, "manualPriceRange", PriceRange(min, max))
+
+        view.lastPrice = max + span * 0.1
+
+        val shifted = view.any("manualPriceRange") as PriceRange
+        assertEquals(span, shifted.max - shifted.min, span * 0.001)
+        assertTrue(shifted.max >= view.double("lastPrice"))
+        assertTrue(shifted.min > min)
     }
 
     @Test
@@ -383,7 +437,7 @@ class ProfessionalChartViewTest {
         assertRegionsEqual(
             baseline,
             after,
-            (geometry.float("right") + (4f * density).toInt()).coerceAtMost(view.width - 1),
+            (geometry.float("right") + 4f * density).toInt().coerceAtMost(view.width - 1),
             view.width - 1,
             geometry.float("top").toInt() + 1,
             geometry.float("bottom").toInt() - 1

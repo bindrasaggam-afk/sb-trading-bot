@@ -26,7 +26,17 @@ class KotakNeoWebSocketClient(
 
     companion object {
         private const val MAX_RECONNECT_DELAY = 30_000L
+        private const val MAX_RECONNECT_ATTEMPTS = 6
         private const val MAX_SUBSCRIPTION_BATCH = 3000
+        private const val NORMAL_CLOSE_CODE = 1000
+        private val RESERVED_CLOSE_CODES = setOf(1004, 1005, 1006, 1015)
+
+        internal fun closeResponseCode(code: Int): Int =
+            if (code in 1000..4999 && code !in RESERVED_CLOSE_CODES) {
+                code
+            } else {
+                NORMAL_CLOSE_CODE
+            }
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -119,6 +129,7 @@ class KotakNeoWebSocketClient(
         }
 
         manuallyClosed.set(false)
+        reconnectAttempts = 0
 
         mainHandler.removeCallbacks(reconnectRunnable)
 
@@ -263,7 +274,7 @@ class KotakNeoWebSocketClient(
                 code: Int,
                 reason: String
             ) {
-                webSocket.close(code, reason)
+                webSocket.close(closeResponseCode(code), "Closing")
             }
 
             override fun onClosed(
@@ -278,7 +289,11 @@ class KotakNeoWebSocketClient(
                 socket = null
 
                 status(
-                    "ERROR | WebSocket closed: $code $reason"
+                    if (code == 1005) {
+                        "WARNING | WebSocket closed by peer without status code; reconnecting..."
+                    } else {
+                        "ERROR | WebSocket closed: $code $reason"
+                    }
                 )
 
                 scheduleReconnect()
@@ -659,6 +674,14 @@ class KotakNeoWebSocketClient(
             manuallyClosed.get() ||
             shutdown.get()
         ) {
+            return
+        }
+
+        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+            status(
+                "ERROR | WebSocket reconnection stopped after " +
+                    "$MAX_RECONNECT_ATTEMPTS attempts. Re-login required."
+            )
             return
         }
 

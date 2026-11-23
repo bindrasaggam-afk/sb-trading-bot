@@ -1,11 +1,13 @@
 package com.sb.backend.market
 
-import com.sb.backend.market.TimeframeBuckets.IST
 import java.util.Calendar
 import java.util.Locale
+import java.util.TimeZone
 import java.util.concurrent.ConcurrentHashMap
 
 object ExchangeSessionCalendar {
+
+    private val IST: TimeZone = TimeZone.getTimeZone("Asia/Kolkata")
 
     private data class Session(val openMinute: Int, val closeMinute: Int)
 
@@ -76,6 +78,34 @@ object ExchangeSessionCalendar {
 
         return minuteOfDay in session.openMinute until session.closeMinute
     }
+
+    fun isWithinSessionWindow(
+        timestamp: Long,
+        exchange: String,
+        toleranceMinutes: Int = 0
+    ): Boolean {
+        if (timestamp <= 0L) return false
+
+        val calendar = Calendar.getInstance(IST).apply { timeInMillis = timestamp }
+        val dayOfWeek = calendar.get(Calendar.DAY_OF_WEEK)
+        if (dayOfWeek == Calendar.SATURDAY || dayOfWeek == Calendar.SUNDAY) {
+            return false
+        }
+
+        val session = sessions[normalizeExchange(exchange)] ?: defaultSession
+        val minuteOfDay = calendar.get(Calendar.HOUR_OF_DAY) * 60 +
+            calendar.get(Calendar.MINUTE)
+        val tolerance = toleranceMinutes.coerceAtLeast(0)
+
+        return minuteOfDay >= session.openMinute - tolerance &&
+            minuteOfDay < session.closeMinute + tolerance
+    }
+
+    fun sessionOpenMinute(exchange: String): Int =
+        (sessions[normalizeExchange(exchange)] ?: defaultSession).openMinute
+
+    fun sessionCloseMinute(exchange: String): Int =
+        (sessions[normalizeExchange(exchange)] ?: defaultSession).closeMinute
 
     private fun normalizeExchange(exchange: String): String {
         return exchange.trim().uppercase(Locale.ROOT)

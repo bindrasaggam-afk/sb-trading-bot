@@ -95,6 +95,9 @@ object MarketDataManager {
     private val tickListeners =
         CopyOnWriteArraySet<(MarketTick) -> Unit>()
 
+    private val candleResultListeners =
+        CopyOnWriteArraySet<(MarketTick, CandleEngine.TickResult) -> Unit>()
+
     // ------------------------------------------------------------
     // CONNECTION STATE
     // ------------------------------------------------------------
@@ -155,6 +158,26 @@ object MarketDataManager {
             com.sb.backend.market.model.MarketTimeframe.MIN_1
     ) = candleEngine.seed(key, timeframe, candles)
 
+    fun candleAt(
+        key: InstrumentKey,
+        timeframe: com.sb.backend.market.model.MarketTimeframe,
+        timestamp: Long
+    ): com.sb.backend.market.model.MarketCandle? =
+        candleEngine.candleAt(key, timeframe, timestamp)
+
+    fun latestCandle(
+        key: InstrumentKey,
+        timeframe: com.sb.backend.market.model.MarketTimeframe
+    ): com.sb.backend.market.model.MarketCandle? =
+        candleEngine.candles(key, timeframe).lastOrNull()
+
+    fun candleDiagnostics(): CandleEngine.Diagnostics =
+        candleEngine.diagnostics()
+
+    fun clearCandles() {
+        candleEngine.clear()
+    }
+
     // ------------------------------------------------------------
     // CONNECTION
     // ------------------------------------------------------------
@@ -204,6 +227,14 @@ object MarketDataManager {
         tickListeners.forEach { listener ->
             try {
                 listener(tick)
+            } catch (_: Exception) {
+                // Isolate listener failures.
+            }
+        }
+
+        candleResultListeners.forEach { listener ->
+            try {
+                listener(tick, result)
             } catch (_: Exception) {
                 // Isolate listener failures.
             }
@@ -293,6 +324,18 @@ object MarketDataManager {
 
     fun removeTickListener(listener: (MarketTick) -> Unit) {
         tickListeners.remove(listener)
+    }
+
+    fun addCandleResultListener(
+        listener: (MarketTick, CandleEngine.TickResult) -> Unit
+    ) {
+        candleResultListeners.add(listener)
+    }
+
+    fun removeCandleResultListener(
+        listener: (MarketTick, CandleEngine.TickResult) -> Unit
+    ) {
+        candleResultListeners.remove(listener)
     }
 
     // ------------------------------------------------------------

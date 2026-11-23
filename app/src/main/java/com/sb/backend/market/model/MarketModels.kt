@@ -2,6 +2,7 @@
 package com.sb.backend.market.model
 
 import com.sb.backend.market.MarketDataManager
+import com.sb.backend.market.TickTimePolicy
 import java.util.Locale
 import kotlin.math.max
 import kotlin.math.min
@@ -90,6 +91,27 @@ data class MarketTick(
                 receivedAt > 0L &&
                 bids.all { it.isValid } &&
                 asks.all { it.isValid }
+
+    val timestampResolution: TickTimePolicy.Resolution
+        get() = TickTimePolicy.resolve(
+            tradeTime = lastTradeTime,
+            updateTime = exchangeTime,
+            receivedAt = receivedAt,
+            exchange = key.exchange
+        )
+
+    val eventTimeMillis: Long
+        get() = timestampResolution.eventTimeMillis
+
+    val timestampSource: String
+        get() = timestampResolution.source.name
+
+    val volumeMode: String
+        get() = when {
+            volume > 0L -> "CUMULATIVE"
+            lastTradeQty > 0L -> "INCREMENTAL"
+            else -> "NONE"
+        }
 
     companion object {
         private const val MILLIS_THRESHOLD = 10_000_000_000L
@@ -260,8 +282,9 @@ enum class MarketTimeframe(
 
     companion object {
         /**
-         * Resolve only canonical labels. Matching is case-sensitive by design:
-         * '1m' is one minute, while '1M' is one calendar month.
+         * Resolve canonical labels plus lowercase minute aliases.
+         * Matching is case-sensitive by design: '1m' is one minute,
+         * while '1M' is one calendar month.
          */
         fun fromLabel(label: String): MarketTimeframe? {
             return when (label.trim()) {
@@ -272,9 +295,18 @@ enum class MarketTimeframe(
                 "10m" -> MIN_10
                 "15m" -> MIN_15
                 "30m" -> MIN_30
+                "1min" -> MIN_1
+                "2min" -> MIN_2
+                "3min" -> MIN_3
+                "5min" -> MIN_5
+                "10min" -> MIN_10
+                "15min" -> MIN_15
+                "30min" -> MIN_30
                 "1h" -> HOUR_1
                 "2h" -> HOUR_2
                 "4h" -> HOUR_4
+                "60m" -> HOUR_1
+                "60min" -> HOUR_1
                 "1D" -> DAY_1
                 "1W" -> WEEK_1
                 "2W" -> WEEK_2

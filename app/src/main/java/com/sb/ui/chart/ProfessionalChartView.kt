@@ -49,10 +49,7 @@ class ProfessionalChartView @JvmOverloads constructor(
             removeCallbacks(crosshairHoldRunnable)
             recycleVelocityTracker()
             cancelAnimations()
-            isTouchDown = false
-            crosshairHoldActivated = false
-            isPanning = false
-            isPricePanning = false
+            setGestureState(GestureState.IDLE)
             pendingPoints.clear()
             crosshairVisible = false
             onCrosshairChanged?.invoke(null, -1)
@@ -104,6 +101,7 @@ class ProfessionalChartView @JvmOverloads constructor(
             if (field == next) return
             field = next
             if (next != null) {
+                keepLastPriceInManualRange(next)
                 startLastPricePulse()
             } else {
                 lastPricePulseAnimator?.cancel()
@@ -135,6 +133,23 @@ class ProfessionalChartView @JvmOverloads constructor(
     private var visibleCount = 40f
     private var followLatest = true
 
+    private enum class GestureState {
+        IDLE,
+        PENDING,
+        CROSSHAIR,
+        PAN,
+        PRICE_PAN,
+        AXIS_ZOOM,
+        PINCH
+    }
+
+    private var gestureState: GestureState = GestureState.IDLE
+
+    var crosshairHoldDelayMs: Long = 3_000L
+        set(value) {
+            field = value.coerceIn(3_000L, 5_000L)
+        }
+
     private var crosshairVisible = false
     private var crosshairX = 0f
     private var crosshairY = 0f
@@ -159,7 +174,7 @@ class ProfessionalChartView @JvmOverloads constructor(
     private var lastGeometry: Geometry? = null
 
     private val crosshairHoldRunnable = Runnable {
-        if (!isTouchDown) {
+        if (gestureState != GestureState.PENDING) {
             return@Runnable
         }
 
@@ -169,9 +184,7 @@ class ProfessionalChartView @JvmOverloads constructor(
             return@Runnable
         }
 
-        crosshairHoldActivated = true
-        isPanning = false
-        isPricePanning = false
+        setGestureState(GestureState.CROSSHAIR)
 
         crosshairVisible = true
         crosshairX = previewX.coerceIn(geometry.left, geometry.right)
@@ -203,6 +216,18 @@ class ProfessionalChartView @JvmOverloads constructor(
     private var axisMaxSpan = 0.0
     private var suppressNextAxisDown = false
     private var velocityTracker: VelocityTracker? = null
+
+    private var pricePanStartY = 0f
+    private var pricePanStartRange = PriceRange(0.0, 1.0)
+
+    private fun setGestureState(next: GestureState) {
+        gestureState = next
+        isTouchDown = next != GestureState.IDLE
+        crosshairHoldActivated = next == GestureState.CROSSHAIR
+        isPanning = next == GestureState.PAN
+        isPricePanning = next == GestureState.PRICE_PAN || next == GestureState.AXIS_ZOOM
+        isAxisZooming = next == GestureState.AXIS_ZOOM
+    }
     private var scrollAnimator: ValueAnimator? = null
     private var priceAnimator: ValueAnimator? = null
     private var lastPricePulseAnimator: ValueAnimator? = null
@@ -800,6 +825,40 @@ class ProfessionalChartView @JvmOverloads constructor(
             geometry.priceTop,
             geometry.priceBottom
         )
+    }
+
+    private fun keepLastPriceInManualRange(price: Double) {
+        val range = manualPriceRange?.takeIf { it.isValid() } ?: return
+        if (priceAnimator != null ||
+            gestureState == GestureState.AXIS_ZOOM ||
+            gestureState == GestureState.PRICE_PAN
+        ) {
+            return
+        }
+
+        val span = range.max - range.min
+        if (span <= 0.0 || !span.isFinite()) return
+
+        val padding = span * 0.05
+        val shifted = when {
+            price < range.min -> PriceScaleEngine.sanitizeRange(
+                price - padding,
+                price - padding + span
+            )
+
+            price > range.max -> PriceScaleEngine.sanitizeRange(
+                price + padding - span,
+                price + padding
+            )
+
+            else -> return
+        }
+
+        if (abs(shifted.min - range.min) > 1.0e-9 ||
+            abs(shifted.max - range.max) > 1.0e-9
+        ) {
+            manualPriceRange = shifted
+        }
     }
 
     private fun xFor(index: Int, geometry: Geometry): Float {
@@ -2003,11 +2062,11 @@ class ProfessionalChartView @JvmOverloads constructor(
             return true
         }
 
-        if (isAxisZooming && event.pointerCount > 1) {
+        if (gestureState == GestureState.AXIS_ZOOM && event.pointerCount > 1) {
             finishAxisZoom(0f, cancelled = true)
         }
 
-        if (isAxisZooming) {
+        if (gestureState == GestureState.AXIS_ZOOM) {
             when (event.actionMasked) {
                 MotionEvent.ACTION_MOVE -> {
                     axisLastY = event.y
@@ -2018,13 +2077,11 @@ class ProfessionalChartView @JvmOverloads constructor(
                 MotionEvent.ACTION_UP -> {
                     val velocityY = consumeVelocity().second
                     removeCallbacks(crosshairHoldRunnable)
-                    isTouchDown = false
-                    crosshairHoldActivated = false
-                    isPricePanning = false
                     crosshairIndex = -1
-                    finishAxisZoom(velocityY, cancelled = false)
                     crosshairVisible = false
                     onCrosshairChanged?.invoke(null, -1)
+                    finishAxisZoom(velocityY, cancelled = false)
+                    setGestureState(GestureState.IDLE)
                     invalidate()
                     performClick()
                     return true
@@ -2032,13 +2089,11 @@ class ProfessionalChartView @JvmOverloads constructor(
 
                 MotionEvent.ACTION_CANCEL -> {
                     removeCallbacks(crosshairHoldRunnable)
-                    isTouchDown = false
-                    crosshairHoldActivated = false
-                    isPricePanning = false
                     crosshairIndex = -1
-                    finishAxisZoom(0f, cancelled = true)
                     crosshairVisible = false
                     onCrosshairChanged?.invoke(null, -1)
+                    finishAxisZoom(0f, cancelled = true)
+                    setGestureState(GestureState.IDLE)
                     invalidate()
                     return true
                 }
@@ -2048,22 +2103,20 @@ class ProfessionalChartView @JvmOverloads constructor(
         scaleDetector.onTouchEvent(event)
 
         if (scaleDetector.isInProgress) {
-            if (event.actionMasked == MotionEvent.ACTION_UP ||
+            val ending = event.actionMasked == MotionEvent.ACTION_UP ||
                 event.actionMasked == MotionEvent.ACTION_CANCEL
-            ) {
+            if (ending) {
                 recycleVelocityTracker()
             }
+            setGestureState(if (ending) GestureState.IDLE else GestureState.PINCH)
             removeCallbacks(crosshairHoldRunnable)
-            isTouchDown = false
-            crosshairHoldActivated = false
-            isPanning = false
-            isPricePanning = false
             lastTouchX = event.x
             lastTouchY = event.y
             touchStartX = event.x
             touchStartY = event.y
             horizontalOverscroll = 0f
             crosshairVisible = false
+            crosshairIndex = -1
             onCrosshairChanged?.invoke(null, -1)
             invalidate()
             return true
@@ -2072,39 +2125,37 @@ class ProfessionalChartView @JvmOverloads constructor(
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 cancelAnimations()
+                setGestureState(GestureState.PENDING)
                 lastTouchX = event.x
                 lastTouchY = event.y
                 touchStartX = event.x
                 touchStartY = event.y
-                    isPanning = false
-                    isPricePanning = false
-                    drawingStartValid = false
-                    panRawOffset = scrollOffset
-                    horizontalOverscroll = 0f
+                drawingStartValid = false
+                panRawOffset = scrollOffset
+                horizontalOverscroll = 0f
 
-                    previewX = event.x
-                    previewY = event.y
+                previewX = event.x
+                previewY = event.y
 
-                    val geometry = computeGeometry()
-                    if (geometry != null &&
-                        isInsidePricePlotArea(event.x, event.y, geometry)
-                    ) {
-                        drawingStartValid = true
-                    }
-                    if (geometry != null &&
-                        isInsidePriceAxis(event.x, event.y, geometry)
-                    ) {
+                val geometry = computeGeometry()
+                if (geometry != null &&
+                    isInsidePricePlotArea(event.x, event.y, geometry)
+                ) {
+                    drawingStartValid = true
+                }
+                if (geometry != null &&
+                    isInsidePriceAxis(event.x, event.y, geometry)
+                ) {
                     startAxisZoom(event.y, geometry)
                     invalidate()
                     return true
                 }
 
-                isTouchDown = true
-                crosshairHoldActivated = false
+                setGestureState(GestureState.PENDING)
                 crosshairVisible = false
                 crosshairIndex = -1
 
-                postDelayed(crosshairHoldRunnable, 3_000L)
+                postDelayed(crosshairHoldRunnable, crosshairHoldDelayMs)
 
                 invalidate()
                 return true
@@ -2117,13 +2168,13 @@ class ProfessionalChartView @JvmOverloads constructor(
                 val movedX = abs(event.x - touchStartX)
                 val movedY = abs(event.y - touchStartY)
 
-                if (!crosshairHoldActivated &&
+                if (gestureState == GestureState.PENDING &&
                     (movedX > touchSlop || movedY > touchSlop)
                 ) {
                     removeCallbacks(crosshairHoldRunnable)
                 }
 
-                if (crosshairHoldActivated) {
+                if (gestureState == GestureState.CROSSHAIR) {
                     val geometry = computeGeometry()
 
                     if (geometry != null) {
@@ -2149,26 +2200,52 @@ class ProfessionalChartView @JvmOverloads constructor(
                     return true
                 }
 
-                if (!isPanning &&
+                if (gestureState == GestureState.PENDING &&
                     (movedX > touchSlop || movedY > touchSlop)
                 ) {
                     removeCallbacks(crosshairHoldRunnable)
-                    isPanning = true
-                    panRawOffset = scrollOffset
-                    lastTouchX = event.x
+                    cancelAnimations()
+
+                    if (movedX >= movedY) {
+                        setGestureState(GestureState.PAN)
+                        panRawOffset = scrollOffset
+                        lastTouchX = event.x
+                    } else {
+                        val panGeometry = lastGeometry ?: computeGeometry()
+                        setGestureState(GestureState.PRICE_PAN)
+                        pricePanStartY = event.y
+                        pricePanStartRange = manualPriceRange?.takeIf { it.isValid() }
+                            ?: panGeometry?.let { computeAutoPriceRange(it.start, it.end) }
+                            ?: PriceRange(0.0, 1.0)
+                        lastTouchY = event.y
+                    }
 
                     crosshairVisible = false
                     crosshairIndex = -1
                     onCrosshairChanged?.invoke(null, -1)
                 }
 
-                if (isPanning) {
+                if (gestureState == GestureState.PAN) {
                     val deltaX = event.x - lastTouchX
                     val geometry = lastGeometry ?: computeGeometry()
 
                     if (geometry != null && geometry.slot > 0f) {
                         panRawOffset -= deltaX / geometry.slot
                         applyPanOffset(geometry)
+                    }
+                }
+
+                if (gestureState == GestureState.PRICE_PAN) {
+                    val geometry = lastGeometry ?: computeGeometry()
+
+                    if (geometry != null) {
+                        val height = max(1f, geometry.priceBottom - geometry.priceTop)
+                        val span = pricePanStartRange.max - pricePanStartRange.min
+                        val shift = ((event.y - pricePanStartY) / height) * span
+                        manualPriceRange = PriceScaleEngine.sanitizeRange(
+                            pricePanStartRange.min + shift,
+                            pricePanStartRange.max + shift
+                        )
                     }
                 }
 
@@ -2180,19 +2257,20 @@ class ProfessionalChartView @JvmOverloads constructor(
 
             MotionEvent.ACTION_UP -> {
                 val velocityX = consumeVelocity().first
-                val wasCrosshair = crosshairHoldActivated
+                val wasCrosshair = gestureState == GestureState.CROSSHAIR
+                val wasPanning = gestureState == GestureState.PAN
+                val wasPriceGesture = gestureState == GestureState.PRICE_PAN
 
                 removeCallbacks(crosshairHoldRunnable)
-                isTouchDown = false
-                crosshairHoldActivated = false
+                setGestureState(GestureState.IDLE)
                 crosshairIndex = -1
                 crosshairVisible = false
                 onCrosshairChanged?.invoke(null, -1)
 
                 val releaseGeometry = lastGeometry ?: computeGeometry()
-                if (isPanning) {
+                if (wasPanning) {
                     finishPan(velocityX, releaseGeometry)
-                } else if (!isPricePanning &&
+                } else if (!wasPriceGesture &&
                     !wasCrosshair &&
                     activeTool != ChartTool.CROSSHAIR &&
                     drawingStartValid &&
@@ -2202,8 +2280,6 @@ class ProfessionalChartView @JvmOverloads constructor(
                     handleDrawingTap(event.x, event.y)
                 }
 
-                isPanning = false
-                isPricePanning = false
                 previewX = 0f
                 previewY = 0f
 
@@ -2215,20 +2291,19 @@ class ProfessionalChartView @JvmOverloads constructor(
             MotionEvent.ACTION_CANCEL -> {
                 recycleVelocityTracker()
 
+                val wasPanning = gestureState == GestureState.PAN
+
                 removeCallbacks(crosshairHoldRunnable)
-                isTouchDown = false
-                crosshairHoldActivated = false
+                setGestureState(GestureState.IDLE)
                 drawingStartValid = false
                 crosshairIndex = -1
                 crosshairVisible = false
                 onCrosshairChanged?.invoke(null, -1)
 
-                if (isPanning) {
+                if (wasPanning) {
                     finishPan(0f, lastGeometry ?: computeGeometry())
                 }
 
-                isPanning = false
-                isPricePanning = false
                 previewX = 0f
                 previewY = 0f
 
@@ -2242,14 +2317,14 @@ class ProfessionalChartView @JvmOverloads constructor(
 
     private fun startAxisZoom(y: Float, geometry: Geometry) {
         cancelAnimations()
+        removeCallbacks(crosshairHoldRunnable)
 
         val autoRange = computeAutoPriceRange(geometry.start, geometry.end)
         val currentRange = manualPriceRange?.takeIf { it.isValid() } ?: autoRange
         val height = max(1f, geometry.priceBottom - geometry.priceTop)
         val anchorRatio = ((geometry.priceBottom - y) / height).coerceIn(0f, 1f)
 
-        isAxisZooming = true
-        isPricePanning = true
+        setGestureState(GestureState.AXIS_ZOOM)
         axisStartY = y
         axisLastY = y
         axisStartRange = currentRange
@@ -2280,9 +2355,8 @@ class ProfessionalChartView @JvmOverloads constructor(
     }
 
     private fun finishAxisZoom(velocityY: Float, cancelled: Boolean) {
-        if (!isAxisZooming) return
-        isAxisZooming = false
-        isPricePanning = false
+        if (gestureState != GestureState.AXIS_ZOOM) return
+        setGestureState(GestureState.IDLE)
 
         val geometry = lastGeometry ?: computeGeometry()
         val currentRange = manualPriceRange ?: axisStartRange
@@ -2458,10 +2532,7 @@ class ProfessionalChartView @JvmOverloads constructor(
 
     override fun onDetachedFromWindow() {
         removeCallbacks(crosshairHoldRunnable)
-        isTouchDown = false
-        crosshairHoldActivated = false
-        isPanning = false
-        isPricePanning = false
+        setGestureState(GestureState.IDLE)
         drawingStartValid = false
         lastPricePulseAnimator?.cancel()
         lastPricePulseAnimator = null
