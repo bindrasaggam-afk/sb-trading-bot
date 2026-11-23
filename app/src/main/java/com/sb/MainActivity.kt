@@ -42,6 +42,7 @@ import com.sb.signals.services.SignalsPlatform
 import com.sb.ui.market.InstrumentLiveViewModel
 import com.sb.ui.market.MarketListAdapter
 import com.sb.ui.market.MarketListItem
+import com.sb.ui.monitor.LiveTokenMonitor
 import com.sb.ui.theme.AppDesign
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -96,6 +97,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var liveViewModel: InstrumentLiveViewModel
     private var isChartFullscreen = false
     private var chartScreen: HeikinAshiChartScreen? = null
+    private var liveTokenMonitor: LiveTokenMonitor? = null
     private var dashboardMetricsUpdater: (() -> Unit)? = null
     private val dashboardSubscriptions = ArrayList<InstrumentKey>()
     private var chromeAnimator: ValueAnimator? = null
@@ -925,6 +927,8 @@ class MainActivity : AppCompatActivity() {
         // Do not stop BackendManager or Kotak live feed here.
         settingsScreen?.close()
         settingsScreen = null
+        liveTokenMonitor?.dismiss()
+        liveTokenMonitor = null
 
         super.onDestroy()
     }
@@ -2274,6 +2278,7 @@ class MainActivity : AppCompatActivity() {
             "Positions" to "▣",
             "Market" to "⌁",
             "All Instruments" to "☷",
+            "Live Token" to "◈",
             "No Live Price" to "⚠",
             "Chart" to "▥",
             "Stock Search" to "⌕",
@@ -2301,7 +2306,11 @@ class MainActivity : AppCompatActivity() {
                 isFocusable = true
                 setOnClickListener {
                     dialog.dismiss()
-                    showScreen(item.first)
+                    if (item.first == LIVE_TOKEN_MENU) {
+                        showLiveTokenMonitor()
+                    } else {
+                        showScreen(item.first)
+                    }
                 }
             }
 
@@ -2416,7 +2425,13 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    private fun showLiveTokenMonitor() {
+        liveTokenMonitor?.dismiss()
+        liveTokenMonitor = LiveTokenMonitor(this, lifecycleScope).apply { show() }
+    }
+
     private companion object {
         const val MAX_MISSING_LIVE_PRICE_ROWS = 2000
+        const val LIVE_TOKEN_MENU = "Live Token"
     }
 }
