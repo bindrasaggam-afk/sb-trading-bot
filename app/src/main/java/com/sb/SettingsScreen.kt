@@ -12,6 +12,7 @@ import com.sb.backend.security.LocalApiToken
 import com.sb.backend.services.KotakNeoAuthClient
 import com.sb.backend.services.KotakNeoMarketDataService
 import com.sb.backend.services.KotakSessionCoordinator
+import com.sb.backend.services.MarketRuntimeService
 import com.sb.backend.core.BackendManager
 import com.sb.ui.theme.AppDesign
 import java.text.DecimalFormat
@@ -250,6 +251,58 @@ class SettingsScreen(private val context: Context) {
 
         body.addView(actionButton("Disconnect Kotak Live Feed") {
             disconnectLiveFeed()
+        })
+
+        label(body, "Candle Persistence Test", 18f, yellow, true)
+        label(
+            body,
+            "FAST uses a bounded background queue. DURABLE saves candles synchronously before the feed callback returns and can slow tick processing. This is not crash-proof outbox recovery.",
+            11f,
+            grey
+        )
+        val persistenceStats = TextView(context).apply {
+            text = MarketRuntimeService.persistenceStatsText()
+            textSize = 12f
+            setTextColor(white)
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+            background = AppDesign.fieldBackground(context, 9)
+        }
+        body.addView(persistenceStats)
+
+        body.addView(actionButton("FAST — Background Queue") {
+            MarketRuntimeService.setPersistenceMode(
+                MarketRuntimeService.CandlePersistenceMode.FAST
+            )
+            persistenceStats.text = MarketRuntimeService.persistenceStatsText()
+            statusText.text = "FAST persistence mode selected."
+            statusText.setTextColor(yellow)
+        })
+
+        body.addView(actionButton("DURABLE — Synchronous Save Test") {
+            AlertDialog.Builder(context)
+                .setTitle("Enable DURABLE test mode?")
+                .setMessage(
+                    "Each accepted tick will wait for candle database writes to finish. " +
+                        "This can slow live feed processing. It is not a crash-proof outbox."
+                )
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Enable") { _, _ ->
+                    MarketRuntimeService.setPersistenceMode(
+                        MarketRuntimeService.CandlePersistenceMode.DURABLE
+                    )
+                    persistenceStats.text = MarketRuntimeService.persistenceStatsText()
+                    statusText.text = "DURABLE synchronous-save test mode selected."
+                    statusText.setTextColor(yellow)
+                }
+                .create()
+                .also { dialog ->
+                    AppDesign.styleDialog(dialog)
+                    dialog.show()
+                }
+        })
+
+        body.addView(actionButton("Refresh Candle Persistence Stats") {
+            persistenceStats.text = MarketRuntimeService.persistenceStatsText()
         })
 
         body.addView(actionButton("Clear Saved Kotak Credentials") {

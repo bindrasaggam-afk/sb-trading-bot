@@ -12,9 +12,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -26,12 +28,22 @@ object MarketRuntimeService {
         RUNNING
     }
 
+    enum class CandlePersistenceMode {
+        FAST,
+        DURABLE
+    }
+
     data class RuntimeStatus(
         val state: RuntimeState = RuntimeState.STOPPED,
         val trackedInstruments: Int = 0,
         val processedTicks: Long = 0L,
         val lastTickAt: Long = 0L,
-        val lastError: String? = null
+        val lastError: String? = null,
+        val persistenceMode: CandlePersistenceMode = CandlePersistenceMode.FAST,
+        val savedCandles: Long = 0L,
+        val failedWrites: Long = 0L,
+        val queueDepth: Int = 0,
+        val synchronousWrites: Long = 0L
     )
 
     private const val SEED_LIMIT = 5_000
@@ -42,6 +54,10 @@ object MarketRuntimeService {
 
     private val running = AtomicBoolean(false)
     private val processedTicks = AtomicLong(0L)
+    private val savedCandles = AtomicLong(0L)
+    private val failedWrites = AtomicLong(0L)
+    private val synchronousWrites = AtomicLong(0L)
+    private val persistenceModeCode = AtomicLong(CandlePersistenceMode.FAST.ordinal.toLong())
     private val lastStatusAt = AtomicLong(0L)
 
     @Volatile
@@ -57,12 +73,42 @@ object MarketRuntimeService {
 
     private val executor: ExecutorService
         get() = synchronized(executorLock) {
-            executorRef ?: Executors.newSingleThreadExecutor { runnable ->
-                Thread(runnable, "market-runtime-persistence").apply {
-                    isDaemon = true
-                }
-            }.also { executorRef = it }
+            executorRef ?: ThreadPoolExecutor(
+                1,
+                1,
+                0L,
+                TimeUnit.MILLISECONDS,
+                ArrayBlockingQueue<Runnable>(2_048),
+                { runnable ->
+                    Thread(runnable, "market-runtime-persistence").apply {
+                        isDaemon = true
+                    }
+                },
+                ThreadPoolExecutor.CallerRunsPolicy()
+            ).also { executorRef = it }
         }
+
+    fun currentPersistenceMode(): CandlePersistenceMode {
+        val index = persistenceModeCode.get().toInt()
+        return CandlePersistenceMode.values().getOrElse(index) {
+            CandlePersistenceMode.FAST
+        }
+    }
+
+    fun setPersistenceMode(mode: CandlePersistenceMode) {
+        persistenceModeCode.set(mode.ordinal.toLong())
+        publishStatus(force = true)
+    }
+
+    fun persistenceStatsText(): String {
+        val queueSize = (executorRef as? ThreadPoolExecutor)?.queue?.size ?: 0
+        return "Mode: " + currentPersistenceMode().name +
+            "\nProcessed ticks: " + processedTicks.get() +
+            "\nSaved candles: " + savedCandles.get() +
+            "\nFailed writes: " + failedWrites.get() +
+            "\nQueue depth: " + queueSize +
+            "\nSynchronous writes: " + synchronousWrites.get()
+    }
 
     private val _status = MutableStateFlow(RuntimeStatus())
     val status: StateFlow<RuntimeStatus> = _status.asStateFlow()
@@ -175,6 +221,9 @@ object MarketRuntimeService {
     fun clear() {
         MarketDataManager.clearCandles()
         processedTicks.set(0L)
+        savedCandles.set(0L)
+        failedWrites.set(0L)
+        synchronousWrites.set(0L)
         lastTickAt = 0L
         lastError = null
         publishStatus(force = true)
@@ -219,45 +268,62 @@ object MarketRuntimeService {
             listOf(candle)
         }
 
-        try {
-            executor.execute {
-                try {
-                    finalized.forEach { (timeframe, candles) ->
-                        if (candles.isEmpty()) return@forEach
-
-                        val saved = saveCandlesWithRetry(
-                            key = key,
-                            timeframe = timeframe,
-                            candles = candles,
-                            isComplete = true
-                        )
-
-                        check(saved == candles.size) {
-                            "Candle persistence incomplete for $timeframe: " +
-                                "saved $saved of ${candles.size}"
-                        }
+        val persistCandles = {
+            try {
+                var savedTotal = 0
+                finalized.forEach { (timeframe, candles) ->
+                    if (candles.isEmpty()) return@forEach
+                    val saved = saveCandlesWithRetry(
+                        key = key,
+                        timeframe = timeframe,
+                        candles = candles,
+                        isComplete = true
+                    )
+                    check(saved == candles.size) {
+                        "Candle persistence incomplete for $timeframe: saved $saved of " +
+                            candles.size
                     }
-
-                    live.forEach { (timeframe, candles) ->
-                        val saved = saveCandlesWithRetry(
-                            key = key,
-                            timeframe = timeframe,
-                            candles = candles,
-                            isComplete = false
-                        )
-
-                        check(saved == candles.size) {
-                            "Live candle persistence incomplete for " +
-                                "$timeframe: saved $saved of ${candles.size}"
-                        }
-                    }
-
-                    SignalScanCoordinator.scan(key)
-                } catch (e: Exception) {
-                    recordError(e)
+                    savedTotal += saved
                 }
+                live.forEach { (timeframe, candles) ->
+                    val saved = saveCandlesWithRetry(
+                        key = key,
+                        timeframe = timeframe,
+                        candles = candles,
+                        isComplete = false
+                    )
+                    check(saved == candles.size) {
+                        "Live candle persistence incomplete for $timeframe: saved $saved of " +
+                            candles.size
+                    }
+                    savedTotal += saved
+                }
+                savedCandles.addAndGet(savedTotal.toLong())
+                publishStatus(force = true)
+            } catch (e: Exception) {
+                failedWrites.incrementAndGet()
+                recordError(e)
             }
-        } catch (_: RejectedExecutionException) {
+        }
+
+        if (currentPersistenceMode() == CandlePersistenceMode.DURABLE) {
+            synchronousWrites.incrementAndGet()
+            persistCandles()
+            try {
+                executor.execute { SignalScanCoordinator.scan(key) }
+            } catch (e: RejectedExecutionException) {
+                recordError(e)
+            }
+        } else {
+            try {
+                executor.execute {
+                    persistCandles()
+                    SignalScanCoordinator.scan(key)
+                }
+            } catch (e: RejectedExecutionException) {
+                failedWrites.incrementAndGet()
+                recordError(e)
+            }
         }
     }
 
@@ -323,7 +389,8 @@ object MarketRuntimeService {
                     recordError(e)
                 }
             }
-        } catch (_: RejectedExecutionException) {
+        } catch (e: RejectedExecutionException) {
+            recordError(e)
         }
     }
 
@@ -347,7 +414,12 @@ object MarketRuntimeService {
             trackedInstruments = tracked.size,
             processedTicks = processedTicks.get(),
             lastTickAt = lastTickAt,
-            lastError = lastError
+            lastError = lastError,
+            persistenceMode = currentPersistenceMode(),
+            savedCandles = savedCandles.get(),
+            failedWrites = failedWrites.get(),
+            queueDepth = (executorRef as? ThreadPoolExecutor)?.queue?.size ?: 0,
+            synchronousWrites = synchronousWrites.get()
         )
     }
 
