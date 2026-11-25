@@ -10,7 +10,7 @@ class SignalJsonConfigTest {
 
     @Test
     fun strategyConfigRoundTripsWithIndicatorParameters() {
-        val config = StrategyDefaults.intraday("1m").copy(
+        val config = StrategyDefaults.intraday("5m").copy(
             smaPeriod = 30,
             supertrendPeriod = 12,
             supertrendMultiplier = 2.5,
