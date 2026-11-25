@@ -42,7 +42,8 @@ object DatabaseSpecs {
 }
 
 object SBDatabaseVersion {
-    const val BACKEND = 11
+    // Keep this aligned with SBDatabaseHelper.DATABASE_VERSION.
+    const val BACKEND = 12
     const val SIGNALS = 4
 }
 
