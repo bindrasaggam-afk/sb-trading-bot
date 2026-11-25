@@ -79,10 +79,12 @@ class StrategyConfigTest {
         assertEquals("1M", delivery.trendTimeframe)
         assertEquals(60, swing.minConfirmationCandles)
         assertEquals(60, swing.minTrendCandles)
-        assertEquals(60, delivery.minConfirmationCandles)
-        assertEquals(60, delivery.minTrendCandles)
+        // Delivery intentionally uses a lower historical sample requirement to
+        // avoid requiring five years of monthly candles for signal eligibility.
+        assertEquals(30, delivery.minConfirmationCandles)
+        assertEquals(30, delivery.minTrendCandles)
         assertEquals("1.2.0", swing.version)
-        assertEquals("1.2.0", delivery.version)
+        assertEquals("1.1.0", delivery.version)
     }
 
     @Test
