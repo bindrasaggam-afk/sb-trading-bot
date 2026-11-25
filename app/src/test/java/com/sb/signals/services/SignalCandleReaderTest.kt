@@ -42,6 +42,33 @@ class SignalCandleReaderTest {
         }
     }
 
+    @Test
+    fun swingAndDeliveryUseDistinctHigherTrendTimeframes() {
+        val configs = listOf(
+            StrategyDefaults.swing(),
+            StrategyDefaults.delivery()
+        )
+        configs.forEach { config ->
+            val requested = ArrayList<String>()
+            val reader = SignalCandleReader(source = fakeSource(requested))
+            val series = reader.read(
+                symbol = "RELIANCE",
+                exchange = "NSE",
+                category = config.category,
+                config = config,
+                now = TestSignals.testNow
+            )
+            assertEquals(
+                listOf(config.primaryTimeframe, config.confirmationTimeframe, config.trendTimeframe),
+                requested
+            )
+            assertTrue(series.primary.quality.isUsable)
+            assertTrue(series.confirmation.quality.isUsable)
+            assertTrue(series.trend.quality.isUsable)
+            assertTrue(series.trend.closed.size >= config.minTrendCandles)
+        }
+    }
+
     private fun fakeSource(
         requested: MutableList<String>
     ): MarketHistorySource {
