@@ -13,6 +13,8 @@ import com.sb.backend.models.PaperExecutionKind
 import com.sb.backend.models.PaperOrder
 import com.sb.backend.models.PaperTradeEvent
 import com.sb.backend.models.Position
+import com.sb.backend.trading.KotakEquityCharges
+import com.sb.backend.trading.PaperChargeBreakdown
 import com.sb.backend.trading.PaperCapitalPolicy
 import com.sb.backend.trading.PaperCapitalState
 import com.sb.backend.trading.PaperSignalCandidate
