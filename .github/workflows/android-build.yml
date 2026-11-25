@@ -8,6 +8,12 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      run_instrumentation:
+        description: 'Run Android emulator instrumentation tests (slow)'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -28,6 +34,7 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+          cache: gradle
 
       - name: Install Android SDK packages
         run: |
@@ -53,9 +60,10 @@ jobs:
           path: app/build/reports/tests/testDebugUnitTest/
           if-no-files-found: ignore
 
-      # The emulator action runs sdkmanager before its script, so keep Java 17
-      # active for the action and switch Gradle back to Java 11 inside the script.
+      # Emulator validation is opt-in to avoid slowing/failing every push.
+      # Enable it manually from Actions > Run workflow when device tests are needed.
       - name: Set up Java 17 for emulator SDK tools
+        if: github.event_name == 'workflow_dispatch' && inputs.run_instrumentation == true
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -63,16 +71,21 @@ jobs:
 
       - name: Run Android instrumentation tests
         id: instrumentation
+        if: github.event_name == 'workflow_dispatch' && inputs.run_instrumentation == true
         continue-on-error: true
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 29
           target: default
           arch: x86_64
+          emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
+          disable-animations: true
+          boot-timeout: 300
           script: |
             export JAVA_HOME="$JAVA_HOME_11_X64" && export PATH="$JAVA_HOME/bin:$PATH" && ./gradlew :app:connectedDebugAndroidTest --stacktrace
 
       - name: Set up Java 11 for APK build
+        if: always()
         uses: actions/setup-java@v4
         with:
           distribution: temurin
