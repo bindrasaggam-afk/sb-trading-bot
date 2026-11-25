@@ -84,7 +84,7 @@ object MarketRuntimeService {
                         isDaemon = true
                     }
                 },
-                ThreadPoolExecutor.CallerRunsPolicy()
+                ThreadPoolExecutor.AbortPolicy()
             ).also { executorRef = it }
         }
 
@@ -306,24 +306,17 @@ object MarketRuntimeService {
             }
         }
 
-        if (currentPersistenceMode() == CandlePersistenceMode.DURABLE) {
-            synchronousWrites.incrementAndGet()
-            persistCandles()
-            try {
-                executor.execute { SignalScanCoordinator.scan(key) }
-            } catch (e: RejectedExecutionException) {
-                recordError(e)
+        // Both persistence modes use the dedicated worker. DURABLE mode
+        // controls retry intent, not permission to perform SQLite writes on
+        // the WebSocket/tick callback thread.
+        try {
+            executor.execute {
+                persistCandles()
+                SignalScanCoordinator.scan(key)
             }
-        } else {
-            try {
-                executor.execute {
-                    persistCandles()
-                    SignalScanCoordinator.scan(key)
-                }
-            } catch (e: RejectedExecutionException) {
-                failedWrites.incrementAndGet()
-                recordError(e)
-            }
+        } catch (e: RejectedExecutionException) {
+            failedWrites.incrementAndGet()
+            recordError(e)
         }
     }
 
