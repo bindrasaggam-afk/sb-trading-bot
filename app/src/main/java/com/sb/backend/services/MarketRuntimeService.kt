@@ -7,6 +7,7 @@ import com.sb.backend.market.model.MarketCandle
 import com.sb.backend.market.model.MarketTick
 import com.sb.backend.market.model.MarketTimeframe
 import com.sb.backend.market.repo.MarketFeedRepository
+import com.sb.backend.core.BackendManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -122,6 +123,13 @@ object MarketRuntimeService {
         if (!running.compareAndSet(false, true)) return
         MarketDataManager.start()
         MarketDataManager.addCandleResultListener(candleResultListener)
+        // Startup recovery: drain rows left durable by the prior process.
+        try {
+            executor.execute { drainPendingCandleQueue() }
+        } catch (e: RejectedExecutionException) {
+            failedWrites.incrementAndGet()
+            recordError(e)
+        }
         publishStatus(force = true)
     }
 
@@ -268,51 +276,42 @@ object MarketRuntimeService {
             listOf(candle)
         }
 
-        val persistCandles = {
-            try {
-                var savedTotal = 0
-                finalized.forEach { (timeframe, candles) ->
-                    if (candles.isEmpty()) return@forEach
-                    val saved = saveCandlesWithRetry(
-                        key = key,
-                        timeframe = timeframe,
-                        candles = candles,
-                        isComplete = true
-                    )
-                    check(saved == candles.size) {
-                        "Candle persistence incomplete for $timeframe: saved $saved of " +
-                            candles.size
-                    }
-                    savedTotal += saved
-                }
-                live.forEach { (timeframe, candles) ->
-                    val saved = saveCandlesWithRetry(
-                        key = key,
-                        timeframe = timeframe,
-                        candles = candles,
-                        isComplete = false
-                    )
-                    check(saved == candles.size) {
-                        "Live candle persistence incomplete for $timeframe: saved $saved of " +
-                            candles.size
-                    }
-                    savedTotal += saved
-                }
-                savedCandles.addAndGet(savedTotal.toLong())
-                publishStatus(force = true)
-            } catch (e: Exception) {
-                failedWrites.incrementAndGet()
-                recordError(e)
-            }
-        }
-
-        // Both persistence modes use the dedicated worker. DURABLE mode
-        // controls retry intent, not permission to perform SQLite writes on
-        // the WebSocket/tick callback thread.
+        // Enqueue on the dedicated executor only; tick callback does no DB work.
         try {
             executor.execute {
-                persistCandles()
-                SignalScanCoordinator.scan(key)
+                try {
+                    finalized.forEach { (timeframe, candles) ->
+                        candles.forEach { candle ->
+                            val queued = BackendManager.market().enqueueCandlePersistence(
+                                key.symbol, key.exchange, timeframe,
+                                com.sb.backend.models.Candle(
+                                    key.symbol, timeframe, candle.timestamp,
+                                    candle.open, candle.high, candle.low, candle.close,
+                                    candle.volume, true, key.exchange
+                                )
+                            )
+                            check(queued) { "Durable enqueue failed for finalized candle" }
+                        }
+                    }
+                    live.forEach { (timeframe, candles) ->
+                        candles.forEach { candle ->
+                            val queued = BackendManager.market().enqueueCandlePersistence(
+                                key.symbol, key.exchange, timeframe,
+                                com.sb.backend.models.Candle(
+                                    key.symbol, timeframe, candle.timestamp,
+                                    candle.open, candle.high, candle.low, candle.close,
+                                    candle.volume, false, key.exchange
+                                )
+                            )
+                            check(queued) { "Durable enqueue failed for live candle" }
+                        }
+                    }
+                    drainPendingCandleQueue()
+                    SignalScanCoordinator.scan(key)
+                } catch (e: Exception) {
+                    failedWrites.incrementAndGet()
+                    recordError(e)
+                }
             }
         } catch (e: RejectedExecutionException) {
             failedWrites.incrementAndGet()
@@ -320,44 +319,51 @@ object MarketRuntimeService {
         }
     }
 
-    private fun saveCandlesWithRetry(
-        key: InstrumentKey,
-        timeframe: String,
-        candles: List<MarketCandle>,
-        isComplete: Boolean
-    ): Int {
-        if (candles.isEmpty()) return 0
-
-        val delaysMs = longArrayOf(250L, 500L, 1_000L, 2_000L)
-        var lastSaved = 0
-
-        for (attempt in 0..delaysMs.size) {
-            // Finish already-enqueued persistence even if the feed is stopping.
-            lastSaved = MarketFeedRepository.saveCandles(
-                key = key,
-                timeframe = timeframe,
-                candles = candles,
-                isComplete = isComplete
-            )
-
-            if (lastSaved == candles.size) return lastSaved
-
-            if (attempt < delaysMs.size) {
-                try {
-                    Thread.sleep(delaysMs[attempt])
-                } catch (_: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                    return 0
+    /**
+     * Worker-only drain. Destination write failure leaves the queue row in DB
+     * for later recovery; no pending row is removed before successful save.
+     */
+    private fun drainPendingCandleQueue() {
+        if (!BackendManager.isInitialized()) return
+        val delays = longArrayOf(300L, 600L, 1_200L, 2_400L)
+        val repository = BackendManager.market()
+        val pending = repository.loadPendingCandlePersistence(500)
+        pending.forEach { item ->
+            var saved = false
+            for (attempt in 0..delays.size) {
+                val result = MarketFeedRepository.saveCandles(
+                    InstrumentKey(item.exchange, item.symbol),
+                    item.timeframe,
+                    listOf(MarketCandle(
+                        item.candle.timestamp, item.candle.open, item.candle.high,
+                        item.candle.low, item.candle.close, item.candle.volume
+                    )),
+                    item.candle.isComplete
+                )
+                if (result == 1) {
+                    repository.removePendingCandlePersistence(item)
+                    savedCandles.incrementAndGet()
+                    saved = true
+                    break
+                }
+                repository.markPendingCandlePersistenceFailure(item, "Destination write returned " + result)
+                if (attempt < delays.size) {
+                    try { Thread.sleep(delays[attempt]) } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        return
+                    }
                 }
             }
+            if (!saved) {
+                failedWrites.incrementAndGet()
+                recordError(IllegalStateException(
+                    "Candle remains pending durable queue: " +
+                        item.exchange + ":" + item.symbol + "/" + item.timeframe +
+                        "@" + item.candle.timestamp
+                ))
+            }
         }
-
-        throw IllegalStateException(
-            "Candle persistence incomplete for " +
-                key.exchange + ":" + key.symbol + "/" + timeframe +
-                ": saved " + lastSaved + " of " + candles.size +
-                " after " + (delaysMs.size + 1) + " attempts"
-        )
+        publishStatus(force = true)
     }
     private fun seedFromStore(key: InstrumentKey) {
         try {
