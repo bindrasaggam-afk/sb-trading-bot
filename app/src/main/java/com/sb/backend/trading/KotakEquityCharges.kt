@@ -27,6 +27,7 @@ object KotakEquityCharges {
     const val BROKERAGE_DELIVERY_MINIMUM = 20.0
     const val BROKERAGE_INTRADAY_PER_ORDER = 0.01
     const val NSE_TRANSACTION_RATE = 307.0 / 100_000_000.0
+    const val BSE_TRANSACTION_RATE = 375.0 / 100_000_000.0
     const val SEBI_TURNOVER_RATE = 10.0 / 100_000_000.0
     const val GST_RATE = 0.18
     const val STT_DELIVERY_RATE = 0.001
@@ -44,8 +45,14 @@ object KotakEquityCharges {
         if (!price.isFinite() || price <= 0.0 || quantity <= 0) {
             return PaperChargeBreakdown(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         }
-        require(exchange.equals("NSE", true)) {
-            "Kotak charge profile currently supports NSE cash equities only."
+        val exchangeRate = when (exchange.trim().uppercase()) {
+            "NSE" -> NSE_TRANSACTION_RATE
+            // BSE published standard A/B/other non-exclusive cash rate.
+            // Exclusive scrips can carry a lower rate; this is conservative.
+            "BSE" -> BSE_TRANSACTION_RATE
+            else -> throw IllegalArgumentException(
+                "Kotak equity charge profile supports NSE/BSE cash equities only."
+            )
         }
         val normalizedSide = side.trim().uppercase()
         require(normalizedSide == "BUY" || normalizedSide == "SELL") {
@@ -63,7 +70,7 @@ object KotakEquityCharges {
         } else {
             turnover * STT_DELIVERY_RATE
         }
-        val exchangeCharge = turnover * NSE_TRANSACTION_RATE
+        val exchangeCharge = turnover * exchangeRate
         val sebi = turnover * SEBI_TURNOVER_RATE
         val gst = (brokerage + exchangeCharge + sebi) * GST_RATE
         val stamp = if (normalizedSide == "BUY") {
