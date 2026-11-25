@@ -327,41 +327,52 @@ object MarketRuntimeService {
         if (!BackendManager.isInitialized()) return
         val delays = longArrayOf(300L, 600L, 1_200L, 2_400L)
         val repository = BackendManager.market()
-        val pending = repository.loadPendingCandlePersistence(500)
-        pending.forEach { item ->
-            var saved = false
-            for (attempt in 0..delays.size) {
-                val result = MarketFeedRepository.saveCandles(
-                    InstrumentKey(item.exchange, item.symbol),
-                    item.timeframe,
-                    listOf(MarketCandle(
-                        item.candle.timestamp, item.candle.open, item.candle.high,
-                        item.candle.low, item.candle.close, item.candle.volume
-                    )),
-                    item.candle.isComplete
-                )
-                if (result == 1) {
-                    repository.removePendingCandlePersistence(item)
-                    savedCandles.incrementAndGet()
-                    saved = true
-                    break
-                }
-                repository.markPendingCandlePersistenceFailure(item, "Destination write returned " + result)
-                if (attempt < delays.size) {
-                    try { Thread.sleep(delays[attempt]) } catch (_: InterruptedException) {
-                        Thread.currentThread().interrupt()
-                        return
+        // Drain multiple pages so startup recovery is not capped to the first
+        // 500 rows. Stop the pass when a page has failures to avoid tight loops.
+        var page = 0
+        while (page++ < 100) {
+            val pending = repository.loadPendingCandlePersistence(500)
+            if (pending.isEmpty()) break
+            var pageFailed = false
+            pending.forEach { item ->
+                var saved = false
+                for (attempt in 0..delays.size) {
+                    val result = MarketFeedRepository.saveCandles(
+                        InstrumentKey(item.exchange, item.symbol),
+                        item.timeframe,
+                        listOf(MarketCandle(
+                            item.candle.timestamp, item.candle.open, item.candle.high,
+                            item.candle.low, item.candle.close, item.candle.volume
+                        )),
+                        item.candle.isComplete
+                    )
+                    if (result == 1) {
+                        repository.removePendingCandlePersistence(item)
+                        savedCandles.incrementAndGet()
+                        saved = true
+                        break
+                    }
+                    repository.markPendingCandlePersistenceFailure(
+                        item, "Destination write returned " + result
+                    )
+                    if (attempt < delays.size) {
+                        try { Thread.sleep(delays[attempt]) } catch (_: InterruptedException) {
+                            Thread.currentThread().interrupt()
+                            return
+                        }
                     }
                 }
+                if (!saved) {
+                    pageFailed = true
+                    failedWrites.incrementAndGet()
+                    recordError(IllegalStateException(
+                        "Candle remains pending durable queue: " +
+                            item.exchange + ":" + item.symbol + "/" + item.timeframe +
+                            "@" + item.candle.timestamp
+                    ))
+                }
             }
-            if (!saved) {
-                failedWrites.incrementAndGet()
-                recordError(IllegalStateException(
-                    "Candle remains pending durable queue: " +
-                        item.exchange + ":" + item.symbol + "/" + item.timeframe +
-                        "@" + item.candle.timestamp
-                ))
-            }
+            if (pageFailed) break
         }
         publishStatus(force = true)
     }
