@@ -65,4 +65,45 @@ class MarketRepositoryCandlePersistenceTest {
             context.deleteDatabase(TEST_DATABASE_NAME)
         }
     }
+    @Test
+    fun durablePendingCandleQueueSurvivesHelperReopenAndCanBeRemoved() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        context.deleteDatabase(TEST_DATABASE_NAME)
+        val candle = Candle(
+            "SB_QUEUE_TEST", "5m", 1_700_000_300_000L,
+            200.0, 205.0, 198.0, 204.0, 777L, false, "NSE"
+        )
+        try {
+            val helper = SBDatabaseHelper(context, TEST_DATABASE_NAME)
+            val repository = MarketRepository(helper)
+            assertTrue(repository.enqueueCandlePersistence(
+                candle.symbol, candle.exchange, candle.timeframe, candle
+            ))
+            helper.close()
+
+            val reopened = SBDatabaseHelper(context, TEST_DATABASE_NAME)
+            try {
+                val recoveredRepository = MarketRepository(reopened)
+                val pending = recoveredRepository.loadPendingCandlePersistence(10)
+                assertEquals(1, pending.size)
+                assertEquals(candle.timestamp, pending[0].candle.timestamp)
+                assertEquals(candle.close, pending[0].candle.close, 0.0001)
+                assertEquals(false, pending[0].candle.isComplete)
+
+                assertTrue(recoveredRepository.markPendingCandlePersistenceFailure(
+                    pending[0], "test retry"
+                ))
+                val updated = recoveredRepository.loadPendingCandlePersistence(10)
+                assertEquals(1, updated[0].attempts)
+
+                assertTrue(recoveredRepository.removePendingCandlePersistence(updated[0]))
+                assertEquals(0, recoveredRepository.loadPendingCandlePersistence(10).size)
+            } finally {
+                reopened.close()
+            }
+        } finally {
+            context.deleteDatabase(TEST_DATABASE_NAME)
+        }
+    }
+
 }
