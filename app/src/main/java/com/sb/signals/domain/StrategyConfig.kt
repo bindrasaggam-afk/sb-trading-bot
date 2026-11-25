@@ -65,9 +65,15 @@ data class StrategyConfig(
         require(supertrendPeriod > 1 && supertrendMultiplier > 0.0)
         require(bollingerPeriod > 1 && bollingerMultiplier > 0.0)
         require(volumePeriod > 0)
-        require(stopAtrMultiplier > 0.0)
+        require(stopAtrMultiplier.isFinite() && stopAtrMultiplier > 0.0)
+        require(entryAtrBuffer.isFinite() && entryAtrBuffer > 0.0)
+        require(targetR1.isFinite() && targetR2.isFinite() && targetR3.isFinite())
         require(targetR1 > 0.0 && targetR2 > targetR1 && targetR3 > targetR2)
+        require(minAdx.isFinite() && minAdx in 0.0..100.0)
+        require(volumeMultiplier.isFinite() && volumeMultiplier > 0.0)
+        require(costBpsPerSide.isFinite() && slippageBpsPerSide.isFinite())
         require(costBpsPerSide >= 0.0 && slippageBpsPerSide >= 0.0)
+        require(maxSignalAgeBars > 0)
     }
 
     val totalCostPercent: Double
