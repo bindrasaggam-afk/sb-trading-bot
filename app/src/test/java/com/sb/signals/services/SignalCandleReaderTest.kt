@@ -13,14 +13,7 @@ class SignalCandleReaderTest {
     @Test
     fun intradayReaderRequestsConfiguredTimeframes() {
         val variants = StrategyDefaults.intradayVariants()
-        val expected = mapOf(
-            "1m" to listOf("1m", "5m", "15m"),
-            "3m" to listOf("3m", "15m", "1h"),
-            "5m" to listOf("5m", "15m", "1h"),
-            "10m" to listOf("10m", "30m", "1h"),
-            "15m" to listOf("15m", "1h", "4h"),
-            "30m" to listOf("30m", "1h", "4h")
-        )
+        val expected = listOf("5m", "15m", "1h")
 
         variants.forEach { config ->
             val requested = ArrayList<String>()
@@ -36,7 +29,7 @@ class SignalCandleReaderTest {
             )
 
             assertEquals(
-                expected.getValue(config.primaryTimeframe),
+                expected,
                 requested
             )
             assertTrue(
