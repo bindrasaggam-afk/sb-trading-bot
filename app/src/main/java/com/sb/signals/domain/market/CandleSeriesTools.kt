@@ -94,6 +94,8 @@ object CandleSeriesTools {
         }
 
         val last = closed.lastOrNull()
+        val gapCount = countSuspiciousGaps(closed, timeframe)
+        if (gapCount > 0) notes.add("$gapCount suspicious candle gaps detected")
         val staleLimitMillis = when (timeframe) {
             "1M", "3M" -> 45L * 86_400_000L
             "1W", "2W", "4W" -> 14L * 86_400_000L
@@ -110,6 +112,7 @@ object CandleSeriesTools {
         score -= minOf(30.0, duplicates * 5.0 + invalid * 5.0)
         if (closed.size < minCount) score -= 40.0
         if (stale) score -= 40.0
+        score -= minOf(30.0, gapCount * 6.0)
 
         return PreparedSeries(
             all = sorted,
@@ -122,6 +125,28 @@ object CandleSeriesTools {
                 notes = notes
             )
         )
+    }
+
+
+    private fun countSuspiciousGaps(
+        candles: List<MarketCandle>,
+        timeframe: String
+    ): Int {
+        if (candles.size < 2) return 0
+        val parsed = MarketTimeframe.fromLabel(timeframe) ?: return 0
+        val interval = parsed.seconds * 1_000L
+        val intraday = parsed.isIntraday
+        val gapThreshold = when {
+            intraday -> interval + interval / 2L
+            timeframe == "1D" -> 5L * 86_400_000L
+            timeframe == "1W" || timeframe == "2W" || timeframe == "4W" ->
+                21L * 86_400_000L
+            else -> 60L * 86_400_000L
+        }
+        return candles.zipWithNext().count { (previous, next) ->
+            val gap = next.timestamp - previous.timestamp
+            gap > gapThreshold && (!intraday || gap <= 3L * 3_600_000L)
+        }
     }
 
     fun aggregate(
