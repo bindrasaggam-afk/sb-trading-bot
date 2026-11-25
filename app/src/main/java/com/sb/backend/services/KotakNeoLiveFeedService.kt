@@ -369,9 +369,24 @@ class KotakNeoLiveFeedService(
         tick: MarketTick?,
         audit: MarketRepository.TickAuditDelta
     ) {
-        val accepted = tickPersistenceQueue.offer(
-            TickPersistenceEvent(tick, audit)
-        )
+        val event = TickPersistenceEvent(tick, audit)
+        var accepted = false
+
+        // Backpressure instead of immediately dropping events when the bounded
+        // queue is saturated. Keep waiting while the persistence worker is alive.
+        try {
+            while (tickPersistenceWorkerRunning.get()) {
+                val workerAlive = tickPersistenceThread?.isAlive == true
+                if (!workerAlive) break
+
+                if (tickPersistenceQueue.offer(event, 250L, TimeUnit.MILLISECONDS)) {
+                    accepted = true
+                    break
+                }
+            }
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
 
         if (accepted) {
             enqueuedTickPersistenceEvents.incrementAndGet()
@@ -385,7 +400,8 @@ class KotakNeoLiveFeedService(
 
             if (dropped == 1L || dropped % 100L == 0L) {
                 onStatus(
-                    "WARNING | Tick persistence queue full; dropped events=$dropped"
+                    "WARNING | Tick persistence worker unavailable/interrupted; " +
+                        "dropped events=$dropped"
                 )
             }
         }
