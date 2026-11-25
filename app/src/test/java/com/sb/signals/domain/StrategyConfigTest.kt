@@ -21,7 +21,7 @@ class StrategyConfigTest {
         assertTrue(
             variants.all {
                 it.category == SignalCategory.INTRADAY &&
-                    it.version == "1.1.0"
+                    it.version == "1.2.0"
             }
         )
     }
