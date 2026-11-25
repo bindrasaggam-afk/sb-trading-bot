@@ -14,16 +14,23 @@ object LiveQuoteCache {
         return "${exchange.trim().toUpperCase()}|${symbol.trim().toUpperCase()}"
     }
 
-    /** Publishes a quote only after the authoritative market pipeline accepts its tick. */
+    /** Uses exchange time when available, otherwise the quote's local timestamp. */
+    private fun orderingTimestamp(quote: Quote): Long =
+        quote.exchangeTimestamp?.takeIf { it > 0L } ?: quote.timestamp
+
+    /** Publishes only accepted quotes that are not older than the cached quote. */
     fun updateIfAccepted(quote: Quote, accepted: Boolean): Boolean {
         if (!accepted) return false
-        update(quote)
-        return true
+        return update(quote)
     }
 
     @Synchronized
-    fun update(quote: Quote) {
+    fun update(quote: Quote): Boolean {
         val k = key(quote.symbol, quote.exchange)
+        val previous = cache[k]
+        if (previous != null && orderingTimestamp(quote) < orderingTimestamp(previous)) {
+            return false
+        }
         cache[k] = quote
         listeners.forEach { listener ->
             try {
@@ -31,6 +38,7 @@ object LiveQuoteCache {
             } catch (_: Exception) {
             }
         }
+        return true
     }
 
     fun get(symbol: String, exchange: String): Quote? {
