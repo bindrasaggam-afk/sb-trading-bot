@@ -9,10 +9,13 @@ data class IndicatorPerformance(
     val losses: Int,
     val winRatePct: Double,
     val avgNetPnlPct: Double,
-    val avgR: Double
+    val avgR: Double,
+    val sampleAdequate: Boolean = false
 )
 
 object IndicatorPerformanceAnalyzer {
+
+    const val MIN_RELIABLE_SAMPLE_SIZE = 30
 
     fun analyze(signals: List<ResearchSignal>): List<IndicatorPerformance> {
         val traded = signals.filter {
@@ -50,7 +53,8 @@ object IndicatorPerformanceAnalyzer {
                     rValues.average()
                 } else {
                     0.0
-                }
+                },
+                sampleAdequate = values.size >= MIN_RELIABLE_SAMPLE_SIZE
             )
         }.sortedWith(
             compareByDescending<IndicatorPerformance> { it.winRatePct }
