@@ -867,11 +867,11 @@ class MarketRepository(
                     "candle_persistence_queue",
                     """symbol=? AND exchange=? AND timeframe=? AND timestamp=?
                        AND open=? AND high=? AND low=? AND close=? AND volume=?
-                       AND is_complete=? AND attempts=?""",
+                       AND is_complete=?""",
                     arrayOf(
                         item.symbol, item.exchange, item.timeframe, c.timestamp.toString(),
                         c.open.toString(), c.high.toString(), c.low.toString(), c.close.toString(),
-                        c.volume.toString(), if (c.isComplete) "1" else "0", item.attempts.toString()
+                        c.volume.toString(), if (c.isComplete) "1" else "0"
                     )
                 ) > 0
             } catch (ex: Exception) { Log.e("MarketRepository", "Pending candle delete failed", ex); false }
@@ -883,13 +883,20 @@ class MarketRepository(
                 val statement = databaseHelper.writableDatabase.compileStatement(
                     """UPDATE candle_persistence_queue
                        SET attempts=attempts+1, last_error=?
-                       WHERE symbol=? AND exchange=? AND timeframe=? AND timestamp=?"""
+                       WHERE symbol=? AND exchange=? AND timeframe=? AND timestamp=?
+                       AND open=? AND high=? AND low=? AND close=? AND volume=? AND is_complete=?"""
                 )
                 statement.bindString(1, error.take(1000))
                 statement.bindString(2, item.symbol)
                 statement.bindString(3, item.exchange)
                 statement.bindString(4, item.timeframe)
                 statement.bindString(5, item.candle.timestamp.toString())
+                statement.bindString(6, item.candle.open.toString())
+                statement.bindString(7, item.candle.high.toString())
+                statement.bindString(8, item.candle.low.toString())
+                statement.bindString(9, item.candle.close.toString())
+                statement.bindString(10, item.candle.volume.toString())
+                statement.bindString(11, if (item.candle.isComplete) "1" else "0")
                 statement.executeUpdateDelete() > 0
             } catch (ex: Exception) { Log.e("MarketRepository", "Pending candle retry update failed", ex); false }
         }
