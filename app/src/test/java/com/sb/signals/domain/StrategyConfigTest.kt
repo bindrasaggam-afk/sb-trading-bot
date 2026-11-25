@@ -70,6 +70,22 @@ class StrategyConfigTest {
     }
 
     @Test
+    fun swingAndDeliveryUseWeeklyConfirmationAndMonthlyTrend() {
+        val swing = StrategyDefaults.swing()
+        val delivery = StrategyDefaults.delivery()
+        assertEquals("1W", swing.confirmationTimeframe)
+        assertEquals("1M", swing.trendTimeframe)
+        assertEquals("1W", delivery.confirmationTimeframe)
+        assertEquals("1M", delivery.trendTimeframe)
+        assertEquals(60, swing.minConfirmationCandles)
+        assertEquals(60, swing.minTrendCandles)
+        assertEquals(60, delivery.minConfirmationCandles)
+        assertEquals(60, delivery.minTrendCandles)
+        assertEquals("1.2.0", swing.version)
+        assertEquals("1.2.0", delivery.version)
+    }
+
+    @Test
     fun defaultCatalogContainsEveryCategory() {
         val configs = StrategyDefaults.all()
 
