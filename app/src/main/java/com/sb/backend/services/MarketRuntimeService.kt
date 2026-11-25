@@ -325,8 +325,8 @@ object MarketRuntimeService {
 
     private fun persistRejectedWorkToDurableQueue(
         key: InstrumentKey,
-        finalized: Map<MarketTimeframe, List<MarketCandle>>,
-        live: Map<MarketTimeframe, List<MarketCandle>>
+        finalized: Map<String, List<MarketCandle>>,
+        live: Map<String, List<MarketCandle>>
     ) {
         if (!BackendManager.isInitialized()) {
             recordError(IllegalStateException("Persistence executor saturated and backend not initialized"))
@@ -338,9 +338,9 @@ object MarketRuntimeService {
                 .forEach { (timeframe, pair) ->
                     pair.first.forEach { candle ->
                         val saved = repo.enqueueCandlePersistence(
-                            key.symbol, key.exchange, timeframe.label,
+                            key.symbol, key.exchange, timeframe,
                             com.sb.backend.models.Candle(
-                                key.symbol, timeframe.label, candle.timestamp,
+                                key.symbol, timeframe, candle.timestamp,
                                 candle.open, candle.high, candle.low, candle.close,
                                 candle.volume, pair.second, key.exchange
                             ),
