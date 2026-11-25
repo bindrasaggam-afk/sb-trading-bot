@@ -26,7 +26,6 @@ class KotakNeoWebSocketClient(
 
     companion object {
         private const val MAX_RECONNECT_DELAY = 30_000L
-        private const val MAX_RECONNECT_ATTEMPTS = 6
         private const val MAX_SUBSCRIPTION_BATCH = 3000
         private const val NORMAL_CLOSE_CODE = 1000
         private val RESERVED_CLOSE_CODES = setOf(1004, 1005, 1006, 1015)
@@ -677,14 +676,6 @@ class KotakNeoWebSocketClient(
             return
         }
 
-        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-            status(
-                "ERROR | WebSocket reconnection stopped after " +
-                    "$MAX_RECONNECT_ATTEMPTS attempts. Re-login required."
-            )
-            return
-        }
-
         mainHandler.removeCallbacks(reconnectRunnable)
 
         val exponent = reconnectAttempts.coerceAtMost(5)
@@ -694,10 +685,10 @@ class KotakNeoWebSocketClient(
             1000L * (1L shl exponent)
         )
 
-        reconnectAttempts++
+        reconnectAttempts = (reconnectAttempts + 1).coerceAtMost(Int.MAX_VALUE)
 
         status(
-            "RECONNECTING in ${delay / 1000} seconds..."
+            "RECONNECTING | attempt $reconnectAttempts in ${delay / 1000} seconds..."
         )
 
         mainHandler.postDelayed(
