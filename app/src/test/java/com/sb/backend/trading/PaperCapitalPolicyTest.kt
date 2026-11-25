@@ -74,12 +74,12 @@ class PaperCapitalPolicyTest {
     fun `actual fill is rejected when reservation cannot cover revised cost`() {
         val state = PaperCapitalState(
             balance = 100_000.0,
-            reservedMargin = 20_040.0,
+            reservedMargin = 80_000.0,
             realizedPnl = 0.0
         )
         val higherActualFill = PaperCapitalRequirement(
-            orderValue = 99_000.0,
-            cashDebit = 99_000.0,
+            orderValue = 50_000.0,
+            cashDebit = 50_000.0,
             reservedMargin = 0.0,
             entryCharge = 1_000.0
         )
