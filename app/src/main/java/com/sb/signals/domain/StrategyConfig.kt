@@ -116,7 +116,7 @@ object StrategyDefaults {
 
     fun swing(): StrategyConfig = StrategyConfig(
         strategyId = "swing-trend-pullback",
-        version = "1.1.0",
+        version = "1.2.0",
         category = SignalCategory.SWING,
         name = "Swing trend continuation",
         minPrimaryCandles = 120,
