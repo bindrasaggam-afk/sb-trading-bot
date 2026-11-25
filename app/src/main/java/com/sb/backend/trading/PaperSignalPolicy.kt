@@ -374,6 +374,8 @@ object PaperSignalPolicy {
         }
     }
 
+    // Keep execution prices positive even if a corrupt config supplies
+    // an extreme slippage value. 9,999 bps is the maximum safe haircut.
     private fun safeSlippageBps(value: Double): Double =
-        if (value.isFinite()) value.coerceAtLeast(0.0) else 0.0
+        if (value.isFinite()) value.coerceIn(0.0, 9_999.0) else 0.0
 }
