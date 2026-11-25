@@ -221,12 +221,22 @@ class PaperRepository(
                 check(allowedQuantity > 0) {
                     "Insufficient available capital for this signal."
                 }
-                val requirement = PaperSignalPolicy.capitalRequirement(
+                val baseRequirement = PaperSignalPolicy.capitalRequirement(
                     side = normalizedSide,
                     price = expectedEntry,
                     quantity = allowedQuantity,
                     costBpsPerSide = candidate.costBpsPerSide,
                     shortMarginRate = AppConfig.get().shortMarginRate
+                )
+                val entryChargeBreakdown = KotakEquityCharges.calculate(
+                    side = normalizedSide,
+                    category = candidate.category,
+                    price = expectedEntry,
+                    quantity = allowedQuantity,
+                    exchange = normalizedExchange
+                )
+                val requirement = baseRequirement.copy(
+                    entryCharge = entryChargeBreakdown.total
                 )
                 val capital = PaperCapitalPolicy.reserve(
                     state = capitalState(account),
@@ -371,12 +381,22 @@ class PaperRepository(
                     "Actual entry price exceeds available paper capital."
                 }
 
-                val requirement = PaperSignalPolicy.capitalRequirement(
+                val baseRequirement = PaperSignalPolicy.capitalRequirement(
                     side = order.side,
                     price = executionPrice,
                     quantity = quantity,
                     costBpsPerSide = order.costBpsPerSide,
                     shortMarginRate = AppConfig.get().shortMarginRate
+                )
+                val entryChargeBreakdown = KotakEquityCharges.calculate(
+                    side = order.side,
+                    category = order.signalCategory,
+                    price = executionPrice,
+                    quantity = quantity,
+                    exchange = order.exchange
+                )
+                val requirement = baseRequirement.copy(
+                    entryCharge = entryChargeBreakdown.total
                 )
                 val capital = PaperCapitalPolicy.applyEntry(
                     state = capitalState(account),
@@ -452,7 +472,8 @@ class PaperRepository(
                     netPnl = PaperCapitalPolicy.entryExecutionNetPnl(),
                     executedAt = executedAt,
                     eventKey = "$orderId:ENTRY",
-                    note = "Signal entry filled"
+                    note = "Signal entry filled; " +
+                        formatChargeBreakdown(entryChargeBreakdown)
                 )
                 insertEvent(
                     db = db,
@@ -460,8 +481,8 @@ class PaperRepository(
                     signalId = order.signalId,
                     type = "ENTRY_FILLED",
                     message = "Entry filled at " +
-                        "${formatAmount(executionPrice)}; charges " +
-                        formatAmount(requirement.entryCharge),
+                        "${formatAmount(executionPrice)}; " +
+                        formatChargeBreakdown(entryChargeBreakdown),
                     now = executedAt
                 )
                 if (quantity < order.quantity) {
@@ -573,11 +594,18 @@ class PaperRepository(
                     originalQuantity = order.quantity,
                     exitQuantity = exitQuantity
                 )
-                val exitCharge = PaperSignalPolicy.exitCharge(
+                val exitChargeBreakdown = KotakEquityCharges.calculate(
+                    side = if (order.side == OrderSide.BUY.name) {
+                        OrderSide.SELL.name
+                    } else {
+                        OrderSide.BUY.name
+                    },
+                    category = order.signalCategory,
                     price = executionPrice,
                     quantity = exitQuantity,
-                    costBps = order.costBpsPerSide
+                    exchange = order.exchange
                 )
+                val exitCharge = exitChargeBreakdown.total
                 val netPnl = grossPnl - entryCharge - exitCharge
                 val releaseReserved = if (position.quantity > 0) {
                     position.reservedMargin * exitQuantity /
@@ -712,7 +740,8 @@ class PaperRepository(
                     ),
                     executedAt = executedAt,
                     eventKey = eventKey,
-                    note = note.ifBlank { kind.name }
+                    note = (note.ifBlank { kind.name }) +
+                        "; " + formatChargeBreakdown(exitChargeBreakdown)
                 )
                 insertEvent(
                     db = db,
@@ -1810,6 +1839,16 @@ class PaperRepository(
             }
         }
     }
+
+    private fun formatChargeBreakdown(
+        charges: PaperChargeBreakdown
+    ): String = "Brokerage=${formatAmount(charges.brokerage)}, " +
+        "STT=${formatAmount(charges.stt)}, " +
+        "Exchange=${formatAmount(charges.exchangeTransaction)}, " +
+        "SEBI=${formatAmount(charges.sebiTurnover)}, " +
+        "GST=${formatAmount(charges.gst)}, " +
+        "Stamp=${formatAmount(charges.stampDuty)}, " +
+        "Total=${formatAmount(charges.total)}"
 
     private fun formatAmount(value: Double): String {
         return String.format(Locale.US, "%.2f", value)
