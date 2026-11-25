@@ -49,7 +49,7 @@ class SBDatabaseHelper(
         const val DATABASE_NAME = "sb_backend.db"
 
         // Must match the latest DatabaseMigrations version.
-        const val DATABASE_VERSION = 11
+        const val DATABASE_VERSION = 12
 
         // Core market tables
         const val TABLE_INSTRUMENTS = "instruments"
