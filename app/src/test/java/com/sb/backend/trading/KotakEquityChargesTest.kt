@@ -55,6 +55,22 @@ class KotakEquityChargesTest {
     }
 
     @Test
+    fun `BSE cash fee uses published standard nonexclusive rate`() {
+        val fees = KotakEquityCharges.calculate(
+            side = "BUY",
+            category = "DELIVERY",
+            price = 10_000.0,
+            quantity = 1,
+            exchange = "BSE"
+        )
+        assertEquals(
+            0.375,
+            fees.exchangeTransaction,
+            0.000001
+        )
+    }
+
+    @Test
     fun `unsupported exchange and invalid side are rejected`() {
         var exchangeRejected = false
         try {
