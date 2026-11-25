@@ -405,19 +405,17 @@ class TrendSignalStrategy(
         val bollingerScore = when (direction) {
             SignalDirection.BUY -> when {
                 bbMiddle == null || bbUpper == null || bbLower == null -> 0.0
-                close > bbMiddle && close <= bbUpper &&
-                    bbMiddlePast != null && bbMiddle > bbMiddlePast -> 8.0
-                close > bbMiddle && close < bbUpper -> 5.0
-                close <= bbUpper -> 2.0
-                else -> 0.0
+                close <= bbMiddle -> 0.0
+                close > bbUpper -> 0.0
+                bbMiddlePast != null && bbMiddle > bbMiddlePast -> 8.0
+                else -> 5.0
             }
             SignalDirection.SELL -> when {
                 bbMiddle == null || bbUpper == null || bbLower == null -> 0.0
-                close < bbMiddle && close >= bbLower &&
-                    bbMiddlePast != null && bbMiddle < bbMiddlePast -> 8.0
-                close < bbMiddle && close > bbLower -> 5.0
-                close >= bbLower -> 2.0
-                else -> 0.0
+                close >= bbMiddle -> 0.0
+                close < bbLower -> 0.0
+                bbMiddlePast != null && bbMiddle < bbMiddlePast -> 8.0
+                else -> 5.0
             }
         }
         total += bollingerScore
