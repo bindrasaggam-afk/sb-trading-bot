@@ -9,7 +9,6 @@ import android.util.Log
 import com.sb.backend.database.DatabaseBackup
 import com.sb.backend.database.DatabaseOperationGuard
 import com.sb.backend.database.LegacyPaperMigration
-import com.sb.backend.database.PaperLegacyCleanup
 import com.sb.backend.database.SBDatabaseHelper
 import com.sb.backend.market.repo.MarketFeedRepository
 import com.sb.backend.repositories.InstrumentRepository
@@ -193,31 +192,9 @@ object BackendManager {
                             )
                         }
 
-                        try {
-                            val cleanup = PaperLegacyCleanup.cleanup(
-                                context = appContext ?: throw IllegalStateException(
-                                    "Backend context is unavailable."
-                                ),
-                                databaseHelper = dbHelper
-                            )
-                            Log.i(
-                                TAG,
-                                "Paper legacy cleanup: ${cleanup.message} " +
-                                    "deletedOrders=${cleanup.deletedOrders}, " +
-                                    "deletedPositions=${cleanup.deletedPositions}, " +
-                                    "deletedExecutions=${cleanup.deletedExecutions}, " +
-                                    "preservedOrders=${cleanup.preservedOrders}, " +
-                                    "uncertainOrders=${cleanup.uncertainOrders}, " +
-                                    "backup=${cleanup.backupFile?.name.orEmpty()}"
-                            )
-                        } catch (cleanupError: Exception) {
-                            Log.e(
-                                TAG,
-                                "Paper legacy cleanup failed; " +
-                                    "paper ledger was left untouched.",
-                                cleanupError
-                            )
-                        }
+                        // Destructive legacy cleanup is intentionally not run at startup.
+                        // Existing paper ledger rows must remain untouched unless the user
+                        // explicitly requests a reviewed, backed-up cleanup operation.
 
                         synchronized(lock) {
                             if (!initialized) {
