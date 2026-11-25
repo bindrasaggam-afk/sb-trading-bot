@@ -128,6 +128,15 @@ class PaperSignalEligibilityTest {
         )
     }
 
+
+    @Test
+    fun `intraday paper forwarding rejects one minute signals`() {
+        val oneMinute = TestSignals.signal().copy(timeframe = "1m")
+        val decision = decide(oneMinute)
+        assertEquals(PaperSignalForwardAction.SKIP, decision.action)
+        assertEquals(PaperSignalSkipReason.INVALID_TIMEFRAME, decision.reasonCode)
+    }
+
     private fun decide(
         signal: com.sb.signals.domain.ResearchSignal,
         quote: PaperSignalQuote? = null

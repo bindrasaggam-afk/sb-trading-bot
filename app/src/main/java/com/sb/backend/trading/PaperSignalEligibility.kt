@@ -22,6 +22,7 @@ enum class PaperSignalSkipReason {
     SIGNAL_COMPLETED,
     SIGNAL_EXPIRED,
     INVALID_SIGNAL,
+    INVALID_TIMEFRAME,
     MISSING_QUOTE,
     STALE_QUOTE,
     OUTSIDE_ENTRY_RANGE,
@@ -62,6 +63,15 @@ object PaperSignalEligibility {
             return skip(
                 PaperSignalSkipReason.INVALID_SIGNAL,
                 "Signal metadata or price levels are invalid."
+            )
+        }
+
+        if (signal.category.name == "INTRADAY" &&
+            !signal.timeframe.trim().equals("5m", ignoreCase = true)
+        ) {
+            return skip(
+                PaperSignalSkipReason.INVALID_TIMEFRAME,
+                "Intraday paper forwarding requires the 5m signal timeframe."
             )
         }
 

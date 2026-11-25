@@ -34,6 +34,15 @@
 
         </activity>
 
+        <receiver
+            android:name=".backend.services.MarketBootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
         <!-- Persistent market runtime -->
         <service
             android:name=".backend.services.MarketForegroundService"
