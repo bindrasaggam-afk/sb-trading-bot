@@ -774,6 +774,96 @@ class MarketRepository(
         }
     }
 
+    data class PendingCandlePersistence(
+        val symbol: String,
+        val exchange: String,
+        val timeframe: String,
+        val candle: Candle,
+        val attempts: Int
+    )
+
+    /**
+     * Durable, idempotent pending candle upsert. Latest OHLC update for a
+     * live candle replaces its queue row; finalized candles retain completion.
+     */
+    fun enqueueCandlePersistence(
+        symbol: String,
+        exchange: String,
+        timeframe: String,
+        candle: Candle,
+        error: String? = null
+    ): Boolean = maintenanceGate.withOperation {
+        val s = normalize(symbol)
+        val e = normalize(exchange)
+        val tf = normalizeCandleTimeframe(timeframe)
+        if (s.isBlank() || e.isBlank() || tf.isBlank() || !isValidCandle(candle)) return@withOperation false
+        val values = ContentValues().apply {
+            put("symbol", s); put("exchange", e); put("timeframe", tf)
+            put("timestamp", candle.timestamp); put("open", candle.open)
+            put("high", candle.high); put("low", candle.low); put("close", candle.close)
+            put("volume", candle.volume); put("is_complete", if (candle.isComplete) 1 else 0)
+            put("created_at", System.currentTimeMillis())
+            put("last_error", error?.take(1000))
+        }
+        try {
+            val db = databaseHelper.writableDatabase
+            val inserted = db.insertWithOnConflict(
+                "candle_persistence_queue", null, values, SQLiteDatabase.CONFLICT_REPLACE
+            )
+            inserted != -1L
+        } catch (ex: Exception) {
+            Log.e("MarketRepository", "Durable candle enqueue failed", ex)
+            false
+        }
+    }
+
+    fun loadPendingCandlePersistence(limit: Int = 500): List<PendingCandlePersistence> =
+        maintenanceGate.withOperation {
+            val list = ArrayList<PendingCandlePersistence>()
+            try {
+                databaseHelper.readableDatabase.rawQuery(
+                    """SELECT symbol, exchange, timeframe, timestamp, open, high, low,
+                       close, volume, is_complete, attempts FROM candle_persistence_queue
+                       ORDER BY created_at, id LIMIT ?""",
+                    arrayOf(limit.coerceIn(1, 2000).toString())
+                ).use { cursor ->
+                    while (cursor.moveToNext()) {
+                        val sym=cursor.getString(0); val ex=cursor.getString(1); val tf=cursor.getString(2)
+                        list.add(PendingCandlePersistence(sym, ex, tf,
+                            Candle(sym, tf, cursor.getLong(3), cursor.getDouble(4), cursor.getDouble(5),
+                                cursor.getDouble(6), cursor.getDouble(7), cursor.getLong(8),
+                                cursor.getInt(9)==1, ex), cursor.getInt(10)))
+                    }
+                }
+            } catch (ex: Exception) { Log.e("MarketRepository", "Pending candle read failed", ex) }
+            list
+        }
+
+    fun removePendingCandlePersistence(item: PendingCandlePersistence): Boolean =
+        maintenanceGate.withOperation {
+            try {
+                databaseHelper.writableDatabase.delete(
+                    "candle_persistence_queue",
+                    "symbol=? AND exchange=? AND timeframe=? AND timestamp=?",
+                    arrayOf(item.symbol, item.exchange, item.timeframe, item.candle.timestamp.toString())
+                ) > 0
+            } catch (ex: Exception) { Log.e("MarketRepository", "Pending candle delete failed", ex); false }
+        }
+
+    fun markPendingCandlePersistenceFailure(item: PendingCandlePersistence, error: String): Boolean =
+        maintenanceGate.withOperation {
+            try {
+                val values=ContentValues().apply {
+                    put("attempts", item.attempts + 1); put("last_error", error.take(1000))
+                }
+                databaseHelper.writableDatabase.update(
+                    "candle_persistence_queue", values,
+                    "symbol=? AND exchange=? AND timeframe=? AND timestamp=?",
+                    arrayOf(item.symbol, item.exchange, item.timeframe, item.candle.timestamp.toString())
+                ) > 0
+            } catch (ex: Exception) { Log.e("MarketRepository", "Pending candle retry update failed", ex); false }
+        }
+
     // ---------------------------------------------------------
     // CANDLE SAVE
     // ---------------------------------------------------------
