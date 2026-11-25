@@ -26,9 +26,9 @@ object KotakEquityCharges {
     const val BROKERAGE_DELIVERY_RATE = 0.0025
     const val BROKERAGE_DELIVERY_MINIMUM = 20.0
     const val BROKERAGE_INTRADAY_PER_ORDER = 0.01
-    const val NSE_TRANSACTION_RATE = 307.0 / 100_000_000.0
-    const val BSE_TRANSACTION_RATE = 375.0 / 100_000_000.0
-    const val SEBI_TURNOVER_RATE = 10.0 / 100_000_000.0
+    const val NSE_TRANSACTION_RATE = 307.0 / 10_000_000.0
+    const val BSE_TRANSACTION_RATE = 375.0 / 10_000_000.0
+    const val SEBI_TURNOVER_RATE = 10.0 / 10_000_000.0
     const val GST_RATE = 0.18
     const val STT_DELIVERY_RATE = 0.001
     const val STT_INTRADAY_SELL_RATE = 0.00025
