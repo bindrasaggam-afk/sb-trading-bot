@@ -119,6 +119,8 @@ object StrategyDefaults {
         version = "1.2.0",
         category = SignalCategory.SWING,
         name = "Swing trend continuation",
+        confirmationTimeframe = "1W",
+        trendTimeframe = "1M",
         minPrimaryCandles = 120,
         minConfirmationCandles = 60,
         minTrendCandles = 60,
