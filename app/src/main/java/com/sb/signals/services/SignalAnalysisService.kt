@@ -3,6 +3,7 @@ package com.sb.signals.services
 import com.sb.backend.core.BackendManager
 import com.sb.backend.market.MarketDataManager
 import com.sb.backend.market.model.InstrumentKey
+import com.sb.backend.market.model.MarketTimeframe
 import com.sb.signals.data.SignalJson
 import com.sb.signals.data.SignalRepository
 import com.sb.signals.domain.DataQuality
@@ -220,6 +221,20 @@ class SignalAnalysisService(
         ) ?: return null
 
         val lastCandle = series.primary.closed.lastOrNull() ?: return null
+        val primaryFrame = MarketTimeframe.fromLabel(config.primaryTimeframe)
+            ?: return null
+        val maxAgeMillis = when {
+            primaryFrame.isIntraday ->
+                primaryFrame.seconds * config.maxSignalAgeBars * 1_000L
+            config.primaryTimeframe == "1D" ->
+                config.maxSignalAgeBars * 3L * 86_400_000L
+            config.primaryTimeframe == "1W" ||
+                config.primaryTimeframe == "2W" ||
+                config.primaryTimeframe == "4W" ->
+                config.maxSignalAgeBars * 14L * 86_400_000L
+            else -> config.maxSignalAgeBars * 60L * 86_400_000L
+        }
+        if (now - lastCandle.timestamp > maxAgeMillis) return null
         val atrEntry = candidate.snapshot.values.entries
             .firstOrNull {
                 it.key.startsWith("ATR") &&
