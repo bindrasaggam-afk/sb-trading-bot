@@ -75,6 +75,25 @@ class CandleSeriesToolsTest {
     }
 
     @Test
+    fun suspiciousIntradayGapReducesQualityAndIsReported() {
+        val start = dayMillis(9, 45)
+        val raw = listOf(
+            candleObject(start, 100.0, 5L),
+            candleObject(start + 300_000L, 101.0, 5L),
+            candleObject(start + 1_200_000L, 102.0, 5L)
+        )
+        val prepared = CandleSeriesTools.prepare(
+            raw = raw,
+            timeframe = "5m",
+            exchange = "NSE",
+            now = dayMillis(10, 30),
+            minCount = 2
+        )
+        assertTrue(prepared.quality.score < 100.0)
+        assertTrue(prepared.quality.notes.any { it.contains("suspicious candle gaps") })
+    }
+
+    @Test
     fun duplicateAndInvalidCandlesReduceQuality() {
         val start = dayMillis(9, 50)
         val raw = listOf(
