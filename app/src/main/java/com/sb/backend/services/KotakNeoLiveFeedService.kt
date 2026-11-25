@@ -29,7 +29,21 @@ class KotakNeoLiveFeedService(
 ) {
 
     private val parser = KotakNeoBinaryParser()
-    private val tickCount = AtomicLong(0L)
+
+    // Counts parsed market ticks; accepted/rejected are pipeline outcomes.
+    private val parsedTickCount = AtomicLong(0L)
+    private val mappedTickCount = AtomicLong(0L)
+    private val acceptedTickCount = AtomicLong(0L)
+    private val rejectedTickCount = AtomicLong(0L)
+    private val unmappedTickCount = AtomicLong(0L)
+
+    data class LiveTickMetrics(
+        val parsed: Long,
+        val mapped: Long,
+        val accepted: Long,
+        val rejected: Long,
+        val unmapped: Long
+    )
 
     private data class TickPersistenceEvent(
         val tick: MarketTick?,
@@ -541,6 +555,7 @@ class KotakNeoLiveFeedService(
         }
 
         ticks.forEach { tick ->
+            if (tick.messageCode != 105) parsedTickCount.incrementAndGet()
 
             if (tick.messageCode == 105) {
                 com.sb.backend.market.ExchangeSessionCalendar.updateFromStatus(
@@ -575,6 +590,8 @@ class KotakNeoLiveFeedService(
                     ?: requestedInstruments[key]
                     ?: activeInstruments[key]
                     ?: run {
+                        rejectedTickCount.incrementAndGet()
+                        unmappedTickCount.incrementAndGet()
                         enqueueTickPersistence(
                             tick = null,
                             audit = MarketRepository.TickAuditDelta(
@@ -590,7 +607,10 @@ class KotakNeoLiveFeedService(
                 exchange = instrument.exchange
             }
 
+            mappedTickCount.incrementAndGet()
+
             if (tick.ltp <= 0.0 || !tick.ltp.isFinite()) {
+                rejectedTickCount.incrementAndGet()
                 enqueueTickPersistence(
                     tick = null,
                     audit = MarketRepository.TickAuditDelta(
@@ -683,6 +703,11 @@ class KotakNeoLiveFeedService(
                 )
 
                 val tickResult = MarketDataManager.onNewTick(mTick)
+                if (tickResult.accepted) {
+                    acceptedTickCount.incrementAndGet()
+                } else {
+                    rejectedTickCount.incrementAndGet()
+                }
                 LiveQuoteCache.updateIfAccepted(quote, tickResult.accepted)
 
                 if (MarketDataManager.currentConnection() !=
@@ -699,7 +724,7 @@ class KotakNeoLiveFeedService(
                     enqueueQuotePersistence(quote)
                 }
 
-                val count = tickCount.incrementAndGet()
+                val count = parsedTickCount.get()
 
                 if (count == 1L || count % 250L == 0L) {
                     val price = String.format(
@@ -709,7 +734,9 @@ class KotakNeoLiveFeedService(
                     )
 
                     onStatus(
-                        "Live ticks: $count | " +
+                        "Ticks parsed=$count mapped=${mappedTickCount.get()} " +
+                            "accepted=${acceptedTickCount.get()} rejected=${rejectedTickCount.get()} " +
+                            "unmapped=${unmappedTickCount.get()} | " +
                             "$symbol | Token: ${tick.token} | ₹$price"
                     )
                 }
@@ -921,6 +948,14 @@ class KotakNeoLiveFeedService(
         client?.isAuthenticated() == true
 
     fun webSocketClient(): KotakNeoWebSocketClient? = client
+
+    fun liveTickMetrics(): LiveTickMetrics = LiveTickMetrics(
+        parsed = parsedTickCount.get(),
+        mapped = mappedTickCount.get(),
+        accepted = acceptedTickCount.get(),
+        rejected = rejectedTickCount.get(),
+        unmapped = unmappedTickCount.get()
+    )
 
     fun tickPersistenceMetrics(): TickPersistenceMetrics {
         return TickPersistenceMetrics(
