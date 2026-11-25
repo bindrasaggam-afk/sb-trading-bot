@@ -97,6 +97,14 @@ class TrendSignalStrategy(
         }
         if (chosen.score < config.minScore) return null
         if (abs(bull.score - bear.score) < config.minScoreLead) return null
+        // Require hard confirmations; aggregate score cannot mask conflicting signals.
+        val gates = chosen.confirmations
+        if (gates["EMA trend"] != true) return null
+        if (gates["Higher timeframe"] != true) return null
+        if (gates["Trend timeframe"] != true) return null
+        if (gates["ADX"] != true) return null
+        if (gates["RSI"] != true && gates["MACD"] != true) return null
+        if (gates["Volume"] != true && gates["Breakout"] != true) return null
         if (chosen.direction == SignalDirection.SELL &&
             !shortsAllowed(input.exchange)
         ) {
@@ -448,11 +456,15 @@ class TrendSignalStrategy(
         }
 
         val trendClose = trend.latest("Close")
-        if (trendClose != null) {
-            confirmations["Trend timeframe"] = when (direction) {
-                SignalDirection.BUY -> close > trendClose
-                SignalDirection.SELL -> close < trendClose
+        val trendFast = trend.latest("EMA${config.emaFast}")
+        val trendSlow = trend.latest("EMA${config.emaSlow}")
+        confirmations["Trend timeframe"] = trendClose != null &&
+            trendFast != null && trendSlow != null && when (direction) {
+                SignalDirection.BUY -> trendClose > trendSlow && trendFast > trendSlow
+                SignalDirection.SELL -> trendClose < trendSlow && trendFast < trendSlow
             }
+        if (confirmations["Trend timeframe"] == true) {
+            reasons.add("Trend timeframe EMA alignment confirms")
         }
 
         return DirectionScore(
