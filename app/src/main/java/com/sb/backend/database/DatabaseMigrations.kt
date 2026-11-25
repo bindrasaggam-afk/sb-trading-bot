@@ -201,6 +201,39 @@ object DatabaseMigrations {
         )
 
         // ---------------------------------------------------------
+        // 3A. CANDLE PERSISTENCE QUEUE (durable retry backlog)
+        // ---------------------------------------------------------
+
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS candle_persistence_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                exchange TEXT NOT NULL,
+                timeframe TEXT NOT NULL,
+                timestamp INTEGER NOT NULL,
+                open REAL NOT NULL,
+                high REAL NOT NULL,
+                low REAL NOT NULL,
+                close REAL NOT NULL,
+                volume INTEGER NOT NULL DEFAULT 0,
+                is_complete INTEGER NOT NULL DEFAULT 0,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                last_error TEXT,
+                UNIQUE(symbol, exchange, timeframe, timestamp)
+            )
+            """.trimIndent()
+        )
+
+        db.execSQL(
+            """
+            CREATE INDEX IF NOT EXISTS idx_candle_persistence_queue_created
+            ON candle_persistence_queue(created_at, id)
+            """.trimIndent()
+        )
+
+        // ---------------------------------------------------------
         // 4. RAW TICKS
         // ---------------------------------------------------------
 
