@@ -19,4 +19,6 @@ This branch is an observation/paper-signal hardening stage. It does not authoriz
 
 ## Validation status
 
+Strategy configurations are versioned 1.2.0 after rule changes; older persisted signals retain their stored strategy configuration and evaluation history.
+
 Source changes are committed on this feature branch. Build and JVM unit tests still need CI confirmation. No live trading, broker order execution, Paper Trading balance/order modifications, database reset, or data deletion is part of this stage.
