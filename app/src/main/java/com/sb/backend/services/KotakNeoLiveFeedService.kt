@@ -576,6 +576,8 @@ class KotakNeoLiveFeedService(
                 exchange = exchangeName(tick.exchange)
 
                 if (symbol.isBlank() || exchange.isBlank()) {
+                    rejectedTickCount.incrementAndGet()
+                    unmappedTickCount.incrementAndGet()
                     return@forEach
                 }
             } else {
@@ -597,6 +599,9 @@ class KotakNeoLiveFeedService(
                             audit = MarketRepository.TickAuditDelta(
                                 exchange = exchangeName(tick.exchange).ifBlank { tick.exchange },
                                 symbol = tick.symbol.ifBlank { tick.token.toString() },
+                                received = 1,
+                                parsed = 1,
+                                mapped = 0,
                                 rejected = 1
                             )
                         )
@@ -652,6 +657,7 @@ class KotakNeoLiveFeedService(
                 receivedAt = received
             )
 
+            var outcomeCounted = false
             try {
                 val mKey = InstrumentKey(exchange = exchange, symbol = symbol)
                 val bids = tick.buyDepth.take(5).map { d ->
@@ -708,6 +714,7 @@ class KotakNeoLiveFeedService(
                 } else {
                     rejectedTickCount.incrementAndGet()
                 }
+                outcomeCounted = true
                 LiveQuoteCache.updateIfAccepted(quote, tickResult.accepted)
 
                 if (MarketDataManager.currentConnection() !=
@@ -741,6 +748,7 @@ class KotakNeoLiveFeedService(
                     )
                 }
             } catch (e: Exception) {
+                if (!outcomeCounted) rejectedTickCount.incrementAndGet()
                 onStatus(
                     "Live quote error $symbol: ${e.message}"
                 )
