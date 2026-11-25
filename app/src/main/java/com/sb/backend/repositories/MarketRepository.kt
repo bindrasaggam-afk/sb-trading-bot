@@ -807,10 +807,27 @@ class MarketRepository(
         }
         try {
             val db = databaseHelper.writableDatabase
-            val inserted = db.insertWithOnConflict(
-                "candle_persistence_queue", null, values, SQLiteDatabase.CONFLICT_REPLACE
-            )
-            inserted != -1L
+            db.beginTransaction()
+            try {
+                // Serialize check+upsert. A completed candle must never be downgraded
+                // by a later live update for the same identity.
+                val existingComplete = db.rawQuery(
+                    "SELECT is_complete FROM candle_persistence_queue WHERE symbol=? AND exchange=? AND timeframe=? AND timestamp=?",
+                    arrayOf(s, e, tf, candle.timestamp.toString())
+                ).use { cursor -> cursor.moveToFirst() && cursor.getInt(0) == 1 }
+                if (existingComplete && !candle.isComplete) {
+                    db.setTransactionSuccessful()
+                    return@withOperation true // Ignore stale live update.
+                }
+                val inserted = db.insertWithOnConflict(
+                    "candle_persistence_queue", null, values, SQLiteDatabase.CONFLICT_REPLACE
+                )
+                check(inserted != -1L) { "Durable candle enqueue insert failed" }
+                db.setTransactionSuccessful()
+                true
+            } finally {
+                if (db.inTransaction()) db.endTransaction()
+            }
         } catch (ex: Exception) {
             Log.e("MarketRepository", "Durable candle enqueue failed", ex)
             false
