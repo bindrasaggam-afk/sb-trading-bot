@@ -92,7 +92,7 @@ object StrategyDefaults {
         val suffix = if (timeframe == "5m") "" else "-$timeframe"
         return StrategyConfig(
             strategyId = "intraday-trend-breakout$suffix",
-            version = "1.1.0",
+            version = "1.2.0",
             category = SignalCategory.INTRADAY,
             name = if (timeframe == "5m") {
                 "Intraday trend and breakout"
