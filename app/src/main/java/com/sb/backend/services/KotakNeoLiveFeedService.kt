@@ -617,8 +617,6 @@ class KotakNeoLiveFeedService(
             )
 
             try {
-                LiveQuoteCache.update(quote)
-
                 val mKey = InstrumentKey(exchange = exchange, symbol = symbol)
                 val bids = tick.buyDepth.take(5).map { d ->
                     DepthLevel(price = d.price, quantity = d.quantity, orders = d.orders)
@@ -668,7 +666,8 @@ class KotakNeoLiveFeedService(
                     )
                 )
 
-                MarketDataManager.onNewTick(mTick)
+                val tickResult = MarketDataManager.onNewTick(mTick)
+                LiveQuoteCache.updateIfAccepted(quote, tickResult.accepted)
 
                 if (MarketDataManager.currentConnection() !=
                     MarketDataManager.ConnectionState.AUTHENTICATED

@@ -14,6 +14,13 @@ object LiveQuoteCache {
         return "${exchange.trim().toUpperCase()}|${symbol.trim().toUpperCase()}"
     }
 
+    /** Publishes a quote only after the authoritative market pipeline accepts its tick. */
+    fun updateIfAccepted(quote: Quote, accepted: Boolean): Boolean {
+        if (!accepted) return false
+        update(quote)
+        return true
+    }
+
     @Synchronized
     fun update(quote: Quote) {
         val k = key(quote.symbol, quote.exchange)
