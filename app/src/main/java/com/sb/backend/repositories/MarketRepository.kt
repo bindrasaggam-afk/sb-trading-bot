@@ -880,14 +880,17 @@ class MarketRepository(
     fun markPendingCandlePersistenceFailure(item: PendingCandlePersistence, error: String): Boolean =
         maintenanceGate.withOperation {
             try {
-                val values=ContentValues().apply {
-                    put("attempts", item.attempts + 1); put("last_error", error.take(1000))
-                }
-                databaseHelper.writableDatabase.update(
-                    "candle_persistence_queue", values,
-                    "symbol=? AND exchange=? AND timeframe=? AND timestamp=?",
-                    arrayOf(item.symbol, item.exchange, item.timeframe, item.candle.timestamp.toString())
-                ) > 0
+                val statement = databaseHelper.writableDatabase.compileStatement(
+                    """UPDATE candle_persistence_queue
+                       SET attempts=attempts+1, last_error=?
+                       WHERE symbol=? AND exchange=? AND timeframe=? AND timestamp=?"""
+                )
+                statement.bindString(1, error.take(1000))
+                statement.bindString(2, item.symbol)
+                statement.bindString(3, item.exchange)
+                statement.bindString(4, item.timeframe)
+                statement.bindString(5, item.candle.timestamp.toString())
+                statement.executeUpdateDelete() > 0
             } catch (ex: Exception) { Log.e("MarketRepository", "Pending candle retry update failed", ex); false }
         }
 
