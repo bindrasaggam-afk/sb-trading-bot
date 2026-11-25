@@ -230,14 +230,11 @@ object PaperSignalPolicy {
             )
         }
 
+        val slippageBps = safeSlippageBps(candidate.slippageBpsPerSide)
         val fillPrice = if (isBuy) {
-            quotePrice * (
-                1.0 + candidate.slippageBpsPerSide / 10_000.0
-                )
+            quotePrice * (1.0 + slippageBps / 10_000.0)
         } else {
-            quotePrice * (
-                1.0 - candidate.slippageBpsPerSide / 10_000.0
-                )
+            quotePrice * (1.0 - slippageBps / 10_000.0)
         }
         if (fillPrice < 0.0) {
             return PaperEntryDecision(
@@ -347,15 +344,16 @@ object PaperSignalPolicy {
         slippageBps: Double
     ): Double {
         if (!quotePrice.isFinite() || quotePrice <= 0.0) return stopLoss
+        val safeBps = safeSlippageBps(slippageBps)
         return if (side == OrderSide.BUY.name) {
             if (quotePrice <= stopLoss) {
-                quotePrice * (1.0 - slippageBps / 10_000.0)
+                quotePrice * (1.0 - safeBps / 10_000.0)
             } else {
                 stopLoss
             }
         } else {
             if (quotePrice >= stopLoss) {
-                quotePrice * (1.0 + slippageBps / 10_000.0)
+                quotePrice * (1.0 + safeBps / 10_000.0)
             } else {
                 stopLoss
             }
@@ -366,9 +364,16 @@ object PaperSignalPolicy {
         side: String,
         quotePrice: Double,
         slippageBps: Double
-    ): Double = if (side == OrderSide.BUY.name) {
-        quotePrice * (1.0 - slippageBps / 10_000.0)
-    } else {
-        quotePrice * (1.0 + slippageBps / 10_000.0)
+    ): Double {
+        if (!quotePrice.isFinite() || quotePrice <= 0.0) return 0.0
+        val safeBps = safeSlippageBps(slippageBps)
+        return if (side == OrderSide.BUY.name) {
+            quotePrice * (1.0 - safeBps / 10_000.0)
+        } else {
+            quotePrice * (1.0 + safeBps / 10_000.0)
+        }
     }
+
+    private fun safeSlippageBps(value: Double): Double =
+        if (value.isFinite()) value.coerceAtLeast(0.0) else 0.0
 }
