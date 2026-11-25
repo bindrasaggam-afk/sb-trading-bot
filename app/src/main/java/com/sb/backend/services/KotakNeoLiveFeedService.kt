@@ -677,7 +677,11 @@ class KotakNeoLiveFeedService(
                     )
                 }
 
-                enqueueQuotePersistence(quote)
+                // Persist quotes only when MarketDataManager accepts the tick.
+                // Raw tick archival above remains independent of acceptance.
+                if (tickResult.accepted) {
+                    enqueueQuotePersistence(quote)
+                }
 
                 val count = tickCount.incrementAndGet()
 
