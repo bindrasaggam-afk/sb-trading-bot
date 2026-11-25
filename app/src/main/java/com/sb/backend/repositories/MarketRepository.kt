@@ -859,10 +859,20 @@ class MarketRepository(
     fun removePendingCandlePersistence(item: PendingCandlePersistence): Boolean =
         maintenanceGate.withOperation {
             try {
+                // Delete only the exact queued snapshot that the worker successfully
+                // persisted. If a newer candle update replaced this identity while
+                // the save was in progress, its differing values keep it queued.
+                val c = item.candle
                 databaseHelper.writableDatabase.delete(
                     "candle_persistence_queue",
-                    "symbol=? AND exchange=? AND timeframe=? AND timestamp=?",
-                    arrayOf(item.symbol, item.exchange, item.timeframe, item.candle.timestamp.toString())
+                    """symbol=? AND exchange=? AND timeframe=? AND timestamp=?
+                       AND open=? AND high=? AND low=? AND close=? AND volume=?
+                       AND is_complete=? AND attempts=?""",
+                    arrayOf(
+                        item.symbol, item.exchange, item.timeframe, c.timestamp.toString(),
+                        c.open.toString(), c.high.toString(), c.low.toString(), c.close.toString(),
+                        c.volume.toString(), if (c.isComplete) "1" else "0", item.attempts.toString()
+                    )
                 ) > 0
             } catch (ex: Exception) { Log.e("MarketRepository", "Pending candle delete failed", ex); false }
         }
