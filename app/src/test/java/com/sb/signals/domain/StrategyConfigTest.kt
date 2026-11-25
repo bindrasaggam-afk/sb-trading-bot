@@ -86,6 +86,18 @@ class StrategyConfigTest {
     }
 
     @Test
+    fun rejectsNonFiniteRiskConfiguration() {
+        val config = StrategyDefaults.intraday()
+        var rejected = false
+        try {
+            config.copy(entryAtrBuffer = Double.NaN)
+        } catch (_: IllegalArgumentException) {
+            rejected = true
+        }
+        assertTrue(rejected)
+    }
+
+    @Test
     fun defaultCatalogContainsEveryCategory() {
         val configs = StrategyDefaults.all()
 
