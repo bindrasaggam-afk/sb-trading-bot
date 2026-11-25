@@ -292,6 +292,62 @@ class PaperSignalPolicyTest {
         )
     }
 
+    @Test
+    fun `gap through stop executes at worse quote plus adverse slippage`() {
+        assertEquals(
+            89.91,
+            PaperSignalPolicy.stopExecutionPrice(
+                OrderSide.BUY.name,
+                quotePrice = 90.0,
+                stopLoss = 95.0,
+                slippageBps = 10.0
+            ),
+            0.000001
+        )
+        assertEquals(
+            110.11,
+            PaperSignalPolicy.stopExecutionPrice(
+                OrderSide.SELL.name,
+                quotePrice = 110.0,
+                stopLoss = 105.0,
+                slippageBps = 10.0
+            ),
+            0.000001
+        )
+    }
+
+    @Test
+    fun `invalid and extreme slippage cannot create invalid fill prices`() {
+        assertEquals(
+            100.0,
+            PaperSignalPolicy.marketExecutionPrice(
+                OrderSide.BUY.name, 100.0, Double.NaN
+            ),
+            0.000001
+        )
+        assertEquals(
+            100.0,
+            PaperSignalPolicy.marketExecutionPrice(
+                OrderSide.BUY.name, 100.0, -50.0
+            ),
+            0.000001
+        )
+        assertTrue(
+            PaperSignalPolicy.marketExecutionPrice(
+                OrderSide.BUY.name, 100.0, 20_000.0
+            ) > 0.0
+        )
+    }
+
+    @Test
+    fun `partial quantities always allocate full quantity without over exit`() {
+        for (quantity in 1..500) {
+            val split = PaperSignalPolicy.partialQuantities(quantity)
+            assertEquals(quantity, split.first + split.second + split.third)
+            assertTrue(split.first >= 0 && split.second >= 0 && split.third >= 0)
+        }
+    }
+
     private fun candidate(): PaperSignalCandidate {
         return PaperSignalCandidate(
             signalId = 7L,
