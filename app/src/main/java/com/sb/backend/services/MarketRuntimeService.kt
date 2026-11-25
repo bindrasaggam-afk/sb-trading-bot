@@ -314,8 +314,45 @@ object MarketRuntimeService {
                 }
             }
         } catch (e: RejectedExecutionException) {
+            // Saturation fallback: preserve candle data in the durable SQLite
+            // queue rather than silently losing it. This rare path may block
+            // the feed callback briefly on SQLite; normal traffic stays async.
+            persistRejectedWorkToDurableQueue(key, finalized, live)
             failedWrites.incrementAndGet()
             recordError(e)
+        }
+    }
+
+    private fun persistRejectedWorkToDurableQueue(
+        key: InstrumentKey,
+        finalized: Map<MarketTimeframe, List<MarketCandle>>,
+        live: Map<MarketTimeframe, List<MarketCandle>>
+    ) {
+        if (!BackendManager.isInitialized()) {
+            recordError(IllegalStateException("Persistence executor saturated and backend not initialized"))
+            return
+        }
+        try {
+            val repo = BackendManager.market()
+            (finalized.mapValues { it.value to true } + live.mapValues { it.value to false })
+                .forEach { (timeframe, pair) ->
+                    pair.first.forEach { candle ->
+                        val saved = repo.enqueueCandlePersistence(
+                            key.symbol, key.exchange, timeframe.label,
+                            com.sb.backend.models.Candle(
+                                key.symbol, timeframe.label, candle.timestamp,
+                                candle.open, candle.high, candle.low, candle.close,
+                                candle.volume, pair.second, key.exchange
+                            ),
+                            "Worker queue saturation fallback"
+                        )
+                        if (!saved) {
+                            recordError(IllegalStateException("Saturation fallback could not enqueue candle"))
+                        }
+                    }
+                }
+        } catch (fallbackError: Exception) {
+            recordError(fallbackError)
         }
     }
 
