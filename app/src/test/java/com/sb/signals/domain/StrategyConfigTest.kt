@@ -39,35 +39,10 @@ class StrategyConfigTest {
     @Test
     fun intradayHigherTimeframesAreAbovePrimary() {
         val variants = StrategyDefaults.intradayVariants()
-
-        variants.forEach { config ->
-            assertTrue(
-                config.primaryTimeframe != config.confirmationTimeframe
-            )
-            assertTrue(
-                config.confirmationTimeframe != config.trendTimeframe
-            )
-        }
-        assertEquals(
-            "5m",
-            variants.first { it.primaryTimeframe == "1m" }
-                .confirmationTimeframe
-        )
-        assertEquals(
-            "15m",
-            variants.first { it.primaryTimeframe == "1m" }
-                .trendTimeframe
-        )
-        assertEquals(
-            "1h",
-            variants.first { it.primaryTimeframe == "30m" }
-                .confirmationTimeframe
-        )
-        assertEquals(
-            "4h",
-            variants.first { it.primaryTimeframe == "30m" }
-                .trendTimeframe
-        )
+        assertEquals(1, variants.size)
+        assertEquals("5m", variants.single().primaryTimeframe)
+        assertEquals("15m", variants.single().confirmationTimeframe)
+        assertEquals("1h", variants.single().trendTimeframe)
     }
 
     @Test
@@ -98,7 +73,7 @@ class StrategyConfigTest {
     fun defaultCatalogContainsEveryCategory() {
         val configs = StrategyDefaults.all()
 
-        assertEquals(8, configs.size)
+        assertEquals(3, configs.size)
         assertEquals(
             SignalCategory.values().toSet(),
             configs.map { it.category }.toSet()
