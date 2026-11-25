@@ -5,6 +5,7 @@ This branch is an observation/paper-signal hardening stage. It does not authoriz
 ## Revisions in this stage
 
 - Active Intraday configuration restricted to 5m primary / 15m confirmation / 1h trend.
+- Swing uses daily primary / weekly confirmation / monthly trend; Delivery uses daily / weekly / monthly. Swing reader now loads/aggregates a separate monthly trend series.
 - Intraday variants at 1m, 3m, 10m, 15m and 30m remain disabled pending separate validation.
 - Trend-timeframe confirmation checks that timeframe's own close and EMA fast/slow alignment.
 - Candidate gates require primary EMA structure, higher timeframe EMA alignment, trend timeframe EMA alignment, directional ADX, either RSI or MACD confirmation, and either volume expansion or breakout.
