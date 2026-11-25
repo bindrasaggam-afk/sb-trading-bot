@@ -79,6 +79,50 @@ class DatabaseMigrationsInstrumentedTest {
     }
 
     @Test
+    fun v12CandleQueueSchemaIsCreatedAndUniqueKeyPreventsDuplicates() {
+        val db = SQLiteDatabase.create(null)
+        try {
+            DatabaseMigrations.upgrade(db, oldVersion = 11)
+            db.rawQuery(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'candle_persistence_queue'",
+                null
+            ).use { cursor ->
+                assertTrue("Candle queue table must exist", cursor.moveToFirst())
+            }
+            db.execSQL(
+                """
+                INSERT INTO candle_persistence_queue(
+                    symbol, exchange, timeframe, timestamp, open, high, low,
+                    close, volume, is_complete, attempts, created_at
+                ) VALUES('SBTEST', 'NSE', '1m', 1700000000000,
+                         100, 110, 90, 105, 10, 0, 0, 1700000000000)
+                """.trimIndent()
+            )
+            var duplicateRejected = false
+            try {
+                db.execSQL(
+                    """
+                    INSERT INTO candle_persistence_queue(
+                        symbol, exchange, timeframe, timestamp, open, high, low,
+                        close, volume, is_complete, attempts, created_at
+                    ) VALUES('SBTEST', 'NSE', '1m', 1700000000000,
+                             100, 110, 90, 105, 10, 0, 0, 1700000000001)
+                    """.trimIndent()
+                )
+            } catch (_: SQLiteException) {
+                duplicateRejected = true
+            }
+            assertTrue("Queue unique key should reject duplicate candle", duplicateRejected)
+            db.rawQuery("SELECT COUNT(*) FROM candle_persistence_queue", null).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(1, cursor.getInt(0))
+            }
+        } finally {
+            db.close()
+        }
+    }
+
+    @Test
     fun candleValidationRejectsInvalidOhlcWithoutDeletingExistingRows() {
         val db = SQLiteDatabase.create(null)
         try {
