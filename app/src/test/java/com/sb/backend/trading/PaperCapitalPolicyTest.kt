@@ -71,6 +71,36 @@ class PaperCapitalPolicyTest {
     }
 
     @Test
+    fun `actual fill is rejected when reservation cannot cover revised cost`() {
+        val state = PaperCapitalState(
+            balance = 100_000.0,
+            reservedMargin = 20_040.0,
+            realizedPnl = 0.0
+        )
+        val higherActualFill = PaperCapitalRequirement(
+            orderValue = 99_000.0,
+            cashDebit = 99_000.0,
+            reservedMargin = 0.0,
+            entryCharge = 1_000.0
+        )
+
+        var rejected = false
+        try {
+            PaperCapitalPolicy.applyEntry(
+                state = state,
+                previousReservation = 20_040.0,
+                requirement = higherActualFill
+            )
+        } catch (_: IllegalStateException) {
+            rejected = true
+        }
+        assertTrue(
+            "Entry must not overdraw available capital after actual fill",
+            rejected
+        )
+    }
+
+    @Test
     fun `sell entry debits entry charge and keeps short margin reserved`() {
         val state = PaperCapitalState(
             balance = 100_000.0,
