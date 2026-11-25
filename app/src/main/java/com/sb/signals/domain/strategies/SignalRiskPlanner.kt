@@ -77,6 +77,18 @@ object SignalRiskPlanner {
         ) {
             return null
         }
+        if (!entryLow.isFinite() || !entryHigh.isFinite() ||
+            !stopLoss.isFinite() || !target1.isFinite() ||
+            !target2.isFinite() || !target3.isFinite() ||
+            entryLow > entryHigh
+        ) return null
+        val levelsValid = when (direction) {
+            SignalDirection.BUY -> stopLoss < entryLow &&
+                target1 > close && target2 > target1 && target3 > target2
+            SignalDirection.SELL -> stopLoss > entryHigh &&
+                target1 < close && target2 < target1 && target3 < target2
+        }
+        if (!levelsValid) return null
 
         val riskPerUnit = when (direction) {
             SignalDirection.BUY -> close - stopLoss
