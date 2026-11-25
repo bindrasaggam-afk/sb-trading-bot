@@ -76,14 +76,9 @@ data class StrategyConfig(
 
 object StrategyDefaults {
 
-    val intradayTimeframes: List<String> = listOf(
-        "1m",
-        "3m",
-        "5m",
-        "10m",
-        "15m",
-        "30m"
-    )
+    // Only the validated 5m intraday strategy is active for observation.
+    // Other timeframe variants remain intentionally disabled until separately validated.
+    val intradayTimeframes: List<String> = listOf("5m")
 
     fun intraday(timeframe: String = "5m"): StrategyConfig {
         require(timeframe in intradayTimeframes)
