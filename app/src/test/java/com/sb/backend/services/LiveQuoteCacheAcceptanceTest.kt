@@ -52,12 +52,48 @@ class LiveQuoteCacheAcceptanceTest {
         }
     }
 
-    private fun quote(price: Double) = Quote(
+    @Test
+    fun staleExchangeTimestampIsRejectedWithoutListenerNotification() {
+        LiveQuoteCache.clear()
+        var notifications = 0
+        val listener: (Quote) -> Unit = { notifications++ }
+        LiveQuoteCache.addListener(listener)
+        try {
+            val newer = quote(105.0, timestamp = 2_000L, exchangeTimestamp = 2_000L)
+            val stale = quote(99.0, timestamp = 3_000L, exchangeTimestamp = 1_500L)
+
+            assertTrue(LiveQuoteCache.updateIfAccepted(newer, accepted = true))
+            assertFalse(LiveQuoteCache.updateIfAccepted(stale, accepted = true))
+            assertSame(newer, LiveQuoteCache.get("SBIN", "NSE"))
+            assertEquals(1, notifications)
+        } finally {
+            LiveQuoteCache.removeListener(listener)
+        }
+    }
+
+
+    @Test
+    fun staleLocalTimestampIsRejectedWhenExchangeTimestampMissing() {
+        LiveQuoteCache.clear()
+        val newer = quote(106.0, timestamp = 2_000L)
+        val stale = quote(98.0, timestamp = 1_500L)
+
+        assertTrue(LiveQuoteCache.update(newer))
+        assertFalse(LiveQuoteCache.update(stale))
+        assertSame(newer, LiveQuoteCache.get("SBIN", "NSE"))
+    }
+
+    private fun quote(
+        price: Double,
+        timestamp: Long = 1_000L,
+        exchangeTimestamp: Long? = null
+    ) = Quote(
         symbol = "SBIN",
         exchange = "NSE",
         ltp = price,
-        timestamp = 1_000L,
-        receivedAt = 1_000L,
+        timestamp = timestamp,
+        receivedAt = timestamp,
+        exchangeTimestamp = exchangeTimestamp,
         isLive = true
     )
 }
