@@ -211,14 +211,12 @@ class PaperRepository(
                     "Expected entry price is invalid."
                 }
                 val rules = sizingRules(candidate.costBpsPerSide)
-                val allowedQuantity = minOf(
-                    quantity,
-                    PaperSignalPolicy.initialQuantity(
-                        candidate = candidate,
-                        availableBalance = account.availableBalance,
-                        rules = rules,
-                        expectedEntryPrice = expectedEntry
-                    )
+                val allowedQuantity = maxAffordableQuantity(
+                    candidate = candidate,
+                    requestedQuantity = quantity,
+                    availableBalance = account.availableBalance,
+                    rules = rules,
+                    expectedEntryPrice = expectedEntry
                 )
                 check(allowedQuantity > 0) {
                     "Insufficient available capital for this signal."
@@ -372,13 +370,14 @@ class PaperRepository(
                 val availableWithReservation =
                     account.availableBalance + order.reservedMargin
                 val rules = sizingRules(order.costBpsPerSide)
-                val allowedQuantity = PaperSignalPolicy.initialQuantity(
+                val allowedQuantity = maxAffordableQuantity(
                     candidate = candidate,
+                    requestedQuantity = order.quantity,
                     availableBalance = availableWithReservation,
                     rules = rules,
                     expectedEntryPrice = executionPrice
                 )
-                val quantity = minOf(order.quantity, allowedQuantity)
+                val quantity = allowedQuantity
                 check(quantity > 0) {
                     "Actual entry price exceeds available paper capital."
                 }
@@ -1443,6 +1442,64 @@ class PaperRepository(
                 arrayOf("1")
             ) == 1
         ) { message }
+    }
+
+    /**
+     * Sizes entries against the exact Kotak entry charge model, not a generic
+     * bps estimate. The caller's risk/allocation sizing remains the upper bound.
+     */
+    private fun maxAffordableQuantity(
+        candidate: PaperSignalCandidate,
+        requestedQuantity: Int,
+        availableBalance: Double,
+        rules: PaperSizingRules,
+        expectedEntryPrice: Double
+    ): Int {
+        if (requestedQuantity <= 0 ||
+            !availableBalance.isFinite() ||
+            availableBalance <= 0.0 ||
+            !expectedEntryPrice.isFinite() ||
+            expectedEntryPrice <= 0.0
+        ) return 0
+
+        val policyLimit = PaperSignalPolicy.initialQuantity(
+            candidate = candidate,
+            availableBalance = availableBalance,
+            rules = rules,
+            expectedEntryPrice = expectedEntryPrice
+        ).coerceAtMost(requestedQuantity)
+        if (policyLimit <= 0) return 0
+
+        fun reservationFor(quantity: Int): Double {
+            val base = PaperSignalPolicy.capitalRequirement(
+                side = candidate.side,
+                price = expectedEntryPrice,
+                quantity = quantity,
+                costBpsPerSide = candidate.costBpsPerSide,
+                shortMarginRate = AppConfig.get().shortMarginRate
+            )
+            val charges = KotakEquityCharges.calculate(
+                side = candidate.side,
+                category = candidate.category,
+                price = expectedEntryPrice,
+                quantity = quantity,
+                exchange = candidate.exchange
+            )
+            return base.copy(entryCharge = charges.total).totalReservation
+        }
+
+        var low = 0
+        var high = policyLimit
+        while (low < high) {
+            val mid = low + (high - low + 1) / 2
+            val requirement = reservationFor(mid)
+            if (requirement.isFinite() && requirement <= availableBalance) {
+                low = mid
+            } else {
+                high = mid - 1
+            }
+        }
+        return low
     }
 
     private fun sizingRules(costBpsPerSide: Double): PaperSizingRules {
