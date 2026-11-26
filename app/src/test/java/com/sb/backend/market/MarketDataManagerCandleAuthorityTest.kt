@@ -6,6 +6,7 @@ import com.sb.backend.market.model.MarketCandle
 import com.sb.backend.market.model.MarketTick
 import com.sb.backend.market.model.MarketTimeframe
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.After
 import org.junit.Test
@@ -18,6 +19,31 @@ class MarketDataManagerCandleAuthorityTest {
     @After
     fun tearDown() {
         MarketDataManager.clear()
+    }
+
+    @Test
+    fun multipleSubscribersOnlyUnsubscribeOnFinalRelease() {
+        MarketDataManager.clear()
+
+        // First owner creates the live subscription; second owner shares it.
+        assertTrue(MarketDataManager.subscribe(key))
+        assertFalse(MarketDataManager.subscribe(key))
+        assertTrue(MarketDataManager.isSubscribed(key))
+        assertEquals(listOf(key), MarketDataManager.activeKeys())
+
+        // Releasing one owner must not remove the shared subscription.
+        assertFalse(MarketDataManager.unsubscribe(key))
+        assertTrue(MarketDataManager.isSubscribed(key))
+        assertEquals(listOf(key), MarketDataManager.activeKeys())
+
+        // The last owner removes the subscription.
+        assertTrue(MarketDataManager.unsubscribe(key))
+        assertFalse(MarketDataManager.isSubscribed(key))
+        assertTrue(MarketDataManager.activeKeys().isEmpty())
+
+        // Unmatched release must not resurrect or change state.
+        assertFalse(MarketDataManager.unsubscribe(key))
+        assertFalse(MarketDataManager.isSubscribed(key))
     }
 
     @Test
