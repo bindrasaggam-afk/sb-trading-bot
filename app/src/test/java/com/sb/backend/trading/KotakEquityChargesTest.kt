@@ -55,6 +55,34 @@ class KotakEquityChargesTest {
     }
 
     @Test
+    fun `delivery sell applies dp minimum and adds dp gst`() {
+        val fees = KotakEquityCharges.calculate(
+            side = "SELL",
+            category = "DELIVERY",
+            price = 100.0,
+            quantity = 1
+        )
+        assertEquals(20.0, fees.dpCharge, 0.000001)
+        assertEquals(
+            (fees.brokerage + fees.exchangeTransaction +
+                fees.sebiTurnover + fees.dpCharge) * 0.18,
+            fees.gst,
+            0.000001
+        )
+    }
+
+    @Test
+    fun `intraday sells do not incur delivery dp fee`() {
+        val fees = KotakEquityCharges.calculate(
+            side = "SELL",
+            category = "INTRADAY",
+            price = 100_000.0,
+            quantity = 10
+        )
+        assertEquals(0.0, fees.dpCharge, 0.000001)
+    }
+
+    @Test
     fun `BSE cash fee uses published standard nonexclusive rate`() {
         val fees = KotakEquityCharges.calculate(
             side = "BUY",
