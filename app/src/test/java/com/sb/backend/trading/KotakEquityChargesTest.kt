@@ -60,7 +60,8 @@ class KotakEquityChargesTest {
             side = "SELL",
             category = "DELIVERY",
             price = 100.0,
-            quantity = 1
+            quantity = 1,
+            isExit = true
         )
         assertEquals(20.0, fees.dpCharge, 0.000001)
         assertEquals(
@@ -69,6 +70,17 @@ class KotakEquityChargesTest {
             fees.gst,
             0.000001
         )
+    }
+
+    @Test
+    fun `delivery short entry does not incur dp debit charge`() {
+        val fees = KotakEquityCharges.calculate(
+            side = "SELL",
+            category = "DELIVERY",
+            price = 1_000.0,
+            quantity = 1
+        )
+        assertEquals(0.0, fees.dpCharge, 0.000001)
     }
 
     @Test
