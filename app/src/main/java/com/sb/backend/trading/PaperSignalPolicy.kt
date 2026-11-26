@@ -133,11 +133,7 @@ object PaperSignalPolicy {
         }
         val reference = candidate.referencePrice.coerceIn(low, high)
         if (!applySlippage) return reference
-        val bps = if (candidate.slippageBpsPerSide.isFinite()) {
-            candidate.slippageBpsPerSide.coerceAtLeast(0.0)
-        } else {
-            0.0
-        }
+        val bps = safeSlippageBps(candidate.slippageBpsPerSide)
         val slipped = if (candidate.side == OrderSide.BUY.name) {
             reference * (1.0 + bps / 10_000.0)
         } else {
@@ -232,11 +228,11 @@ object PaperSignalPolicy {
 
         val fillPrice = if (isBuy) {
             quotePrice * (
-                1.0 + candidate.slippageBpsPerSide / 10_000.0
+                1.0 + safeSlippageBps(candidate.slippageBpsPerSide) / 10_000.0
                 )
         } else {
             quotePrice * (
-                1.0 - candidate.slippageBpsPerSide / 10_000.0
+                1.0 - safeSlippageBps(candidate.slippageBpsPerSide) / 10_000.0
                 )
         }
         if (fillPrice < 0.0) {
@@ -349,13 +345,13 @@ object PaperSignalPolicy {
         if (!quotePrice.isFinite() || quotePrice <= 0.0) return stopLoss
         return if (side == OrderSide.BUY.name) {
             if (quotePrice <= stopLoss) {
-                quotePrice * (1.0 - slippageBps / 10_000.0)
+                quotePrice * (1.0 - safeSlippageBps(slippageBps) / 10_000.0)
             } else {
                 stopLoss
             }
         } else {
             if (quotePrice >= stopLoss) {
-                quotePrice * (1.0 + slippageBps / 10_000.0)
+                quotePrice * (1.0 + safeSlippageBps(slippageBps) / 10_000.0)
             } else {
                 stopLoss
             }
