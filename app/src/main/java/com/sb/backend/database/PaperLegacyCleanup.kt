@@ -347,13 +347,17 @@ object PaperLegacyCleanup {
                     costBpsPerSide = order.costBpsPerSide,
                     shortMarginRate = AppConfig.get().shortMarginRate
                 )
-                val actualEntryCharges = KotakEquityCharges.calculate(
-                    side = order.side,
-                    category = order.category,
-                    price = order.entryPrice,
-                    quantity = order.quantity,
-                    exchange = order.exchange
-                ).total
+                val actualEntryCharges = try {
+                    KotakEquityCharges.calculate(
+                        side = order.side,
+                        category = order.category,
+                        price = order.entryPrice,
+                        quantity = order.quantity,
+                        exchange = order.exchange
+                    ).total
+                } catch (_: IllegalArgumentException) {
+                    baseRequirement.entryCharge
+                }
                 val requirement = baseRequirement.copy(
                     entryCharge = actualEntryCharges
                 )
@@ -438,8 +442,8 @@ object PaperLegacyCleanup {
                         signalId = cursor.getLongOrNull(1),
                         entrySource = cursor.getString(2),
                         side = cursor.getString(3),
-                        exchange = cursor.getString(4),
-                        category = cursor.getString(5),
+                        exchange = cursor.getString(4) ?: AppConfig.get().defaultExchange,
+                        category = cursor.getString(5) ?: "DELIVERY",
                         quantity = cursor.getInt(6),
                         entryPrice = cursor.getDouble(7),
                         exitPrice = cursor.getDoubleOrNull(8),
