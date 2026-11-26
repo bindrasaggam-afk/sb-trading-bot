@@ -1176,7 +1176,8 @@ class PaperRepository(
             }
 
             val result = ArrayList<Position>()
-            databaseHelper.readableDatabase.query(
+            val db = databaseHelper.readableDatabase
+            db.query(
                 SBDatabaseHelper.TABLE_POSITIONS,
                 positionProjection,
                 selection,
@@ -1186,7 +1187,7 @@ class PaperRepository(
                 "opened_at DESC"
             ).use { cursor ->
                 while (cursor.moveToNext()) {
-                    result.add(readPosition(cursor))
+                    result.add(withEstimatedCharges(db, readPosition(cursor)))
                 }
             }
             result
@@ -1533,10 +1534,34 @@ class PaperRepository(
             "opened_at DESC"
         ).use { cursor ->
             while (cursor.moveToNext()) {
-                result.add(readPosition(cursor))
+                result.add(withEstimatedCharges(db, readPosition(cursor)))
             }
         }
         return result
+    }
+
+    private fun withEstimatedCharges(
+        db: SQLiteDatabase,
+        position: Position
+    ): Position {
+        val order = queryOrder(db, position.orderId) ?: return position
+        val remainingQuantity = position.quantity.coerceAtLeast(0)
+        val allocatedEntryCharge = PaperSignalPolicy.allocatedEntryCharge(
+            totalEntryCharge = order.entryCharges,
+            originalQuantity = order.quantity,
+            exitQuantity = remainingQuantity
+        )
+        val estimatedExitCharge = PaperSignalPolicy.exitCharge(
+            price = position.lastPrice,
+            quantity = remainingQuantity,
+            costBps = order.costBpsPerSide
+        )
+        val estimate = allocatedEntryCharge + estimatedExitCharge
+        return if (estimate.isFinite() && estimate >= 0.0) {
+            position.copy(estimatedCharges = estimate)
+        } else {
+            position
+        }
     }
 
     private fun queryPositionByOrderId(
