@@ -6,6 +6,7 @@ import android.database.sqlite.SQLiteDatabase
 import com.sb.backend.core.AppConfig
 import com.sb.backend.models.OrderSide
 import com.sb.backend.models.OrderStatus
+import com.sb.backend.trading.KotakEquityCharges
 import com.sb.backend.trading.PaperSignalPolicy
 import java.io.File
 
@@ -336,12 +337,22 @@ object PaperLegacyCleanup {
             }
 
             if (order.status == OrderStatus.PENDING.name) {
-                val requirement = PaperSignalPolicy.capitalRequirement(
+                val baseRequirement = PaperSignalPolicy.capitalRequirement(
                     side = order.side,
                     price = order.entryPrice,
                     quantity = order.quantity,
                     costBpsPerSide = order.costBpsPerSide,
                     shortMarginRate = AppConfig.get().shortMarginRate
+                )
+                val actualEntryCharges = KotakEquityCharges.calculate(
+                    side = order.side,
+                    category = order.category,
+                    price = order.entryPrice,
+                    quantity = order.quantity,
+                    exchange = order.exchange
+                ).total
+                val requirement = baseRequirement.copy(
+                    entryCharge = actualEntryCharges
                 )
                 val requiredReservation = if (order.reservedMargin > 0.0) {
                     order.reservedMargin
@@ -400,6 +411,8 @@ object PaperLegacyCleanup {
                 "signal_id",
                 "entry_source",
                 "side",
+                "exchange",
+                "signal_category",
                 "quantity",
                 "entry_price",
                 "exit_price",
@@ -422,14 +435,16 @@ object PaperLegacyCleanup {
                         signalId = cursor.getLongOrNull(1),
                         entrySource = cursor.getString(2),
                         side = cursor.getString(3),
-                        quantity = cursor.getInt(4),
-                        entryPrice = cursor.getDouble(5),
-                        exitPrice = cursor.getDoubleOrNull(6),
-                        reservedMargin = cursor.getDouble(7),
-                        status = cursor.getString(8),
-                        entryTimestamp = cursor.getLongOrNull(9),
-                        entryCharges = cursor.getDouble(10),
-                        costBpsPerSide = cursor.getDouble(11)
+                        exchange = cursor.getString(4),
+                        category = cursor.getString(5),
+                        quantity = cursor.getInt(6),
+                        entryPrice = cursor.getDouble(7),
+                        exitPrice = cursor.getDoubleOrNull(8),
+                        reservedMargin = cursor.getDouble(9),
+                        status = cursor.getString(10),
+                        entryTimestamp = cursor.getLongOrNull(11),
+                        entryCharges = cursor.getDouble(12),
+                        costBpsPerSide = cursor.getDouble(13)
                     )
                 )
             }
