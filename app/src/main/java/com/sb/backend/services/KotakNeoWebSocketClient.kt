@@ -530,9 +530,8 @@ class KotakNeoWebSocketClient(
                 }
 
                 if (!activeSocket.send(payload.toString())) {
-                    status(
-                        "ERROR | Scrip subscription send failed"
-                    )
+                    status("ERROR | Scrip subscription send failed; reconnecting to reconcile desired state")
+                    activeSocket.close(1011, "Scrip subscription send failed")
                 }
             }
     }
@@ -555,9 +554,8 @@ class KotakNeoWebSocketClient(
                 }
 
                 if (!activeSocket.send(payload.toString())) {
-                    status(
-                        "ERROR | Scrip unsubscribe send failed"
-                    )
+                    status("ERROR | Scrip unsubscribe send failed; reconnecting to reconcile desired state")
+                    activeSocket.close(1011, "Scrip unsubscribe send failed")
                 }
             }
     }
@@ -632,9 +630,8 @@ class KotakNeoWebSocketClient(
                 }
 
                 if (!activeSocket.send(payload.toString())) {
-                    status(
-                        "ERROR | Index subscription send failed"
-                    )
+                    status("ERROR | Index subscription send failed; reconnecting to reconcile desired state")
+                    activeSocket.close(1011, "Index subscription send failed")
                 }
             }
     }
@@ -656,9 +653,8 @@ class KotakNeoWebSocketClient(
                 }
 
                 if (!activeSocket.send(payload.toString())) {
-                    status(
-                        "ERROR | Index unsubscribe send failed"
-                    )
+                    status("ERROR | Index unsubscribe send failed; reconnecting to reconcile desired state")
+                    activeSocket.close(1011, "Index unsubscribe send failed")
                 }
             }
     }
