@@ -245,11 +245,8 @@ class KotakNeoLiveFeedService(
             "${key.feedSegment}|${key.token}"
         }.distinct()
 
-        if (tokens.isNotEmpty()) {
-            ws.subscribe(tokens)
-        }
-
-        ws.subscribeIndices(indexFeedTokens)
+        ws.replaceSubscriptions(tokens)
+        ws.replaceIndexSubscriptions(indexFeedTokens)
 
         onStatus(
             "Live feed subscription requested: " +
