@@ -64,12 +64,17 @@ data class PaperEntryDecision(
 
 object PaperSignalPolicy {
 
+    private fun isValidSide(side: String): Boolean {
+        return side == OrderSide.BUY.name || side == OrderSide.SELL.name
+    }
+
     fun initialQuantity(
         candidate: PaperSignalCandidate,
         availableBalance: Double,
         rules: PaperSizingRules,
         expectedEntryPrice: Double = candidate.referencePrice
     ): Int {
+        if (!isValidSide(candidate.side)) return 0
         if (!availableBalance.isFinite() || availableBalance <= 0.0) {
             return 0
         }
@@ -121,6 +126,7 @@ object PaperSignalPolicy {
         candidate: PaperSignalCandidate,
         applySlippage: Boolean = false
     ): Double {
+        if (!isValidSide(candidate.side)) return 0.0
         if (!candidate.referencePrice.isFinite() ||
             candidate.referencePrice <= 0.0
         ) {
@@ -149,6 +155,9 @@ object PaperSignalPolicy {
         costBpsPerSide: Double,
         shortMarginRate: Double
     ): PaperCapitalRequirement {
+        if (!isValidSide(side)) {
+            return PaperCapitalRequirement(0.0, 0.0, 0.0, 0.0)
+        }
         val safePrice = if (price.isFinite() && price > 0.0) price else 0.0
         val safeQuantity = quantity.coerceAtLeast(0)
         val orderValue = safePrice * safeQuantity
@@ -180,6 +189,12 @@ object PaperSignalPolicy {
             return PaperEntryDecision(
                 PaperEntryDecisionType.CANCEL,
                 reason = "Signal expired before entry"
+            )
+        }
+        if (!isValidSide(candidate.side)) {
+            return PaperEntryDecision(
+                PaperEntryDecisionType.CANCEL,
+                reason = "Invalid signal side"
             )
         }
         if (!quotePrice.isFinite() || quotePrice <= 0.0) {
@@ -278,6 +293,7 @@ object PaperSignalPolicy {
         exitPrice: Double,
         quantity: Int
     ): Double {
+        if (!isValidSide(side)) return 0.0
         val direction = if (side == OrderSide.BUY.name) 1.0 else -1.0
         return (exitPrice - entryPrice) * quantity * direction
     }
@@ -320,20 +336,30 @@ object PaperSignalPolicy {
         side: String,
         price: Double,
         stopLoss: Double
-    ): Boolean = if (side == OrderSide.BUY.name) {
-        price <= stopLoss
-    } else {
-        price >= stopLoss
+    ): Boolean {
+        if (!isValidSide(side) || !price.isFinite() || price <= 0.0 ||
+            !stopLoss.isFinite() || stopLoss <= 0.0
+        ) return false
+        return if (side == OrderSide.BUY.name) {
+            price <= stopLoss
+        } else {
+            price >= stopLoss
+        }
     }
 
     fun isTargetHit(
         side: String,
         price: Double,
         target: Double
-    ): Boolean = if (side == OrderSide.BUY.name) {
-        price >= target
-    } else {
-        price <= target
+    ): Boolean {
+        if (!isValidSide(side) || !price.isFinite() || price <= 0.0 ||
+            !target.isFinite() || target <= 0.0
+        ) return false
+        return if (side == OrderSide.BUY.name) {
+            price >= target
+        } else {
+            price <= target
+        }
     }
 
     fun stopExecutionPrice(
@@ -342,6 +368,7 @@ object PaperSignalPolicy {
         stopLoss: Double,
         slippageBps: Double
     ): Double {
+        if (!isValidSide(side)) return 0.0
         if (!quotePrice.isFinite() || quotePrice <= 0.0) return stopLoss
         return if (side == OrderSide.BUY.name) {
             if (quotePrice <= stopLoss) {
