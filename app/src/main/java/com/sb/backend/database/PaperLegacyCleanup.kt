@@ -299,6 +299,9 @@ object PaperLegacyCleanup {
                         execution.charges.isFinite() &&
                         execution.charges > 0.0
                     ) {
+                        (execution.charges - allocatedEntryCharge)
+                            .coerceAtLeast(0.0)
+                    } else {
                         PaperSignalPolicy.exitCharge(
                             price = execution.price,
                             quantity = execution.quantity,
