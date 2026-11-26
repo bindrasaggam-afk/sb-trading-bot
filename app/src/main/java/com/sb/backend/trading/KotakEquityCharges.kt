@@ -3,10 +3,11 @@ package com.sb.backend.trading
 /**
  * Kotak Securities equity-cash paper charge model.
  *
- * Broker brokerage defaults are taken from Kotak's published mandatory tariff
- * sheet: intraday ₹0.01 per scrip/order; delivery 0.25%, minimum ₹20/order.
- * Exchange/statutory rates are separately versioned below. This is a simulation
- * profile, not a contract-note guarantee; broker plans and circulars can change.
+ * This profile models the post-promotional Kotak Neo Trade Free Plan tariffs:
+ * delivery brokerage 0.20% and intraday brokerage 0.05% of turnover capped
+ * at ₹10 per order. The first-30-days promotional waiver is not modelled because
+ * account tenure is unknown. Broker plans can change; this is not a contract-note
+ * guarantee. Exchange/statutory rates are separately versioned below.
  */
 data class PaperChargeBreakdown(
     val brokerage: Double,
@@ -23,10 +24,10 @@ data class PaperChargeBreakdown(
 }
 
 object KotakEquityCharges {
-    const val PROFILE_ID = "KOTAK_EQUITY_CASH_2026_04"
-    const val BROKERAGE_DELIVERY_RATE = 0.0025
-    const val BROKERAGE_DELIVERY_MINIMUM = 20.0
-    const val BROKERAGE_INTRADAY_PER_ORDER = 0.01
+    const val PROFILE_ID = "KOTAK_TRADE_FREE_POST_PROMO_2026_11"
+    const val BROKERAGE_DELIVERY_RATE = 0.002
+    const val BROKERAGE_INTRADAY_RATE = 0.0005
+    const val BROKERAGE_INTRADAY_MAXIMUM = 10.0
     const val NSE_TRANSACTION_RATE = 307.0 / 10_000_000.0
     const val BSE_TRANSACTION_RATE = 375.0 / 10_000_000.0
     const val SEBI_TURNOVER_RATE = 10.0 / 10_000_000.0
@@ -65,9 +66,9 @@ object KotakEquityCharges {
         val intraday = category.trim().equals("INTRADAY", true)
         val turnover = price * quantity
         val brokerage = if (intraday) {
-            BROKERAGE_INTRADAY_PER_ORDER
+            minOf(BROKERAGE_INTRADAY_MAXIMUM, turnover * BROKERAGE_INTRADAY_RATE)
         } else {
-            maxOf(BROKERAGE_DELIVERY_MINIMUM, turnover * BROKERAGE_DELIVERY_RATE)
+            turnover * BROKERAGE_DELIVERY_RATE
         }
         val stt = if (intraday) {
             if (normalizedSide == "SELL") turnover * STT_INTRADAY_SELL_RATE else 0.0
