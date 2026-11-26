@@ -379,12 +379,15 @@ class PaperTradingEngine(
             }
             if (quantity <= 0) return@forEach
 
-            val executionPrice = if (
-                order.side == OrderSide.BUY.name
-            ) {
-                maxOf(level, ltp)
-            } else {
-                minOf(level, ltp)
+            // A gap beyond the target is not credited at the better
+            // live quote. Simulate at the target level with adverse exit slippage.
+            val executionPrice = PaperSignalPolicy.targetExecutionPrice(
+                side = order.side,
+                targetPrice = level,
+                slippageBps = order.slippageBpsPerSide
+            )
+            if (!executionPrice.isFinite() || executionPrice <= 0.0) {
+                return@forEach
             }
             val updated = paperRepository.exitSignalOrder(
                 orderId = current.id,
