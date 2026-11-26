@@ -153,8 +153,10 @@ object MarketDataManager {
     fun getCandles(
         key: InstrumentKey,
         timeframe: com.sb.backend.market.model.MarketTimeframe
-    ): List<com.sb.backend.market.model.MarketCandle> =
-        candleEngine.candles(key, timeframe)
+    ): List<com.sb.backend.market.model.MarketCandle> {
+        touchCache(key.key())
+        return candleEngine.candles(key, timeframe)
+    }
 
     fun seedCandles(
         key: InstrumentKey,
@@ -170,14 +172,18 @@ object MarketDataManager {
         key: InstrumentKey,
         timeframe: com.sb.backend.market.model.MarketTimeframe,
         timestamp: Long
-    ): com.sb.backend.market.model.MarketCandle? =
-        candleEngine.candleAt(key, timeframe, timestamp)
+    ): com.sb.backend.market.model.MarketCandle? {
+        touchCache(key.key())
+        return candleEngine.candleAt(key, timeframe, timestamp)
+    }
 
     fun latestCandle(
         key: InstrumentKey,
         timeframe: com.sb.backend.market.model.MarketTimeframe
-    ): com.sb.backend.market.model.MarketCandle? =
-        candleEngine.candles(key, timeframe).lastOrNull()
+    ): com.sb.backend.market.model.MarketCandle? {
+        touchCache(key.key())
+        return candleEngine.candles(key, timeframe).lastOrNull()
+    }
 
     fun candleDiagnostics(): CandleEngine.Diagnostics =
         candleEngine.diagnostics()
@@ -339,8 +345,10 @@ object MarketDataManager {
     // TICK ACCESS
     // ------------------------------------------------------------
 
-    fun getTick(key: InstrumentKey): MarketTick? =
-        latestTicks[key.key()]
+    fun getTick(key: InstrumentKey): MarketTick? {
+        touchCache(key.key())
+        return latestTicks[key.key()]
+    }
 
     fun getTickValue(key: InstrumentKey): MarketTick? =
         getTick(key)
