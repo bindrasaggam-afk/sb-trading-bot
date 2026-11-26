@@ -14,11 +14,12 @@ data class PaperChargeBreakdown(
     val exchangeTransaction: Double,
     val sebiTurnover: Double,
     val gst: Double,
-    val stampDuty: Double
+    val stampDuty: Double,
+    val dpCharge: Double = 0.0
 ) {
     val total: Double
         get() = brokerage + stt + exchangeTransaction +
-            sebiTurnover + gst + stampDuty
+            sebiTurnover + gst + stampDuty + dpCharge
 }
 
 object KotakEquityCharges {
@@ -34,6 +35,8 @@ object KotakEquityCharges {
     const val STT_INTRADAY_SELL_RATE = 0.00025
     const val STAMP_DELIVERY_BUY_RATE = 0.00015
     const val STAMP_INTRADAY_BUY_RATE = 0.00003
+    const val DP_DELIVERY_SELL_RATE = 0.0004
+    const val DP_DELIVERY_SELL_MINIMUM = 20.0
 
     fun calculate(
         side: String,
@@ -43,7 +46,7 @@ object KotakEquityCharges {
         exchange: String = "NSE"
     ): PaperChargeBreakdown {
         if (!price.isFinite() || price <= 0.0 || quantity <= 0) {
-            return PaperChargeBreakdown(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            return PaperChargeBreakdown(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         }
         val exchangeRate = when (exchange.trim().uppercase()) {
             "NSE" -> NSE_TRANSACTION_RATE
@@ -72,7 +75,12 @@ object KotakEquityCharges {
         }
         val exchangeCharge = turnover * exchangeRate
         val sebi = turnover * SEBI_TURNOVER_RATE
-        val gst = (brokerage + exchangeCharge + sebi) * GST_RATE
+        val gst = (brokerage + exchangeCharge + sebi + dpCharge) * GST_RATE
+        val dpCharge = if (!intraday && normalizedSide == "SELL") {
+            maxOf(DP_DELIVERY_SELL_MINIMUM, turnover * DP_DELIVERY_SELL_RATE)
+        } else {
+            0.0
+        }
         val stamp = if (normalizedSide == "BUY") {
             turnover * if (intraday) STAMP_INTRADAY_BUY_RATE
             else STAMP_DELIVERY_BUY_RATE
@@ -85,7 +93,8 @@ object KotakEquityCharges {
             exchangeTransaction = exchangeCharge,
             sebiTurnover = sebi,
             gst = gst,
-            stampDuty = stamp
+            stampDuty = stamp,
+            dpCharge = dpCharge
         )
     }
 }
