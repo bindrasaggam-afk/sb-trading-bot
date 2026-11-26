@@ -287,7 +287,7 @@ object KotakSessionCoordinator {
                     liveFeedService
                 }
 
-                if (service == null || !service.isConnected()) {
+                if (service == null || !service.isAuthenticated()) {
                     updateStatus(
                         "Live subscribe queued: $exchange:$symbol; " +
                             "desired-state will restore after authentication"
