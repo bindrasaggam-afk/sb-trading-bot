@@ -14,7 +14,7 @@ class KotakEquityChargesTest {
             price = 1_000.0,
             quantity = 10
         )
-        assertEquals(0.01, fees.brokerage, 0.000001)
+        assertEquals(0.50, fees.brokerage, 0.000001)
         assertEquals(0.0, fees.stt, 0.000001)
         assertEquals(0.30, fees.stampDuty, 0.000001)
         assertTrue(fees.gst > 0.0)
@@ -47,7 +47,7 @@ class KotakEquityChargesTest {
             price = 100.0,
             quantity = 1
         )
-        assertEquals(20.0, buy.brokerage, 0.000001)
+        assertEquals(0.20, buy.brokerage, 0.000001)
         assertEquals(0.10, buy.stt, 0.000001)
         assertEquals(0.10, sell.stt, 0.000001)
         assertEquals(0.015, buy.stampDuty, 0.000001)
@@ -128,4 +128,20 @@ class KotakEquityChargesTest {
         }
         assertTrue(sideRejected)
     }
+    @Test
+    fun `intraday brokerage uses turnover rate capped at ten rupees`() {
+        val belowCap = KotakEquityCharges.calculate(
+            side = "BUY", category = "INTRADAY", price = 10_000.0, quantity = 1
+        )
+        val atCap = KotakEquityCharges.calculate(
+            side = "BUY", category = "INTRADAY", price = 20_000.0, quantity = 1
+        )
+        val aboveCap = KotakEquityCharges.calculate(
+            side = "BUY", category = "INTRADAY", price = 50_000.0, quantity = 1
+        )
+        assertEquals(5.0, belowCap.brokerage, 0.000001)
+        assertEquals(10.0, atCap.brokerage, 0.000001)
+        assertEquals(10.0, aboveCap.brokerage, 0.000001)
+    }
+
 }
