@@ -10,6 +10,7 @@ import com.sb.backend.models.Candle
 import com.sb.backend.models.Instrument
 import com.sb.backend.security.KotakNeoSecureStore
 import java.util.concurrent.ExecutorService
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -48,6 +49,9 @@ object KotakSessionCoordinator {
     private var secureStore: KotakNeoSecureStore? = null
     private var autoLoginManager: KotakAutoLoginManager? = null
     private var liveFeedService: KotakNeoLiveFeedService? = null
+
+    // Desired subscriptions survive feed-service replacement/disconnect.
+    private val desiredSubscriptions = ConcurrentHashMap<String, Instrument>()
 
     private val syncing = AtomicBoolean(false)
     private val connecting = AtomicBoolean(false)
@@ -222,7 +226,8 @@ object KotakSessionCoordinator {
                     return@execute
                 }
 
-                val instruments = activeInstrumentsForFeed()
+                refreshDesiredSubscriptions()
+                val instruments = desiredSubscriptionSnapshot()
 
                 val service = KotakNeoLiveFeedService(
                     secureStore = store(),
@@ -232,7 +237,7 @@ object KotakSessionCoordinator {
                         updateStatus(message)
                     },
                     activeInstrumentsProvider = {
-                        activeInstrumentsForFeed()
+                        desiredSubscriptionSnapshot()
                     }
                 )
 
@@ -276,13 +281,16 @@ object KotakSessionCoordinator {
                     return@execute
                 }
 
+                desiredSubscriptions[subscriptionKey(exchange, symbol)] = instrument
+
                 val service = synchronized(lock) {
                     liveFeedService
                 }
 
-                if (service == null) {
+                if (service == null || !service.isConnected()) {
                     updateStatus(
-                        "Live subscribe pending: Kotak feed not connected"
+                        "Live subscribe queued: $exchange:$symbol; " +
+                            "desired-state will restore after authentication"
                     )
                     return@execute
                 }
@@ -309,9 +317,19 @@ object KotakSessionCoordinator {
                     .findBySymbol(symbol, exchange)
                     ?: return@execute
 
+                desiredSubscriptions.remove(subscriptionKey(exchange, symbol))
+
                 val service = synchronized(lock) {
                     liveFeedService
-                } ?: return@execute
+                }
+
+                if (service == null || !service.isConnected()) {
+                    updateStatus(
+                        "Live unsubscribe recorded: $exchange:$symbol; " +
+                            "will not restore on reconnect"
+                    )
+                    return@execute
+                }
 
                 service.unsubscribeInstrument(instrument)
             } catch (e: Exception) {
@@ -321,6 +339,25 @@ object KotakSessionCoordinator {
             }
         }
     }
+
+    private fun subscriptionKey(exchange: String, symbol: String): String =
+        exchange.trim().toUpperCase(java.util.Locale.ROOT) + "|" +
+            symbol.trim().toUpperCase(java.util.Locale.ROOT)
+
+    private fun refreshDesiredSubscriptions() {
+        val repository = BackendManager.instruments()
+        MarketDataManager.activeKeys().forEach { key ->
+            val instrument = repository.findBySymbol(key.symbol, key.exchange)
+            if (instrument != null) {
+                desiredSubscriptions[subscriptionKey(key.exchange, key.symbol)] = instrument
+            }
+        }
+    }
+
+    private fun desiredSubscriptionSnapshot(): List<Instrument> =
+        desiredSubscriptions.values.toList().distinctBy {
+            subscriptionKey(it.exchange, it.symbol)
+        }
 
     private fun activeInstrumentsForFeed(): List<Instrument> {
         return try {
