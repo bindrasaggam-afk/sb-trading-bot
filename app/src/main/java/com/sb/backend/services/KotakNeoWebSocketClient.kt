@@ -339,7 +339,8 @@ class KotakNeoWebSocketClient(
                         "AUTHENTICATED | Kotak WebSocket authenticated"
                     )
 
-                    resubscribe(webSocket)
+                    // Subscription restore is owned by KotakNeoLiveFeedService.
+                    // It reconciles the current desired state after authentication.
 
                     mainHandler.post {
                         if (
@@ -406,6 +407,48 @@ class KotakNeoWebSocketClient(
     // EQUITY / F&O / MCX SUBSCRIPTION
     // Format: nse_cm|2885
     // -------------------------------------------------
+
+    /**
+     * Replace the websocket subscription registry with the authoritative desired
+     * state supplied by KotakNeoLiveFeedService.
+     */
+    @Synchronized
+    fun replaceSubscriptions(tokens: List<String>) {
+        if (shutdown.get()) return
+        val desired = tokens.asSequence()
+            .filter { it.isNotBlank() }
+            .map { it.trim() }
+            .distinct()
+            .toList()
+        synchronized(subscriptions) {
+            subscriptions.clear()
+            subscriptions.addAll(desired)
+        }
+        if (authenticated.get() && desired.isNotEmpty()) {
+            sendScripSubscriptions(desired)
+        }
+    }
+
+    /**
+     * Replace index subscription registry. Service includes its fixed baseline
+     * indices and currently desired instrument indices in this snapshot.
+     */
+    @Synchronized
+    fun replaceIndexSubscriptions(indices: List<String>) {
+        if (shutdown.get()) return
+        val desired = indices.asSequence()
+            .filter { it.isNotBlank() }
+            .map { it.trim() }
+            .distinct()
+            .toList()
+        synchronized(indexSubscriptions) {
+            indexSubscriptions.clear()
+            indexSubscriptions.addAll(desired)
+        }
+        if (authenticated.get() && desired.isNotEmpty()) {
+            sendIndexSubscriptions(desired)
+        }
+    }
 
     @Synchronized
     fun subscribe(tokens: List<String>) {
