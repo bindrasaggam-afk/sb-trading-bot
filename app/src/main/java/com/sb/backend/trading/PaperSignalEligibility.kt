@@ -2,6 +2,7 @@ package com.sb.backend.trading
 
 import com.sb.signals.domain.ResearchSignal
 import com.sb.signals.domain.SignalLifecycleStatus
+import java.util.Locale
 
 data class PaperSignalQuote(
     val price: Double,
@@ -34,7 +35,8 @@ enum class PaperSignalSkipReason {
     BACKEND_NOT_READY,
     SIGNALS_UNAVAILABLE,
     PAPER_UNAVAILABLE,
-    QUERY_FAILED
+    QUERY_FAILED,
+    UNSUPPORTED_TIMEFRAME
 }
 
 data class PaperSignalForwardDecision(
@@ -62,6 +64,15 @@ object PaperSignalEligibility {
             return skip(
                 PaperSignalSkipReason.INVALID_SIGNAL,
                 "Signal metadata or price levels are invalid."
+            )
+        }
+
+        if (signal.category.name == "INTRADAY" &&
+            !isSupportedIntradayTimeframe(signal.timeframe)
+        ) {
+            return skip(
+                PaperSignalSkipReason.UNSUPPORTED_TIMEFRAME,
+                "Intraday paper trading requires a timeframe of at least 5 minutes."
             )
         }
 
@@ -154,6 +165,15 @@ object PaperSignalEligibility {
             reason = "Triggered signal can be filled from the current quote.",
             quote = quote
         )
+    }
+
+    private fun isSupportedIntradayTimeframe(timeframe: String): Boolean {
+        val normalized = timeframe.trim().uppercase(Locale.ROOT).replace(" ", "")
+        val match = Regex(
+            """^(?:MIN_)?(\\d+)(?:_?M|_?MIN|_?MINS|_?MINUTE|_?MINUTES)?$"""
+        ).matchEntire(normalized) ?: return false
+        val minutes = match.groupValues[1].toIntOrNull() ?: return false
+        return minutes >= 5
     }
 
     private fun levelsValid(signal: ResearchSignal): Boolean {
