@@ -102,7 +102,7 @@ class KotakEquityChargesTest {
     fun `unsupported exchange and invalid side are rejected`() {
         var exchangeRejected = false
         try {
-            KotakEquityCharges.calculate("BUY", "INTRADAY", 100.0, 1, "BSE")
+            KotakEquityCharges.calculate("BUY", "INTRADAY", 100.0, 1, "NFO")
         } catch (_: IllegalArgumentException) {
             exchangeRejected = true
         }
