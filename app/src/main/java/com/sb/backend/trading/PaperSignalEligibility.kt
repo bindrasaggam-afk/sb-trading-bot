@@ -170,7 +170,7 @@ object PaperSignalEligibility {
     private fun isSupportedIntradayTimeframe(timeframe: String): Boolean {
         val normalized = timeframe.trim().uppercase(Locale.ROOT).replace(" ", "")
         val match = Regex(
-            """^(?:(\\d+)(M|MIN|MINS|MINUTE|MINUTES|H|HR|HRS|HOUR|HOURS)|MIN_(\\d+))$"""
+            """^(?:(\d+)(M|MIN|MINS|MINUTE|MINUTES|H|HR|HRS|HOUR|HOURS)|MIN_(\d+))$"""
         ).matchEntire(normalized) ?: return false
         val unit = match.groupValues[2]
         val amount = (match.groupValues[1].ifBlank {
