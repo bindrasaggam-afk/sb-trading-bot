@@ -208,6 +208,10 @@ class KotakNeoLiveFeedService(
 
         val restored = activeInstrumentsProvider?.invoke().orEmpty()
 
+        // Provider is the authoritative desired-state snapshot. Reconcile local
+        // runtime maps so removed subscriptions cannot be resurrected.
+        activeInstruments.clear()
+        requestedInstruments.clear()
         restored.forEach { instrument ->
             instrumentKey(instrument)?.let { key ->
                 activeInstruments[key] = instrument
@@ -229,9 +233,11 @@ class KotakNeoLiveFeedService(
 
         val indexFeedTokens = (indexTokens + restoredIndices).distinct()
 
+        // Static instrumentMap remains only for tick decoding; it must
+        // never be used as a subscription source because it can contain keys
+        // that were explicitly released.
         val allKeys = (
-            instrumentMap.keys +
-                requestedInstruments.keys +
+            requestedInstruments.keys +
                 activeInstruments.keys
             ).distinct()
 
