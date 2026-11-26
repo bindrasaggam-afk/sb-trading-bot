@@ -235,7 +235,7 @@ object PaperSignalPolicy {
                 1.0 - safeSlippageBps(candidate.slippageBpsPerSide) / 10_000.0
                 )
         }
-        if (fillPrice < 0.0) {
+        if (!fillPrice.isFinite() || fillPrice <= 0.0) {
             return PaperEntryDecision(
                 PaperEntryDecisionType.WAIT,
                 reason = "Simulated slippage produced an invalid price"
