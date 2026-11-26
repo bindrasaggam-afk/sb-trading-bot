@@ -288,11 +288,22 @@ object PaperLegacyCleanup {
             val exits = executions.filter { it.kind != "ENTRY" }
             if (exits.isNotEmpty()) {
                 exits.forEach { execution ->
-                    val exitCharge = PaperSignalPolicy.exitCharge(
-                        price = execution.price,
-                        quantity = execution.quantity,
-                        costBps = order.costBpsPerSide
-                    )
+                    val allocatedEntryCharge =
+                        PaperSignalPolicy.allocatedEntryCharge(
+                            totalEntryCharge = entryCharge,
+                            originalQuantity = entryQuantity,
+                            exitQuantity = execution.quantity
+                        )
+                    val exitCharge = if (execution.charges.isFinite()) {
+                        (execution.charges - allocatedEntryCharge)
+                            .coerceAtLeast(0.0)
+                    } else {
+                        PaperSignalPolicy.exitCharge(
+                            price = execution.price,
+                            quantity = execution.quantity,
+                            costBps = order.costBpsPerSide
+                        )
+                    }
                     if (order.side == OrderSide.BUY.name) {
                         balance += execution.price * execution.quantity -
                             exitCharge
