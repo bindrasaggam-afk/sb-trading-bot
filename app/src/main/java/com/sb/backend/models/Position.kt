@@ -12,7 +12,8 @@ data class Position(
     val reservedMargin: Double = 0.0,
     val status: String = OrderStatus.OPEN.name,
     val openedAt: Long = System.currentTimeMillis(),
-    val updatedAt: Long = System.currentTimeMillis()
+    val updatedAt: Long = System.currentTimeMillis(),
+    val estimatedCharges: Double = 0.0
 ) {
     val marketValue: Double
         get() = quantity.toDouble() * lastPrice
@@ -20,7 +21,8 @@ data class Position(
     val unrealizedPnl: Double
         get() {
             val direction = if (side == OrderSide.BUY.name) 1.0 else -1.0
-            return (lastPrice - entryPrice) * quantity * direction
+            val gross = (lastPrice - entryPrice) * quantity * direction
+            return gross - estimatedCharges.coerceAtLeast(0.0)
         }
 
     val isOpen: Boolean
