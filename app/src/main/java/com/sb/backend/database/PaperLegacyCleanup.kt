@@ -273,7 +273,23 @@ object PaperLegacyCleanup {
             val entryQuantity = entryExecution?.quantity ?: order.quantity
             val entryCharge = when {
                 order.entryCharges > 0.0 -> order.entryCharges
-                entryExecution != null -> entryExecution.charges
+                entryExecution != null && entryExecution.charges > 0.0 ->
+                    entryExecution.charges
+                entered -> try {
+                    KotakEquityCharges.calculate(
+                        side = order.side,
+                        category = order.category,
+                        price = entryPrice,
+                        quantity = entryQuantity,
+                        exchange = order.exchange
+                    ).total
+                } catch (_: IllegalArgumentException) {
+                    PaperSignalPolicy.entryCharge(
+                        price = entryPrice,
+                        quantity = entryQuantity,
+                        costBps = order.costBpsPerSide
+                    )
+                }
                 else -> 0.0
             }
 
@@ -327,11 +343,26 @@ object PaperLegacyCleanup {
                     exitPrice = order.exitPrice,
                     quantity = entryQuantity
                 )
-                val exitCharge = PaperSignalPolicy.exitCharge(
-                    price = order.exitPrice,
-                    quantity = entryQuantity,
-                    costBps = order.costBpsPerSide
-                )
+                val exitCharge = try {
+                    KotakEquityCharges.calculate(
+                        side = if (order.side == OrderSide.BUY.name) {
+                            OrderSide.SELL.name
+                        } else {
+                            OrderSide.BUY.name
+                        },
+                        category = order.category,
+                        price = order.exitPrice,
+                        quantity = entryQuantity,
+                        exchange = order.exchange,
+                        isExit = true
+                    ).total
+                } catch (_: IllegalArgumentException) {
+                    PaperSignalPolicy.exitCharge(
+                        price = order.exitPrice,
+                        quantity = entryQuantity,
+                        costBps = order.costBpsPerSide
+                    )
+                }
                 if (order.side == OrderSide.BUY.name) {
                     balance += order.exitPrice * entryQuantity - exitCharge
                 } else {
