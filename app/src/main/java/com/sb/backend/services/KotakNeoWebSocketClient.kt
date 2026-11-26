@@ -420,12 +420,19 @@ class KotakNeoWebSocketClient(
             .map { it.trim() }
             .distinct()
             .toList()
-        synchronized(subscriptions) {
+
+        val previous = synchronized(subscriptions) {
+            val snapshot = subscriptions.toList()
             subscriptions.clear()
             subscriptions.addAll(desired)
+            snapshot
         }
-        if (authenticated.get() && desired.isNotEmpty()) {
-            sendScripSubscriptions(desired)
+        val removed = previous.filterNot { it in desired }
+        val added = desired.filterNot { it in previous }
+
+        if (authenticated.get()) {
+            if (removed.isNotEmpty()) sendUnsubscribeScrips(removed)
+            if (added.isNotEmpty()) sendScripSubscriptions(added)
         }
     }
 
@@ -441,12 +448,19 @@ class KotakNeoWebSocketClient(
             .map { it.trim() }
             .distinct()
             .toList()
-        synchronized(indexSubscriptions) {
+
+        val previous = synchronized(indexSubscriptions) {
+            val snapshot = indexSubscriptions.toList()
             indexSubscriptions.clear()
             indexSubscriptions.addAll(desired)
+            snapshot
         }
-        if (authenticated.get() && desired.isNotEmpty()) {
-            sendIndexSubscriptions(desired)
+        val removed = previous.filterNot { it in desired }
+        val added = desired.filterNot { it in previous }
+
+        if (authenticated.get()) {
+            if (removed.isNotEmpty()) sendUnsubscribeIndices(removed)
+            if (added.isNotEmpty()) sendIndexSubscriptions(added)
         }
     }
 
