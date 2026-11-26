@@ -678,6 +678,8 @@ object PaperLegacyCleanup {
         val signalId: Long?,
         val entrySource: String?,
         val side: String,
+        val exchange: String,
+        val category: String,
         val quantity: Int,
         val entryPrice: Double,
         val exitPrice: Double?,
