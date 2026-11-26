@@ -378,7 +378,7 @@ object PaperSignalBridge {
             candidate = candidate,
             quantity = quantity,
             executionPrice = executionPrice,
-            executedAt = now
+            executedAt = quote.receivedAt
         )
     }
 
