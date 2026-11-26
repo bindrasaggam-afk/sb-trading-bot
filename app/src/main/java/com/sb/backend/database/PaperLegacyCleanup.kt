@@ -294,10 +294,10 @@ object PaperLegacyCleanup {
                             originalQuantity = entryQuantity,
                             exitQuantity = execution.quantity
                         )
-                    val exitCharge = if (execution.charges.isFinite()) {
-                        (execution.charges - allocatedEntryCharge)
-                            .coerceAtLeast(0.0)
-                    } else {
+                    val exitCharge = if (
+                        execution.charges.isFinite() &&
+                        execution.charges > 0.0
+                    ) {
                         PaperSignalPolicy.exitCharge(
                             price = execution.price,
                             quantity = execution.quantity,
