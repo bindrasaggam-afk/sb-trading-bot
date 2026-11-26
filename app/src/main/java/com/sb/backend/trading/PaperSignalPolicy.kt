@@ -362,13 +362,37 @@ object PaperSignalPolicy {
         }
     }
 
+    fun targetExecutionPrice(
+        side: String,
+        targetPrice: Double,
+        slippageBps: Double
+    ): Double {
+        if (!targetPrice.isFinite() || targetPrice <= 0.0) return 0.0
+        val safeSlippage = safeSlippageBps(slippageBps)
+        val rate = safeSlippage / 10_000.0
+        return when (side) {
+            OrderSide.BUY.name -> targetPrice * (1.0 - rate)
+            OrderSide.SELL.name -> targetPrice * (1.0 + rate)
+            else -> 0.0
+        }
+    }
+
     fun marketExecutionPrice(
         side: String,
         quotePrice: Double,
         slippageBps: Double
-    ): Double = if (side == OrderSide.BUY.name) {
-        quotePrice * (1.0 - slippageBps / 10_000.0)
-    } else {
-        quotePrice * (1.0 + slippageBps / 10_000.0)
+    ): Double {
+        if (!quotePrice.isFinite() || quotePrice <= 0.0) return 0.0
+        val rate = safeSlippageBps(slippageBps) / 10_000.0
+        return when (side) {
+            OrderSide.BUY.name -> quotePrice * (1.0 - rate)
+            OrderSide.SELL.name -> quotePrice * (1.0 + rate)
+            else -> 0.0
+        }
+    }
+
+    private fun safeSlippageBps(value: Double): Double {
+        if (!value.isFinite()) return 9_999.0
+        return value.coerceIn(0.0, 9_999.0)
     }
 }
