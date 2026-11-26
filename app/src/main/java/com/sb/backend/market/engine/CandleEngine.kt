@@ -523,6 +523,10 @@ class CandleEngine(
         diagnostics = Diagnostics()
     }
 
+    /** Number of instrument series currently retained in memory. */
+    @Synchronized
+    fun instrumentSeriesCount(): Int = seriesByInstrument.size
+
     // ------------------------------------------------------------
     // BASE CANDLE COUNT
     // ------------------------------------------------------------
