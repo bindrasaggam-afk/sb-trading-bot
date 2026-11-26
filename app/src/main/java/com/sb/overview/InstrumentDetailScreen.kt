@@ -120,6 +120,7 @@ class InstrumentDetailScreen(
     }
 
     fun release() {
+        if (released) return
         released = true
         loadJob?.cancel()
         loadJob = null
