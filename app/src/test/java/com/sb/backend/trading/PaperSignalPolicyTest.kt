@@ -228,6 +228,30 @@ class PaperSignalPolicyTest {
     }
 
     @Test
+    fun `entry rejects non finite simulated fill after slippage`() {
+        val extremeCandidate = candidate().copy(
+            entryLow = 1.0,
+            entryHigh = Double.MAX_VALUE,
+            referencePrice = Double.MAX_VALUE,
+            stopLoss = 0.5,
+            target1 = Double.MAX_VALUE,
+            target2 = Double.MAX_VALUE,
+            target3 = Double.MAX_VALUE,
+            slippageBpsPerSide = 9_999.0
+        )
+
+        val decision = PaperSignalPolicy.entryDecision(
+            candidate = extremeCandidate,
+            quotePrice = Double.MAX_VALUE,
+            quoteFresh = true,
+            now = 1_000L
+        )
+
+        assertEquals(PaperEntryDecisionType.WAIT, decision.type)
+        assertEquals(null, decision.price)
+    }
+
+    @Test
     fun `partial quantities split forty thirty thirty`() {
         assertEquals(Triple(1, 0, 0), PaperSignalPolicy.partialQuantities(1))
         assertEquals(Triple(1, 0, 1), PaperSignalPolicy.partialQuantities(2))
