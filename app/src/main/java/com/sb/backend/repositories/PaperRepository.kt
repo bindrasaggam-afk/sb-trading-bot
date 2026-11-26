@@ -1907,7 +1907,8 @@ class PaperRepository(
         "SEBI=${formatAmount(charges.sebiTurnover)}, " +
         "GST=${formatAmount(charges.gst)}, " +
         "Stamp=${formatAmount(charges.stampDuty)}, " +
-        "Total=${formatAmount(charges.total)}"
+        "DP=${formatAmount(charges.dpCharge)}, " +
+        "Total=${formatAmount(charges.total)}
 
     private fun formatAmount(value: Double): String {
         return String.format(Locale.US, "%.2f", value)
