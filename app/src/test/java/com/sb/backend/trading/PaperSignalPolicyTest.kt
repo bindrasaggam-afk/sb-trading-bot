@@ -2,6 +2,7 @@ package com.sb.backend.trading
 
 import com.sb.backend.models.OrderSide
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -232,7 +233,7 @@ class PaperSignalPolicyTest {
         val extremeCandidate = candidate().copy(
             entryLow = 1.0,
             entryHigh = Double.MAX_VALUE,
-            referencePrice = Double.MAX_VALUE,
+            referencePrice = Double.MAX_VALUE * 0.75,
             stopLoss = 0.5,
             target1 = Double.MAX_VALUE,
             target2 = Double.MAX_VALUE,
@@ -242,7 +243,7 @@ class PaperSignalPolicyTest {
 
         val decision = PaperSignalPolicy.entryDecision(
             candidate = extremeCandidate,
-            quotePrice = Double.MAX_VALUE,
+            quotePrice = Double.MAX_VALUE * 0.75,
             quoteFresh = true,
             now = 1_000L
         )
@@ -314,6 +315,124 @@ class PaperSignalPolicyTest {
                 OrderSide.BUY.name, 105.0, 105.0
             )
         )
+    }
+
+    @Test
+    fun `entry cancels invalid side`() {
+        val invalidCandidate = candidate().copy(side = "INVALID")
+        val decision = PaperSignalPolicy.entryDecision(
+            candidate = invalidCandidate,
+            quotePrice = 100.0,
+            quoteFresh = true,
+            now = invalidCandidate.generatedAt
+        )
+        assertEquals(PaperEntryDecisionType.CANCEL, decision.type)
+        assertEquals("Invalid signal side", decision.reason)
+    }
+
+    @Test
+    fun `sizing rejects invalid side`() {
+        val invalidCandidate = candidate().copy(side = "INVALID")
+        val quantity = PaperSignalPolicy.initialQuantity(
+            candidate = invalidCandidate,
+            availableBalance = 100_000.0,
+            rules = PaperSizingRules(
+                riskPerTradePercent = 1.0,
+                allocationPercent = 20.0,
+                shortMarginRate = 1.0,
+                maxQuantity = 100
+            )
+        )
+        assertEquals(0, quantity)
+    }
+
+    @Test
+    fun `expected entry price rejects invalid side`() {
+        val invalidCandidate = candidate().copy(side = "INVALID")
+        assertEquals(
+            0.0,
+            PaperSignalPolicy.expectedEntryPrice(invalidCandidate),
+            0.0
+        )
+    }
+
+    @Test
+    fun `gross pnl rejects invalid side`() {
+        assertEquals(
+            0.0,
+            PaperSignalPolicy.grossPnl(
+                side = "INVALID",
+                entryPrice = 100.0,
+                exitPrice = 110.0,
+                quantity = 10
+            ),
+            0.0
+        )
+    }
+
+    @Test
+    fun `stop and target checks reject invalid side`() {
+        assertFalse(
+            PaperSignalPolicy.isStopHit(
+                side = "INVALID",
+                price = 90.0,
+                stopLoss = 95.0
+            )
+        )
+        assertFalse(
+            PaperSignalPolicy.isTargetHit(
+                side = "INVALID",
+                price = 110.0,
+                target = 105.0
+            )
+        )
+    }
+
+    @Test
+    fun `execution price rejects invalid side`() {
+        assertEquals(
+            0.0,
+            PaperSignalPolicy.stopExecutionPrice(
+                side = "INVALID",
+                quotePrice = 90.0,
+                stopLoss = 95.0,
+                slippageBps = 10.0
+            ),
+            0.0
+        )
+        assertEquals(
+            0.0,
+            PaperSignalPolicy.targetExecutionPrice(
+                side = "INVALID",
+                targetPrice = 105.0,
+                slippageBps = 10.0
+            ),
+            0.0
+        )
+        assertEquals(
+            0.0,
+            PaperSignalPolicy.marketExecutionPrice(
+                side = "INVALID",
+                quotePrice = 100.0,
+                slippageBps = 10.0
+            ),
+            0.0
+        )
+    }
+
+    @Test
+    fun `capital requirement rejects invalid side`() {
+        val result = PaperSignalPolicy.capitalRequirement(
+            side = "INVALID",
+            price = 100.0,
+            quantity = 10,
+            costBpsPerSide = 2.0,
+            shortMarginRate = 0.2
+        )
+        assertEquals(0.0, result.orderValue, 0.0)
+        assertEquals(0.0, result.cashDebit, 0.0)
+        assertEquals(0.0, result.reservedMargin, 0.0)
+        assertEquals(0.0, result.entryCharge, 0.0)
     }
 
     private fun candidate(): PaperSignalCandidate {
