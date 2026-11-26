@@ -19,6 +19,20 @@ class CandleEngineTest {
     private val mcx = InstrumentKey("MCX", "CRUDEOIL25NOVFUT")
 
     @Test
+    fun resetRemovesOnlyRequestedInstrumentSeries() {
+        val engine = CandleEngine()
+        engine.addTick(tick(nse, time(9, 15, 10), 100.0, 1_000L))
+        engine.addTick(tick(mcx, time(9, 15, 10), 5_000.0, 1_000L))
+
+        assertEquals(2, engine.instrumentSeriesCount())
+        engine.reset(nse)
+
+        assertEquals(1, engine.instrumentSeriesCount())
+        assertTrue(engine.candles(nse, MarketTimeframe.MIN_1).isEmpty())
+        assertEquals(1, engine.candles(mcx, MarketTimeframe.MIN_1).size)
+    }
+
+    @Test
     fun firstTickCreatesOneMinuteCandleWithoutGuessedVolume() {
         val engine = CandleEngine()
         val result = engine.addTick(tick(nse, time(9, 15, 20), 100.0, 1_000L))
