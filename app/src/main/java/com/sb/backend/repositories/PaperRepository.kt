@@ -604,7 +604,8 @@ class PaperRepository(
                     category = order.signalCategory,
                     price = executionPrice,
                     quantity = exitQuantity,
-                    exchange = order.exchange
+                    exchange = order.exchange,
+                    isExit = true
                 )
                 val exitCharge = exitChargeBreakdown.total
                 val netPnl = grossPnl - entryCharge - exitCharge
