@@ -28,6 +28,32 @@ class PaperSignalEligibilityTest {
     }
 
     @Test
+    fun `intraday paper forwarding rejects timeframes below five minutes`() {
+        listOf("1m", "3m", "1MIN", "MIN_1").forEach { timeframe ->
+            val decision = decide(
+                TestSignals.signal().copy(timeframe = timeframe)
+            )
+            assertEquals(
+                PaperSignalSkipReason.UNSUPPORTED_TIMEFRAME,
+                decision.reasonCode
+            )
+        }
+    }
+
+    @Test
+    fun `intraday paper forwarding accepts five minute and higher timeframes`() {
+        listOf("5m", "15m", "60m", "1h", "MIN_5").forEach { timeframe ->
+            val decision = decide(
+                TestSignals.signal().copy(timeframe = timeframe)
+            )
+            assertEquals(
+                PaperSignalForwardAction.CREATE_PENDING,
+                decision.action
+            )
+        }
+    }
+
+    @Test
     fun `triggered signal fills from fresh in-range quote`() {
         val decision = decide(
             signal = TestSignals.signal(status = SignalLifecycleStatus.TRIGGERED),
