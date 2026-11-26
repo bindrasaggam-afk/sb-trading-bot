@@ -323,7 +323,7 @@ object KotakSessionCoordinator {
                     liveFeedService
                 }
 
-                if (service == null || !service.isConnected()) {
+                if (service == null || !service.isAuthenticated()) {
                     updateStatus(
                         "Live unsubscribe recorded: $exchange:$symbol; " +
                             "will not restore on reconnect"
