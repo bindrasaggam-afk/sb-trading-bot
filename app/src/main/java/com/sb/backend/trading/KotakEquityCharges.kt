@@ -76,7 +76,6 @@ object KotakEquityCharges {
         }
         val exchangeCharge = turnover * exchangeRate
         val sebi = turnover * SEBI_TURNOVER_RATE
-        val gst = (brokerage + exchangeCharge + sebi + dpCharge) * GST_RATE
         val dpCharge = if (
             isExit && !intraday && normalizedSide == "SELL"
         ) {
@@ -84,6 +83,7 @@ object KotakEquityCharges {
         } else {
             0.0
         }
+        val gst = (brokerage + exchangeCharge + sebi + dpCharge) * GST_RATE
         val stamp = if (normalizedSide == "BUY") {
             turnover * if (intraday) STAMP_INTRADAY_BUY_RATE
             else STAMP_DELIVERY_BUY_RATE
