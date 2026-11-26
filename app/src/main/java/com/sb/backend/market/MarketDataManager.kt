@@ -305,7 +305,7 @@ object MarketDataManager {
                 cacheAccess.remove(key, entry.value)
                 latestTicks.remove(key)
                 history.remove(key)
-                instrumentFlows[key]?.value = null
+                instrumentFlows.remove(key)?.value = null
                 val separator = key.indexOf('|')
                 if (separator > 0 && separator < key.lastIndex) {
                     try {
@@ -324,6 +324,8 @@ object MarketDataManager {
 
     /** Current number of instrument cache entries, excluding lightweight flows. */
     internal fun cachedInstrumentCount(): Int = cacheAccess.size
+
+    internal fun cachedFlowCount(): Int = instrumentFlows.size
 
     // ------------------------------------------------------------
     // SNAPSHOT
@@ -497,6 +499,7 @@ object MarketDataManager {
 
         history.clear()
         cacheAccess.clear()
+        instrumentFlows.clear()
 
         synchronized(subscriptionLock) {
             subscribedKeys.clear()
