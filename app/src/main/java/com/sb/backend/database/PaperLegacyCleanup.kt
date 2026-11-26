@@ -297,7 +297,8 @@ object PaperLegacyCleanup {
                         )
                     val exitCharge = if (
                         execution.charges.isFinite() &&
-                        execution.charges > 0.0
+                        execution.charges >
+                            allocatedEntryCharge + 0.000001
                     ) {
                         (execution.charges - allocatedEntryCharge)
                             .coerceAtLeast(0.0)
