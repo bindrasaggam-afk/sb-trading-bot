@@ -43,7 +43,8 @@ object KotakEquityCharges {
         category: String,
         price: Double,
         quantity: Int,
-        exchange: String = "NSE"
+        exchange: String = "NSE",
+        isExit: Boolean = false
     ): PaperChargeBreakdown {
         if (!price.isFinite() || price <= 0.0 || quantity <= 0) {
             return PaperChargeBreakdown(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
@@ -76,7 +77,9 @@ object KotakEquityCharges {
         val exchangeCharge = turnover * exchangeRate
         val sebi = turnover * SEBI_TURNOVER_RATE
         val gst = (brokerage + exchangeCharge + sebi + dpCharge) * GST_RATE
-        val dpCharge = if (!intraday && normalizedSide == "SELL") {
+        val dpCharge = if (
+            isExit && !intraday && normalizedSide == "SELL"
+        ) {
             maxOf(DP_DELIVERY_SELL_MINIMUM, turnover * DP_DELIVERY_SELL_RATE)
         } else {
             0.0
