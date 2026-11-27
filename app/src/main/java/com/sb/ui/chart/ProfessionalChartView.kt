@@ -953,7 +953,7 @@ class ProfessionalChartView @JvmOverloads constructor(
         val saveCount = canvas.save()
         canvas.clipRect(geometry.left, top, geometry.right, bottom)
         timeGridIndices(geometry).forEach { index ->
-            val x = xFor(index, geometry)
+            val x = xFor(index, geometry).coerceIn(geometry.left, geometry.right)
             if (x < geometry.left || x > geometry.right) return@forEach
             canvas.drawLine(x, top, x, bottom, gridPaint)
         }
