@@ -79,7 +79,7 @@ class MarketDepthAdapter(
 
             val quantityView = quantityViews.getOrNull(index) ?: continue
             if (level == null || level.quantity <= 0L) {
-                quantityView.text = "—"
+                quantityView.text = if (level == null) "No depth" else "—"
                 quantityView.setTextColor(emptyColor)
             } else {
                 quantityView.text = quantityFormatter(level.quantity)
