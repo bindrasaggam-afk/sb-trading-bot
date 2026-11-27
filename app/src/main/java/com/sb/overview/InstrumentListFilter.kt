@@ -14,7 +14,7 @@ object InstrumentListFilter {
     val exchanges = listOf("All", "NSE", "BSE", "MCX")
 
     val categories = listOf(
-        "All",
+        "All Categories",
         "Equity",
         "Index",
         "F&O",
@@ -29,7 +29,7 @@ object InstrumentListFilter {
         instruments: List<Instrument>,
         query: String = "",
         exchange: String = "All",
-        category: String = "All"
+        category: String = "All Categories"
     ): List<Instrument> {
         val normalizedQuery = query.trim().uppercase(Locale.ROOT)
 
@@ -78,6 +78,7 @@ object InstrumentListFilter {
         category: String
     ): Boolean {
         return category == "All" ||
+            category == "All Categories" ||
             categoryBucket(instrument) == category
     }
 
