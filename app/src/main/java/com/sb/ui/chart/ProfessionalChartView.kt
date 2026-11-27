@@ -518,6 +518,11 @@ class ProfessionalChartView @JvmOverloads constructor(
             }
 
             source = nextSource
+            if (oldSource.isEmpty() && nextSource.isNotEmpty()) {
+                // Sparse initial series: shrink the empty viewport to readable
+                // candle spacing instead of spreading 1–13 bars across 40 slots.
+                visibleCount = max(MIN_VISIBLE, min(40f, nextSource.size.toFloat()))
+            }
         }
 
         chartStyle = style
@@ -525,7 +530,11 @@ class ProfessionalChartView @JvmOverloads constructor(
         if (!preserveViewport) {
             crosshairVisible = false
             crosshairIndex = -1
-            visibleCount = 40f
+            visibleCount = if (nextSource.size < 40) {
+                max(MIN_VISIBLE, nextSource.size.toFloat())
+            } else {
+                40f
+            }
             followLatest = true
             drawings.clear()
             pendingPoints.clear()
@@ -1920,18 +1929,51 @@ class ProfessionalChartView @JvmOverloads constructor(
         }
 
         val indices = timeGridIndices(geometry)
-        val lastPosition = indices.lastIndex
-        indices.forEachIndexed { position, index ->
-            val candle = candles.getOrNull(index) ?: return@forEachIndexed
-            if (candle.timestamp <= 0L) return@forEachIndexed
-            val x = xFor(index, geometry).coerceIn(geometry.left, geometry.right)
+        if (indices.isEmpty()) return
+        val gapPx = dp(5f)
+        data class AxisLabel(
+            val position: Int,
+            val text: String,
+            val x: Float,
+            val left: Float,
+            val right: Float,
+            val align: Paint.Align
+        )
+        val labels = indices.mapIndexedNotNull { position, index ->
+            val candle = candles.getOrNull(index) ?: return@mapIndexedNotNull null
+            if (candle.timestamp <= 0L) return@mapIndexedNotNull null
             val text = formatter.format(Date(candle.timestamp))
-            axisPaint.textAlign = when (position) {
+            val x = xFor(index, geometry)
+            val align = when (position) {
                 0 -> Paint.Align.LEFT
-                lastPosition -> Paint.Align.RIGHT
+                indices.lastIndex -> Paint.Align.RIGHT
                 else -> Paint.Align.CENTER
             }
-            canvas.drawText(text, x, height - dp(4f), axisPaint)
+            val width = axisPaint.measureText(text)
+            val left = when (align) {
+                Paint.Align.LEFT -> x
+                Paint.Align.RIGHT -> x - width
+                else -> x - width / 2f
+            }
+            AxisLabel(position, text, x, left, left + width, align)
+        }
+        // Reserve endpoints first, then add interior labels only when measured
+        // text bounds are separated by a small minimum gap.
+        val selected = ArrayList<AxisLabel>()
+        labels.firstOrNull()?.let { selected.add(it) }
+        labels.lastOrNull()?.let { last ->
+            if (selected.none { it.right + gapPx > last.left && last.right + gapPx > it.left }) {
+                selected.add(last)
+            }
+        }
+        labels.drop(1).dropLast(1).forEach { candidate ->
+            if (selected.none { it.right + gapPx > candidate.left && candidate.right + gapPx > it.left }) {
+                selected.add(candidate)
+            }
+        }
+        selected.sortedBy { it.position }.forEach { label ->
+            axisPaint.textAlign = label.align
+            canvas.drawText(label.text, label.x, height - dp(4f), axisPaint)
         }
         axisPaint.textAlign = Paint.Align.RIGHT
     }
