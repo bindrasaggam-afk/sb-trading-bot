@@ -143,11 +143,11 @@ class MarketListAdapter(
         }
 
         val price = TextView(context).apply {
-            textSize = 14f
+            textSize = 10f
             setTextColor(mutedColor)
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.END
-            text = "—"
+            text = "NO TICK"
         }
 
         val change = TextView(context).apply {
@@ -278,9 +278,9 @@ class MarketListAdapter(
                 lastLtp = 0.0
                 flashToken++
                 itemView.background = AppDesign.cardBackground(itemView.context, 10)
-                priceView.text = "—"
+                priceView.text = "NO TICK"
                 priceView.setTextColor(mutedColor)
-                changeView.text = "—"
+                changeView.text = "Waiting for feed"
                 changeView.setTextColor(mutedColor)
                 return
             }
