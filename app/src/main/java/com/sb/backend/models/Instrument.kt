@@ -12,7 +12,25 @@ data class Instrument(
     val lotSize: Int = 1,
     val tickSize: Double = 0.05,
     val isActive: Boolean = true,
-    val expiryMillis: Long? = null
+    val expiryMillis: Long? = null,
+    val exchangeSegment: String = "",
+    val category: String = "",
+    val subcategory: String = "",
+    val rawSymbol: String = "",
+    val isin: String? = null,
+    val description: String? = null,
+    val groupCode: String? = null,
+    val assetCode: String? = null,
+    val amcCode: String? = null,
+    val issueMillis: Long? = null,
+    val maturityMillis: Long? = null,
+    val caseEligible: Boolean = false,
+    val sourceTickSize: Double? = null,
+    val source: String = "",
+    val sourceUpdatedAt: Long? = null,
+    val isAlias: Boolean = false,
+    val aliasOf: String? = null,
+    val feedName: String? = null
 ) {
     init {
         require(id >= 0L) {
@@ -57,6 +75,18 @@ data class Instrument(
 
         require(expiryMillis == null || expiryMillis > 0L) {
             "Expiry timestamp must be positive"
+        }
+
+        require(issueMillis == null || issueMillis > 0L) {
+            "Issue timestamp must be positive"
+        }
+
+        require(maturityMillis == null || maturityMillis > 0L) {
+            "Maturity timestamp must be positive"
+        }
+
+        require(sourceUpdatedAt == null || sourceUpdatedAt > 0L) {
+            "Source update timestamp must be positive"
         }
     }
 }

@@ -1497,7 +1497,7 @@ object EquityStockMaster {
         Triple("COSMOFIRST", "Cosmo First Limited", "EQ"),
         Triple("COUNCODOS", "Country Condo's Limited", "BE"),
         Triple("CRAFTSMAN", "Craftsman Automation Limited", "EQ"),
-        Triple("CREATIVE", "Creative Newtech Limited", "EQ"),
+        Triple("CNL", "Creative Newtech Limited", "EQ"),
         Triple("CREDITACC", "CreditAccess Grameen Limited", "EQ"),
         Triple("CREST", "Crest Ventures Limited", "EQ"),
         Triple("CRISIL", "CRISIL Limited", "EQ"),

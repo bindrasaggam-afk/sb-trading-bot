@@ -98,10 +98,22 @@ class RiskManager {
         }
 
         val config = AppConfig.get()
-        if (openPositions >= config.maxOpenPositions) {
+        if (config.maxOpenPositions > 0 &&
+            openPositions >= config.maxOpenPositions
+        ) {
             return RiskDecision(
                 allowed = false,
                 reason = "Maximum open positions reached."
+            )
+        }
+
+        if (config.maxOrderQuantity > 0 &&
+            quantity > config.maxOrderQuantity
+        ) {
+            return RiskDecision(
+                allowed = false,
+                reason = "Quantity exceeds the maximum allowed of " +
+                    config.maxOrderQuantity + "."
             )
         }
 
@@ -131,12 +143,18 @@ class RiskManager {
 
     fun isQuoteFresh(
         quote: Quote,
-        maxAgeMs: Long = 60_000L
+        maxAgeMs: Long = AppConfig.get().quoteMaxAgeMs
     ): Boolean {
-        if (maxAgeMs < 0L) return false
         if (!quote.ltp.isFinite() || quote.ltp <= 0.0) return false
+        return isQuoteFresh(quote.receivedAt, maxAgeMs)
+    }
 
-        val age = System.currentTimeMillis() - quote.timestamp
+    fun isQuoteFresh(
+        receivedAt: Long,
+        maxAgeMs: Long = AppConfig.get().quoteMaxAgeMs
+    ): Boolean {
+        if (maxAgeMs < 0L || receivedAt <= 0L) return false
+        val age = System.currentTimeMillis() - receivedAt
         return age >= 0L && age <= maxAgeMs
     }
 

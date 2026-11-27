@@ -9,9 +9,8 @@ import java.util.TimeZone
 /**
  * Single source of truth for candle bucket alignment.
  *
- * Intraday buckets are anchored to the exchange session open.
- * NSE/BSE: 09:15
- * MCX: 09:00
+ * Intraday buckets are anchored to the session open published by
+ * ExchangeSessionCalendar, so every consumer uses the same anchor.
  *
  * Higher timeframes use calendar boundaries.
  */
@@ -19,12 +18,6 @@ object TimeframeBuckets {
 
     private const val MILLIS_THRESHOLD = 10_000_000_000L
     private const val DAY_MILLIS = 86_400_000L
-
-    private const val NSE_OPEN_MILLIS =
-        (9L * 60L + 15L) * 60L * 1_000L
-
-    private const val MCX_OPEN_MILLIS =
-        9L * 60L * 60L * 1_000L
 
     val IST: TimeZone = TimeZone.getTimeZone("Asia/Kolkata")
 
@@ -38,15 +31,8 @@ object TimeframeBuckets {
         }
     }
 
-    fun sessionOpenMillis(exchange: String): Long {
-        val name = exchange.trim().uppercase(Locale.ROOT)
-
-        return if (name.contains("MCX")) {
-            MCX_OPEN_MILLIS
-        } else {
-            NSE_OPEN_MILLIS
-        }
-    }
+    fun sessionOpenMillis(exchange: String): Long =
+        ExchangeSessionCalendar.sessionOpenMinute(exchange) * 60L * 1_000L
 
     fun bucketStart(
         timestamp: Long,
@@ -54,7 +40,7 @@ object TimeframeBuckets {
         exchange: String
     ): Long {
         val timeframe = MarketTimeframe.fromLabel(label)
-            ?: return timestamp
+            ?: return 0L
 
         return bucketStart(timestamp, timeframe, exchange)
     }
@@ -119,17 +105,12 @@ object TimeframeBuckets {
         val millisOfDay = timestamp - dayStart
         val sessionOpen = sessionOpenMillis(exchange)
 
-        return if (millisOfDay < sessionOpen) {
-            dayStart +
-                Math.floorDiv(millisOfDay, interval) * interval
-        } else {
-            dayStart +
-                sessionOpen +
-                Math.floorDiv(
-                    millisOfDay - sessionOpen,
-                    interval
-                ) * interval
-        }
+        return dayStart +
+            sessionOpen +
+            Math.floorDiv(
+                millisOfDay - sessionOpen,
+                interval
+            ) * interval
     }
 
     fun sessionKey(timestamp: Long): String {

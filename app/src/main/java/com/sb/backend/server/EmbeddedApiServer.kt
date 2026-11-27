@@ -2,26 +2,56 @@
 package com.sb.backend.server
 
 import com.sb.backend.core.BackendManager
+import com.sb.backend.database.DatabaseMaintenanceGate
+import com.sb.backend.database.DatabaseMaintenanceTimeoutException
 import com.sb.backend.database.SBDatabaseHelper
+import com.sb.backend.security.LocalApiToken
+import com.sb.backend.security.LocalApiTokens
 import com.sb.backend.services.KotakSessionCoordinator
 import android.database.sqlite.SQLiteDatabase
+import android.util.Log
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
-import java.net.ServerSocket
-import java.net.Socket
 import java.net.InetAddress
-import java.net.URLDecoder
+import java.net.ServerSocket
+import java.net.SocketTimeoutException
+import java.net.Socket
+import java.util.Collections
+import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import org.json.JSONArray
 import org.json.JSONObject
 
 class EmbeddedApiServer(
-    private val port: Int = 10000
+    private val port: Int = ApiSecurityPolicy.DEFAULT_PORT,
+    private val accessToken: String = "",
+    private val tokenProvider: (() -> LocalApiTokens)? = null
 ) {
     private var serverSocket: ServerSocket? = null
     private val running = AtomicBoolean(false)
-    private val executor = Executors.newCachedThreadPool()
+    private val activeSockets = Collections.newSetFromMap(
+        ConcurrentHashMap<Socket, Boolean>()
+    )
+
+    @Volatile
+    private var acceptExecutor: ExecutorService? = null
+
+    @Volatile
+    private var workerExecutor: ExecutorService? = null
+
+    private val requestPermits = Semaphore(
+        ApiSecurityPolicy.MAX_CONCURRENT_REQUESTS
+    )
+    private val rateLimiter = ApiRateLimiter()
+
+    private companion object {
+        const val TAG = "EmbeddedApiServer"
+    }
 
     fun start(): Boolean {
         if (running.get()) return true
@@ -30,178 +60,375 @@ class EmbeddedApiServer(
             val socket = ServerSocket(
                 port,
                 50,
-                InetAddress.getByName("127.0.0.1")
+                InetAddress.getByName(ApiSecurityPolicy.LOOPBACK_HOST)
             )
 
+            val acceptor = Executors.newSingleThreadExecutor { runnable ->
+                Thread(runnable, "sb-api-accept").apply { isDaemon = true }
+            }
+            val workers = Executors.newFixedThreadPool(
+                ApiSecurityPolicy.MAX_CONCURRENT_REQUESTS + 1
+            ) { runnable ->
+                Thread(runnable, "sb-api-worker").apply { isDaemon = true }
+            }
+
             serverSocket = socket
+            acceptExecutor = acceptor
+            workerExecutor = workers
             running.set(true)
 
-            executor.execute {
+            acceptor.execute {
                 while (running.get()) {
                     try {
                         val client = socket.accept()
-                        executor.execute {
-                            handleClient(client)
+                        activeSockets.add(client)
+                        workers.execute {
+                            try {
+                                handleClient(client)
+                            } finally {
+                                activeSockets.remove(client)
+                                try {
+                                    client.close()
+                                } catch (_: Exception) {
+                                }
+                            }
                         }
-                    } catch (e: Exception) {
+                    } catch (error: Exception) {
                         if (running.get()) {
-                            e.printStackTrace()
+                            Log.w(
+                                TAG,
+                                "API accept failed: " +
+                                    error.javaClass.simpleName
+                            )
                         }
                     }
                 }
             }
 
             true
-        } catch (e: Exception) {
+        } catch (error: Exception) {
             running.set(false)
-            e.printStackTrace()
+            Log.e(
+                TAG,
+                "API bind failed: ${error.javaClass.simpleName}"
+            )
             false
         }
     }
 
     private fun handleClient(client: Socket) {
+        if (!requestPermits.tryAcquire()) {
+            rejectClient(
+                client,
+                "503 Service Unavailable",
+                "Server is busy"
+            )
+            return
+        }
+
         try {
             client.use { connection ->
+                connection.soTimeout = ApiSecurityPolicy.SOCKET_TIMEOUT_MILLIS
                 val input = BufferedInputStream(connection.getInputStream())
                 val output = BufferedOutputStream(connection.getOutputStream())
+                val remoteAddress =
+                    connection.inetAddress?.hostAddress ?: "unknown"
 
-                val requestLine = readLine(input) ?: return
-                val parts = requestLine.split(" ")
-
-                val method = parts.getOrNull(0) ?: "GET"
-                val requestTarget = parts.getOrNull(1) ?: "/"
-                val path = requestTarget.substringBefore("?")
-                val query = requestTarget.substringAfter("?", "")
-                val queryParams = query.split("&").filter { it.isNotBlank() }.associate {
-                    val pair = it.split("=", limit = 2)
-                    URLDecoder.decode(pair[0], "UTF-8") to
-                        URLDecoder.decode(pair.getOrElse(1) { "" }, "UTF-8")
+                rateLimiter.prune()
+                val retryAfter = rateLimiter.acquire(remoteAddress)
+                if (retryAfter != null) {
+                    writeResponse(
+                        output,
+                        "429 Too Many Requests",
+                        errorJson("Too many requests"),
+                        listOf("Retry-After: $retryAfter\r\n")
+                    )
+                    return@use
                 }
 
-                while (true) {
-                    val header = readLine(input) ?: break
-                    if (header.isEmpty()) break
+                val request = try {
+                    ApiRequestParser.read(input)
+                } catch (error: ApiHttpException) {
+                    writeResponse(
+                        output,
+                        "${error.statusCode} ${error.statusText}",
+                        errorJson(error.message)
+                    )
+                    return@use
                 }
 
-                val authenticated =
-                    KotakSessionCoordinator.isFeedAuthenticated()
+                val method = request.method
+                val path = request.path
+                val queryParams = request.queryParameters
+                val endpoint = ApiSecurityPolicy.endpoint(method, path)
+                val providedToken = primaryToken(request)
+                val adminHeader = request.headers[
+                    LocalApiToken.ADMIN_HEADER_NAME.lowercase(Locale.US)
+                ]
 
-                val connected =
-                    KotakSessionCoordinator.isFeedConnected()
-
-                val brokerStatus = when {
-                    authenticated -> "authenticated"
-                    connected -> "connected"
-                    else -> "disconnected"
-                }
-
-                val brokerMessage = jsonEscape(
-                    KotakSessionCoordinator.currentStatus()
+                val authDecision = ApiTokenAuthorizer.decide(
+                    access = endpoint?.access ?: ApiAccess.READ,
+                    primaryToken = providedToken,
+                    adminHeaderToken = adminHeader,
+                    tokens = currentTokens(),
+                    optionsRequest = method == "OPTIONS"
                 )
+                val authFailed =
+                    authDecision == ApiAuthorizationDecision.UNAUTHORIZED
+                val adminDenied =
+                    authDecision == ApiAuthorizationDecision.FORBIDDEN
 
-                val response = when {
-                    method == "GET" && path == "/api/health" ->
-                        """{"status":"ok","service":"SB Bot Android Backend","server":"running"}"""
+                val response: String
+                val status: String
+                var extraHeaders: List<String> = emptyList()
 
-                    method == "GET" && path == "/api/broker/status" ->
-                        """
-                        {
-                            "status": "$brokerStatus",
-                            "broker": "Kotak Neo",
-                            "connected": $connected,
-                            "authenticated": $authenticated,
-                            "message": "$brokerMessage"
+                if (authFailed) {
+                    response = errorJson("Unauthorized")
+                    status = "401 Unauthorized"
+                    extraHeaders = listOf(
+                        "WWW-Authenticate: Bearer realm=\"SB Local API\"\r\n"
+                    )
+                } else if (adminDenied) {
+                    response = errorJson("Admin authorization required")
+                    status = "403 Forbidden"
+                } else if (method == "OPTIONS") {
+                    response = """{"status":"ok"}"""
+                    status = "200 OK"
+                } else if (endpoint == null) {
+                    val code = ApiSecurityPolicy.statusCodeFor(method, path)
+                    response = errorJson(
+                        if (code == 405) {
+                            "Method not allowed"
+                        } else {
+                            "Endpoint not found"
                         }
-                        """.trimIndent()
-
-                    method == "GET" && path == "/api/system/status" ->
-                        """{"app":"SB Bot","backend":"running","mode":"LOCAL_ANDROID"}"""
-
-                    method == "GET" && path == "/api/database/diagnostics" ->
-                        databaseDiagnostics()
-
-                    method == "GET" && path == "/api/database/candle-audit" ->
-                        databaseCandleAudit(
-                            symbol = queryParams["symbol"] ?: "",
-                            exchange = queryParams["exchange"] ?: "MCX",
-                            timeframe = queryParams["timeframe"] ?: "1m",
-                            limit = queryParams["limit"]?.toIntOrNull() ?: 500
+                    )
+                    status = statusLine(code)
+                    if (code == 405) {
+                        extraHeaders = listOf(
+                            "Allow: " +
+                                ApiSecurityPolicy.allowedMethods(path)
+                                    .joinToString(", ") +
+                                "\r\n"
                         )
+                    }
+                } else {
+                    val authenticated =
+                        KotakSessionCoordinator.isFeedAuthenticated()
 
-                    method == "GET" && path == "/api/database/capital-month-audit" ->
-                        databaseCapitalMonthAudit()
+                    val connected =
+                        KotakSessionCoordinator.isFeedConnected()
 
-                    method == "GET" && path == "/api/database/integrity-audit" ->
-                        databaseIntegrityAudit(
-                            exchange = queryParams["exchange"] ?: "",
-                            timeframe = queryParams["timeframe"] ?: ""
-                        )
+                    val brokerStatus = when {
+                        authenticated -> "authenticated"
+                        connected -> "connected"
+                        else -> "disconnected"
+                    }
 
-                    method == "GET" && path == "/api/history/validation" ->
-                        databaseHistoryValidation()
-
-                    method == "POST" && path == "/api/database/capital-month-backup" ->
-                        databaseCapitalMonthBackup()
-
-                    method == "POST" && path == "/api/database/capital-month-migrate" ->
-                        databaseCapitalMonthMigrate()
-
-                    method == "POST" && path == "/api/history/equities/start" ->
-                        KotakSessionCoordinator.startEquityHistoricalBackfill().toString()
-
-                    method == "GET" && path == "/api/history/equities/status" ->
-                        KotakSessionCoordinator.historicalImportSnapshot().toString()
-
-                    method == "POST" && path == "/api/history/mcx/start" ->
-                        KotakSessionCoordinator.startMcxThreeMonthBackfill().toString()
-
-                    method == "GET" && path == "/api/history/mcx/status" ->
-                        KotakSessionCoordinator.mcxHistoricalBackfillSnapshot().toString()
-
-                    method == "OPTIONS" ->
-                        """{"status":"ok"}"""
-
-                    else ->
-                        """{"status":"error","message":"Endpoint not found"}"""
-                }
-
-                val status = if (
-                    path == "/api/health" ||
-                    path == "/api/broker/status" ||
-                    path == "/api/system/status" ||
-                    path == "/api/database/diagnostics" ||
-                    path == "/api/database/candle-audit" ||
-                    path == "/api/database/capital-month-audit" ||
-                    path == "/api/database/integrity-audit" ||
-                    path == "/api/history/validation" ||
-                    path == "/api/database/capital-month-backup" ||
-                    path == "/api/database/capital-month-migrate" ||
-                    path == "/api/history/equities/start" ||
-                    path == "/api/history/equities/status" ||
-                    path == "/api/history/mcx/start" ||
-                    path == "/api/history/mcx/status" ||
-                    method == "OPTIONS"
-                ) "200 OK" else "404 Not Found"
-
-                val body = response.toByteArray(Charsets.UTF_8)
-
-                val headers = (
-                    "HTTP/1.1 $status\r\n" +
-                        "Content-Type: application/json; charset=utf-8\r\n" +
-                        "Content-Length: ${body.size}\r\n" +
-                        "Connection: close\r\n" +
-                        "Access-Control-Allow-Origin: *\r\n" +
-                        "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n" +
-                        "Access-Control-Allow-Headers: Content-Type, Authorization\r\n" +
-                        "\r\n"
+                    val brokerMessage = jsonEscape(
+                        KotakSessionCoordinator.currentStatus()
                     )
 
-                output.write(headers.toByteArray(Charsets.UTF_8))
-                output.write(body)
-                output.flush()
+                    val result = try {
+                        val body = dispatchGuarded(path) {
+                            when {
+                                method == "GET" && path == "/api/health" ->
+                                    """{"status":"ok","service":"SB Bot Android Backend","server":"running"}"""
+
+                                method == "GET" && path == "/api/broker/status" ->
+                                    """
+                                    {
+                                        "status": "$brokerStatus",
+                                        "broker": "Kotak Neo",
+                                        "connected": $connected,
+                                        "authenticated": $authenticated,
+                                        "message": "$brokerMessage"
+                                    }
+                                    """.trimIndent()
+
+                                method == "GET" && path == "/api/system/status" ->
+                                    """{"app":"SB Bot","backend":"running","mode":"LOCAL_ANDROID"}"""
+
+                                method == "GET" && path == "/api/database/diagnostics" ->
+                                    databaseDiagnostics()
+
+                                method == "GET" && path == "/api/database/candle-audit" ->
+                                    databaseCandleAudit(
+                                        symbol = queryParams["symbol"] ?: "",
+                                        exchange = queryParams["exchange"] ?: "MCX",
+                                        timeframe = queryParams["timeframe"] ?: "1m",
+                                        limit = queryParams["limit"]?.toIntOrNull() ?: 500
+                                    )
+
+                                method == "GET" && path == "/api/database/capital-month-audit" ->
+                                    databaseCapitalMonthAudit()
+
+                                method == "GET" && path == "/api/database/integrity-audit" ->
+                                    databaseIntegrityAudit(
+                                        exchange = queryParams["exchange"] ?: "",
+                                        timeframe = queryParams["timeframe"] ?: ""
+                                    )
+
+                                method == "GET" && path == "/api/history/validation" ->
+                                    databaseHistoryValidation()
+
+                                method == "POST" && path == "/api/database/capital-month-backup" ->
+                                    databaseCapitalMonthBackup()
+
+                                method == "POST" && path == "/api/database/capital-month-migrate" ->
+                                    databaseCapitalMonthMigrate()
+
+                                method == "POST" && path == "/api/history/equities/start" ->
+                                    KotakSessionCoordinator.startEquityHistoricalBackfill().toString()
+
+                                method == "GET" && path == "/api/history/equities/status" ->
+                                    KotakSessionCoordinator.historicalImportSnapshot().toString()
+
+                                method == "POST" && path == "/api/history/mcx/start" ->
+                                    KotakSessionCoordinator.startMcxThreeMonthBackfill().toString()
+
+                                method == "GET" && path == "/api/history/mcx/status" ->
+                                    KotakSessionCoordinator.mcxHistoricalBackfillSnapshot().toString()
+
+                                else ->
+                                    errorJson("Endpoint not found")
+                            }
+                        }
+                        body to statusLine(
+                            ApiSecurityPolicy.statusCodeFor(method, path)
+                        )
+                    } catch (_: DatabaseMaintenanceTimeoutException) {
+                        errorJson("Database is busy") to
+                            "503 Service Unavailable"
+                    } catch (error: Exception) {
+                        Log.w(
+                            TAG,
+                            "API dispatch failed: " +
+                                error.javaClass.simpleName
+                        )
+                        errorJson("Internal server error") to
+                            "500 Internal Server Error"
+                    }
+
+                    response = result.first
+                    status = result.second
+                }
+
+                writeResponse(
+                    output,
+                    status,
+                    response,
+                    extraHeaders
+                )
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
+        } catch (_: SocketTimeoutException) {
+            Log.w(TAG, "API request timed out")
+        } catch (error: Exception) {
+            Log.w(
+                TAG,
+                "API request failed: ${error.javaClass.simpleName}"
+            )
+        } finally {
+            requestPermits.release()
+        }
+    }
+
+    private fun rejectClient(
+        client: Socket,
+        status: String,
+        message: String
+    ) {
+        try {
+            client.use { connection ->
+                connection.soTimeout = ApiSecurityPolicy.SOCKET_TIMEOUT_MILLIS
+                writeResponse(
+                    BufferedOutputStream(connection.getOutputStream()),
+                    status,
+                    errorJson(message)
+                )
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun primaryToken(request: ApiRequest): String? {
+        return request.headers[
+            LocalApiToken.HEADER_NAME.lowercase(Locale.US)
+        ] ?: request.headers["authorization"]?.let { raw ->
+            if (raw.startsWith("Bearer ", ignoreCase = true)) {
+                raw.substring(7).trim()
+            } else {
+                raw.trim()
+            }
+        }
+    }
+
+    private fun currentTokens(): LocalApiTokens {
+        return try {
+            tokenProvider?.invoke()
+                ?: LocalApiTokens(accessToken, accessToken)
+        } catch (_: Exception) {
+            LocalApiTokens("", "")
+        }
+    }
+
+    private fun writeResponse(
+        output: BufferedOutputStream,
+        status: String,
+        response: String,
+        extraHeaders: List<String> = emptyList()
+    ) {
+        val body = response.toByteArray(Charsets.UTF_8)
+        val headers = buildString {
+            append("HTTP/1.1 ").append(status).append("\r\n")
+            append("Content-Type: application/json; charset=utf-8\r\n")
+            append("Content-Length: ").append(body.size).append("\r\n")
+            append("Connection: close\r\n")
+            append("Cache-Control: no-store\r\n")
+            append("X-Content-Type-Options: nosniff\r\n")
+            append("Content-Security-Policy: default-src 'none'\r\n")
+            extraHeaders.forEach { append(it) }
+            append("\r\n")
+        }
+
+        output.write(headers.toByteArray(Charsets.UTF_8))
+        output.write(body)
+        output.flush()
+    }
+
+    private fun errorJson(message: String): String {
+        return JSONObject()
+            .put("status", "error")
+            .put("message", message)
+            .toString()
+    }
+
+    private fun statusLine(code: Int): String {
+        return when (code) {
+            200 -> "200 OK"
+            400 -> "400 Bad Request"
+            401 -> "401 Unauthorized"
+            403 -> "403 Forbidden"
+            404 -> "404 Not Found"
+            405 -> "405 Method Not Allowed"
+            413 -> "413 Payload Too Large"
+            429 -> "429 Too Many Requests"
+            431 -> "431 Request Header Fields Too Large"
+            500 -> "500 Internal Server Error"
+            503 -> "503 Service Unavailable"
+            else -> "$code Error"
+        }
+    }
+
+    private fun dispatchGuarded(path: String, dispatch: () -> String): String {
+        val gate = DatabaseMaintenanceGate.shared
+        return if (
+            path == "/api/database/capital-month-backup" ||
+            path == "/api/database/capital-month-migrate"
+        ) {
+            gate.withMaintenance { dispatch() }
+        } else {
+            gate.withOperation { dispatch() }
         }
     }
 
@@ -551,7 +778,7 @@ class EmbeddedApiServer(
                 .put("status", "error")
                 .put(
                     "message",
-                    error.message ?: "Database diagnostics failed"
+                    "Database diagnostics failed"
                 )
                 .toString()
         }
@@ -608,7 +835,7 @@ class EmbeddedApiServer(
             val total = db.rawQuery("SELECT COUNT(*) FROM `candles` WHERE symbol = ? AND exchange = ? AND timeframe = ?", arrayOf(symbol, exchange, timeframe)).use { if (it.moveToFirst()) it.getLong(0) else 0L }
             val duplicateGroups = db.rawQuery("SELECT COUNT(*) FROM (SELECT timestamp FROM `candles` WHERE symbol = ? AND exchange = ? AND timeframe = ? GROUP BY timestamp HAVING COUNT(*) > 1)", arrayOf(symbol, exchange, timeframe)).use { if (it.moveToFirst()) it.getLong(0) else 0L }
             JSONObject().put("status", "ok").put("read_only", true).put("symbol", symbol).put("exchange", exchange).put("timeframe", timeframe).put("returned_rows", rows.length()).put("total_rows", total).put("checks", JSONObject().put("invalid_ohlc_rows_in_sample", invalidOhlc).put("invalid_timestamp_rows_in_sample", invalidTimestamp).put("duplicate_timestamp_groups", duplicateGroups).put("non_increasing_timestamp_steps_in_sample", nonIncreasing).put("estimated_missing_intervals_in_sample", gaps).put("largest_timestamp_gap_ms", largestGap).put("expected_interval_ms", interval)).put("candles", rows).toString()
-        } catch (error: Exception) { JSONObject().put("status", "error").put("message", error.message ?: "Candle audit failed").toString() }
+        } catch (error: Exception) { JSONObject().put("status", "error").put("message", "Candle audit failed").toString() }
     }
 
     /**
@@ -710,7 +937,7 @@ class EmbeddedApiServer(
                 .toString()
         } catch (error: Exception) {
             JSONObject().put("status", "error")
-                .put("message", error.message ?: "Uppercase 1M audit failed")
+                .put("message", "Uppercase 1M audit failed")
                 .toString()
         }
     }
@@ -786,7 +1013,7 @@ class EmbeddedApiServer(
             }
         } catch (error: Exception) {
             JSONObject().put("status", "error")
-                .put("message", error.message ?: "Uppercase 1M backup failed")
+                .put("message", "Uppercase 1M backup failed")
                 .toString()
         }
     }
@@ -1010,7 +1237,7 @@ class EmbeddedApiServer(
                 .toString()
         } catch (error: Exception) {
             JSONObject().put("status", "error")
-                .put("message", error.message ?: "Uppercase 1M recovery failed")
+                .put("message", "Uppercase 1M recovery failed")
                 .put("source_preserved_on_failure", true)
                 .toString()
         }
@@ -1110,7 +1337,7 @@ class EmbeddedApiServer(
                 .toString()
         } catch (error: Exception) {
             JSONObject().put("status", "error")
-                .put("message", error.message ?: "Database integrity audit failed")
+                .put("message", "Database integrity audit failed")
                 .toString()
         }
     }
@@ -1197,7 +1424,7 @@ class EmbeddedApiServer(
                 .toString()
         } catch (error: Exception) {
             JSONObject().put("status", "error")
-                .put("message", error.message ?: "History validation failed")
+                .put("message", "History validation failed")
                 .toString()
         }
     }
@@ -1232,21 +1459,6 @@ class EmbeddedApiServer(
         return builder.toString()
     }
 
-    private fun readLine(input: BufferedInputStream): String? {
-        val result = StringBuilder()
-
-        while (true) {
-            val value = input.read()
-            if (value == -1) {
-                return if (result.isEmpty()) null else result.toString()
-            }
-            if (value == 10) break
-            if (value != 13) result.append(value.toChar())
-        }
-
-        return result.toString()
-    }
-
     fun isRunning(): Boolean {
         return running.get() && serverSocket?.isBound == true
     }
@@ -1258,7 +1470,37 @@ class EmbeddedApiServer(
             serverSocket?.close()
         } catch (_: Exception) {
         }
-
         serverSocket = null
+
+        activeSockets.forEach { socket ->
+            try {
+                socket.close()
+            } catch (_: Exception) {
+            }
+        }
+
+        val acceptor = acceptExecutor
+        val workers = workerExecutor
+        acceptExecutor = null
+        workerExecutor = null
+
+        acceptor?.shutdownNow()
+        awaitTermination(acceptor, 5)
+        workers?.shutdown()
+        awaitTermination(workers, 10)
+
+        activeSockets.clear()
+    }
+
+    private fun awaitTermination(service: ExecutorService?, seconds: Long) {
+        if (service == null) return
+        try {
+            if (!service.awaitTermination(seconds, TimeUnit.SECONDS)) {
+                service.shutdownNow()
+            }
+        } catch (_: InterruptedException) {
+            service.shutdownNow()
+            Thread.currentThread().interrupt()
+        }
     }
 }

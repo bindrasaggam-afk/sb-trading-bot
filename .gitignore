@@ -9,3 +9,17 @@
 /build
 /captures
 .externalNativeBuild
+*.backup
+*.backup_*
+*.apk
+*.hprof
+*.jks
+*.keystore
+keystore.properties
+/rish
+/rish_shizuku.dex
+/sb.csv
+/backups/
+/backupstotal/
+/DELETED_CODE_ARCHIVE.txt
+/gradle_info.txt

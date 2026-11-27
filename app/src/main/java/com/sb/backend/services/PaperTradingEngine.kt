@@ -1,13 +1,22 @@
 package com.sb.backend.services
 
+import android.util.Log
 import com.sb.backend.core.AppConfig
 import com.sb.backend.models.OrderSide
+import com.sb.backend.models.OrderStatus
+import com.sb.backend.models.PaperExecution
+import com.sb.backend.models.PaperExecutionKind
 import com.sb.backend.models.PaperOrder
+import com.sb.backend.models.PaperTradeEvent
 import com.sb.backend.models.Position
 import com.sb.backend.repositories.MarketRepository
 import com.sb.backend.repositories.PaperAccount
 import com.sb.backend.repositories.PaperRepository
+import com.sb.backend.trading.PaperEntryDecisionType
+import com.sb.backend.trading.PaperSignalCandidate
+import com.sb.backend.trading.PaperSignalPolicy
 import java.util.Locale
+import kotlin.math.min
 
 data class PaperSnapshot(
     val account: PaperAccount,
@@ -26,6 +35,13 @@ data class TradeResult(
     val order: PaperOrder? = null,
     val pnl: Double? = null,
     val snapshot: PaperSnapshot? = null
+)
+
+private data class TargetExit(
+    val kind: PaperExecutionKind,
+    val level: Double?,
+    val executedAt: Long?,
+    val quantity: Int
 )
 
 class PaperTradingEngine(
@@ -50,87 +66,31 @@ class PaperTradingEngine(
         }
     }
 
+    @Suppress("UNUSED_PARAMETER")
     fun placeOrder(
         symbol: String,
         side: String,
         quantity: Int,
         entryPrice: Double? = null,
         exchange: String = AppConfig.get().defaultExchange,
-        note: String = ""
+        note: String = "",
+        stopLoss: Double? = null,
+        target: Double? = null,
+        entryTimestamp: Long? = null
     ): TradeResult {
-        return try {
-            val account = paperRepository.getAccount()
-                ?: return TradeResult(
-                    success = false,
-                    message = "Set starting balance first."
-                )
-
-            val normalizedSymbol = symbol.trim().toUpperCase(Locale.ROOT)
-            val normalizedExchange = exchange.trim().toUpperCase(Locale.ROOT)
-            val normalizedSide = normalizeSide(side)
-
-            require(normalizedSymbol.isNotBlank()) {
-                "Symbol cannot be empty."
-            }
-            require(normalizedExchange.isNotBlank()) {
-                "Exchange cannot be empty."
-            }
-
-            val price = entryPrice ?: marketRepository.getQuote(
-                normalizedSymbol,
-                normalizedExchange
-            )?.ltp
-
-            if (price == null || !price.isFinite() || price <= 0.0) {
-                return TradeResult(
-                    success = false,
-                    message = "Valid entry price is unavailable."
-                )
-            }
-
-            val decision = riskManager.validateOrder(
-                side = normalizedSide,
-                quantity = quantity,
-                price = price,
-                availableBalance = account.availableBalance,
-                openPositions = paperRepository.getOpenPositionCount()
-            )
-
-            if (!decision.allowed) {
-                return TradeResult(
-                    success = false,
-                    message = decision.reason ?: "Order rejected."
-                )
-            }
-
-            val order = paperRepository.saveOrder(
-                symbol = normalizedSymbol,
-                exchange = normalizedExchange,
-                side = normalizedSide,
-                quantity = quantity,
-                entryPrice = price,
-                note = note
-            )
-
-            TradeResult(
-                success = true,
-                message = "Paper order created.",
-                order = order,
-                snapshot = snapshot()
-            )
-        } catch (e: Exception) {
-            TradeResult(
-                success = false,
-                message = e.message ?: "Could not create paper order."
-            )
-        }
+        return TradeResult(
+            success = false,
+            message = "Manual paper orders are disabled. " +
+                "Trades are created only from genuine Research Signals."
+        )
     }
 
     fun closeOrder(
         orderId: Long,
         exitPrice: Double? = null,
         @Suppress("UNUSED_PARAMETER")
-        exchange: String = AppConfig.get().defaultExchange
+        exchange: String = AppConfig.get().defaultExchange,
+        exitTimestamp: Long? = null
     ): TradeResult {
         return try {
             val order = paperRepository.getOrder(orderId)
@@ -141,15 +101,20 @@ class PaperTradingEngine(
 
             if (!order.isOpen) {
                 return TradeResult(
-                    success = false,
-                    message = "Paper order is already closed."
+                    success = true,
+                    message = "Paper order is already closed.",
+                    order = order,
+                    pnl = order.realizedPnl,
+                    snapshot = snapshot()
                 )
             }
 
-            val price = exitPrice ?: marketRepository.getQuote(
-                order.symbol,
-                order.exchange
-            )?.ltp
+            val quote = if (exitPrice == null) {
+                marketRepository.getQuote(order.symbol, order.exchange)
+            } else {
+                null
+            }
+            val price = exitPrice ?: quote?.ltp
 
             if (price == null || !price.isFinite() || price <= 0.0) {
                 return TradeResult(
@@ -158,11 +123,35 @@ class PaperTradingEngine(
                 )
             }
 
+            val quoteTimestamp = exitTimestamp
+                ?: quote?.receivedAt
+                ?: if (exitPrice != null) System.currentTimeMillis() else null
+            if (quoteTimestamp == null ||
+                !riskManager.isQuoteFresh(quoteTimestamp)
+            ) {
+                return TradeResult(
+                    success = false,
+                    message = "Exit quote is stale. Wait for a fresh tick."
+                )
+            }
+
             val closed = paperRepository.closeOrder(orderId, price)
-                ?: return TradeResult(
+            if (closed == null) {
+                val latest = paperRepository.getOrder(orderId)
+                if (latest != null && !latest.isOpen) {
+                    return TradeResult(
+                        success = true,
+                        message = "Paper order is already closed.",
+                        order = latest,
+                        pnl = latest.realizedPnl,
+                        snapshot = snapshot()
+                    )
+                }
+                return TradeResult(
                     success = false,
                     message = "Could not close paper order."
                 )
+            }
 
             TradeResult(
                 success = true,
@@ -179,41 +168,351 @@ class PaperTradingEngine(
         }
     }
 
-    fun markToMarket(
-        symbols: List<String>? = null,
-        exchange: String = AppConfig.get().defaultExchange
-    ): Int {
+    fun markToMarket(symbols: List<String>? = null): Int {
         val positions = paperRepository.getPositions(true)
         if (positions.isEmpty()) return 0
 
-        val targets = symbols?.takeIf { it.isNotEmpty() }
-            ?: positions.map { it.symbol }.distinct()
-        val quotes = marketRepository.getQuotes(targets, exchange)
-        if (quotes.isEmpty()) return 0
+        val symbolFilter = symbols
+            ?.map { it.trim().uppercase(Locale.ROOT) }
+            ?.filter { it.isNotBlank() }
+            ?.toSet()
+            ?.takeIf { it.isNotEmpty() }
 
-        val prices = HashMap<String, Double>()
-        quotes.forEach { quote ->
-            prices[quote.symbol] = quote.ltp
+        var updated = 0
+        positions
+            .filter { symbolFilter == null || it.symbol.uppercase(Locale.ROOT) in symbolFilter }
+            .groupBy { it.exchange }
+            .forEach { (exchange, exchangePositions) ->
+                val quotes = marketRepository.getQuotes(
+                    exchangePositions.map { it.symbol }.distinct(),
+                    exchange
+                )
+                val prices = HashMap<String, Double>()
+                quotes.forEach { quote ->
+                    if (riskManager.isQuoteFresh(quote)) {
+                        prices[quote.symbol] = quote.ltp
+                    }
+                }
+                if (prices.isNotEmpty()) {
+                    updated += paperRepository.updatePositionPrices(
+                        prices,
+                        exchange
+                    )
+                }
+            }
+        return updated
+    }
+
+    fun monitorOpenTrades(now: Long = System.currentTimeMillis()): Int {
+        markToMarket()
+        var actions = 0
+
+        paperRepository.getPendingOrders().forEach { order ->
+            if (order.signalId == null) return@forEach
+            try {
+                if (monitorPendingEntry(order, now)) actions++
+            } catch (error: Exception) {
+                Log.e(
+                    TAG,
+                    "Pending paper signal ${order.signalId} failed.",
+                    error
+                )
+            }
         }
-        return paperRepository.updatePositionPrices(prices)
+
+        paperRepository.getOpenOrders().forEach { order ->
+            if (order.signalId == null) return@forEach
+            try {
+                if (monitorOpenSignal(order, now)) actions++
+            } catch (error: Exception) {
+                Log.e(
+                    TAG,
+                    "Open paper signal ${order.signalId} failed.",
+                    error
+                )
+            }
+        }
+        return actions
+    }
+
+    private fun monitorPendingEntry(
+        order: PaperOrder,
+        now: Long
+    ): Boolean {
+        val signalId = order.signalId ?: return false
+        val candidate = signalCandidate(order)
+        if (candidate == null) {
+            paperRepository.cancelSignalOrder(
+                orderId = order.id,
+                reason = "Invalid signal levels on forwarded order",
+                createdAt = now
+            )
+            return true
+        }
+
+        val quote = marketRepository.getQuote(order.symbol, order.exchange)
+        val fresh = quote != null && riskManager.isQuoteFresh(quote)
+        val decision = PaperSignalPolicy.entryDecision(
+            candidate = candidate,
+            quotePrice = quote?.ltp ?: Double.NaN,
+            quoteFresh = fresh,
+            now = now
+        )
+        return when (decision.type) {
+            PaperEntryDecisionType.WAIT -> false
+            PaperEntryDecisionType.CANCEL -> {
+                paperRepository.cancelSignalOrder(
+                    orderId = order.id,
+                    reason = decision.reason,
+                    createdAt = now
+                )
+                true
+            }
+            PaperEntryDecisionType.FILL -> {
+                val price = decision.price ?: return false
+                val currentQuote = quote ?: return false
+                try {
+                    paperRepository.fillSignalOrder(
+                        orderId = order.id,
+                        executionPrice = price,
+                        executedAt = currentQuote.receivedAt
+                    )
+                    true
+                } catch (error: Exception) {
+                    Log.e(
+                        TAG,
+                        "Paper entry rejected for signal $signalId.",
+                        error
+                    )
+                    paperRepository.cancelSignalOrder(
+                        orderId = order.id,
+                        reason = "Entry rejected: " +
+                            (error.message ?: "unknown error"),
+                        createdAt = now
+                    )
+                    true
+                }
+            }
+        }
+    }
+
+    private fun monitorOpenSignal(
+        order: PaperOrder,
+        now: Long
+    ): Boolean {
+        if (signalCandidate(order) == null) return false
+        if (order.remainingQuantity <= 0) return false
+
+        val quote = marketRepository.getQuote(order.symbol, order.exchange)
+            ?: return false
+        if (!riskManager.isQuoteFresh(quote)) return false
+        val ltp = quote.ltp
+        if (!ltp.isFinite() || ltp <= 0.0) return false
+
+        val expiresAt = order.signalExpiresAt ?: return false
+        if (now >= expiresAt) {
+            return exitRemaining(
+                order = order,
+                kind = PaperExecutionKind.EXPIRY,
+                price = PaperSignalPolicy.marketExecutionPrice(
+                    side = order.side,
+                    quotePrice = ltp,
+                    slippageBps = order.slippageBpsPerSide
+                ),
+                executedAt = quote.receivedAt,
+                note = "Signal expired"
+            )
+        }
+
+        val stopLoss = order.stopLoss ?: return false
+        if (PaperSignalPolicy.isStopHit(order.side, ltp, stopLoss)) {
+            return exitRemaining(
+                order = order,
+                kind = PaperExecutionKind.STOP_LOSS,
+                price = PaperSignalPolicy.stopExecutionPrice(
+                    side = order.side,
+                    quotePrice = ltp,
+                    stopLoss = stopLoss,
+                    slippageBps = order.slippageBpsPerSide
+                ),
+                executedAt = quote.receivedAt,
+                note = "Stop loss reached"
+            )
+        }
+
+        val quantities = PaperSignalPolicy.partialQuantities(order.quantity)
+        val targets = listOf(
+            TargetExit(
+                kind = PaperExecutionKind.TARGET_1,
+                level = order.target1,
+                executedAt = order.target1At,
+                quantity = quantities.first
+            ),
+            TargetExit(
+                kind = PaperExecutionKind.TARGET_2,
+                level = order.target2,
+                executedAt = order.target2At,
+                quantity = quantities.second
+            ),
+            TargetExit(
+                kind = PaperExecutionKind.TARGET_3,
+                level = order.target3,
+                executedAt = order.target3At,
+                quantity = quantities.third
+            )
+        )
+
+        var current = order
+        var exited = false
+        targets.forEach { target ->
+            if (current.remainingQuantity <= 0) return@forEach
+            val level = target.level ?: return@forEach
+            if (target.executedAt != null) return@forEach
+            if (!PaperSignalPolicy.isTargetHit(order.side, ltp, level)) {
+                return@forEach
+            }
+
+            val quantity = if (target.kind == PaperExecutionKind.TARGET_3) {
+                current.remainingQuantity
+            } else {
+                min(target.quantity, current.remainingQuantity)
+            }
+            if (quantity <= 0) return@forEach
+
+            // A gap beyond the target is not credited at the better
+            // live quote. Simulate at the target level with adverse exit slippage.
+            val executionPrice = PaperSignalPolicy.targetExecutionPrice(
+                side = order.side,
+                targetPrice = level,
+                slippageBps = order.slippageBpsPerSide
+            )
+            if (!executionPrice.isFinite() || executionPrice <= 0.0) {
+                return@forEach
+            }
+            val updated = paperRepository.exitSignalOrder(
+                orderId = current.id,
+                kind = target.kind,
+                quantity = quantity,
+                executionPrice = executionPrice,
+                executedAt = quote.receivedAt,
+                note = "${target.kind.name} reached"
+            )
+            if (updated != null) {
+                current = updated
+                exited = true
+            }
+        }
+        return exited
+    }
+
+    private fun exitRemaining(
+        order: PaperOrder,
+        kind: PaperExecutionKind,
+        price: Double,
+        executedAt: Long,
+        note: String
+    ): Boolean {
+        if (!price.isFinite() || price <= 0.0) return false
+        val updated = paperRepository.exitSignalOrder(
+            orderId = order.id,
+            kind = kind,
+            quantity = order.remainingQuantity,
+            executionPrice = price,
+            executedAt = executedAt,
+            note = note
+        ) ?: return false
+        return updated.id > 0L
+    }
+
+    private fun signalCandidate(order: PaperOrder): PaperSignalCandidate? {
+        val signalId = order.signalId ?: return null
+        val entryLow = order.entryLow ?: return null
+        val entryHigh = order.entryHigh ?: return null
+        val stopLoss = order.stopLoss ?: return null
+        val target1 = order.target1 ?: return null
+        val target2 = order.target2 ?: return null
+        val target3 = order.target3 ?: return null
+        val expiresAt = order.signalExpiresAt ?: return null
+        if (!entryLow.isFinite() || !entryHigh.isFinite() ||
+            !stopLoss.isFinite() || !target1.isFinite() ||
+            !target2.isFinite() || !target3.isFinite()
+        ) {
+            return null
+        }
+        return PaperSignalCandidate(
+            signalId = signalId,
+            symbol = order.symbol,
+            exchange = order.exchange,
+            side = order.side,
+            category = order.signalCategory,
+            timeframe = order.signalTimeframe,
+            strategyId = order.strategyId,
+            strategyVersion = order.strategyVersion,
+            referencePrice = order.entryPrice,
+            entryLow = entryLow,
+            entryHigh = entryHigh,
+            stopLoss = stopLoss,
+            target1 = target1,
+            target2 = target2,
+            target3 = target3,
+            generatedAt = order.signalGeneratedAt ?: order.createdAt,
+            expiresAt = expiresAt,
+            costBpsPerSide = order.costBpsPerSide,
+            slippageBpsPerSide = order.slippageBpsPerSide
+        )
     }
 
     fun snapshot(): PaperSnapshot? {
-        val account = paperRepository.getAccount() ?: return null
-        val positions = paperRepository.getPositions(true)
-        val realized = paperRepository.getRealizedPnl()
-        val unrealized = paperRepository.getUnrealizedPnl()
+        val data = paperRepository.getSnapshotData() ?: return null
         return PaperSnapshot(
-            account = account,
-            openPositions = positions,
-            realizedPnl = realized,
-            unrealizedPnl = unrealized,
-            totalEquity = account.balance + unrealized
+            account = data.account,
+            openPositions = data.positions,
+            realizedPnl = data.realizedPnl,
+            unrealizedPnl = data.unrealizedPnl,
+            totalEquity = data.account.startingBalance +
+                data.realizedPnl +
+                data.unrealizedPnl
         )
     }
 
     fun getOpenOrders(): List<PaperOrder> {
         return paperRepository.getOpenOrders()
+    }
+
+    fun getPendingOrders(): List<PaperOrder> {
+        return paperRepository.getPendingOrders()
+    }
+
+    fun getActiveOrders(): List<PaperOrder> {
+        return paperRepository.getActiveOrders()
+    }
+
+    fun getExecutions(
+        orderId: Long? = null,
+        limit: Int = 200
+    ): List<PaperExecution> {
+        return paperRepository.getExecutions(orderId, limit)
+    }
+
+    fun getEvents(limit: Int = 200): List<PaperTradeEvent> {
+        return paperRepository.getEvents(limit)
+    }
+
+    fun getSignalOrder(signalId: Long): PaperOrder? {
+        return paperRepository.getSignalOrder(signalId)
+    }
+
+    fun getOrder(orderId: Long): PaperOrder? {
+        return paperRepository.getOrder(orderId)
+    }
+
+    fun getOpenOrder(symbol: String, exchange: String): PaperOrder? {
+        val normalizedSymbol = symbol.trim()
+        val normalizedExchange = exchange.trim()
+        return paperRepository.getOpenOrders().firstOrNull { order ->
+            order.symbol.equals(normalizedSymbol, ignoreCase = true) &&
+                order.exchange.equals(normalizedExchange, ignoreCase = true)
+        }
     }
 
     fun getOrders(status: String? = null): List<PaperOrder> {
@@ -257,5 +556,9 @@ class PaperTradingEngine(
             "Side must be BUY or SELL."
         }
         return normalized
+    }
+
+    private companion object {
+        private const val TAG = "PaperTradingEngine"
     }
 }

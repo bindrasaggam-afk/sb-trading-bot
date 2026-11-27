@@ -27,6 +27,15 @@ class KotakNeoWebSocketClient(
     companion object {
         private const val MAX_RECONNECT_DELAY = 30_000L
         private const val MAX_SUBSCRIPTION_BATCH = 3000
+        private const val NORMAL_CLOSE_CODE = 1000
+        private val RESERVED_CLOSE_CODES = setOf(1004, 1005, 1006, 1015)
+
+        internal fun closeResponseCode(code: Int): Int =
+            if (code in 1000..4999 && code !in RESERVED_CLOSE_CODES) {
+                code
+            } else {
+                NORMAL_CLOSE_CODE
+            }
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -119,6 +128,7 @@ class KotakNeoWebSocketClient(
         }
 
         manuallyClosed.set(false)
+        reconnectAttempts = 0
 
         mainHandler.removeCallbacks(reconnectRunnable)
 
@@ -263,7 +273,7 @@ class KotakNeoWebSocketClient(
                 code: Int,
                 reason: String
             ) {
-                webSocket.close(code, reason)
+                webSocket.close(closeResponseCode(code), "Closing")
             }
 
             override fun onClosed(
@@ -278,7 +288,11 @@ class KotakNeoWebSocketClient(
                 socket = null
 
                 status(
-                    "ERROR | WebSocket closed: $code $reason"
+                    if (code == 1005) {
+                        "WARNING | WebSocket closed by peer without status code; reconnecting..."
+                    } else {
+                        "ERROR | WebSocket closed: $code $reason"
+                    }
                 )
 
                 scheduleReconnect()
@@ -671,10 +685,10 @@ class KotakNeoWebSocketClient(
             1000L * (1L shl exponent)
         )
 
-        reconnectAttempts++
+        reconnectAttempts = (reconnectAttempts + 1).coerceAtMost(Int.MAX_VALUE)
 
         status(
-            "RECONNECTING in ${delay / 1000} seconds..."
+            "RECONNECTING | attempt $reconnectAttempts in ${delay / 1000} seconds..."
         )
 
         mainHandler.postDelayed(

@@ -40,6 +40,49 @@ class KotakNeoBinaryParserTest {
         assertEquals(-5.0, tick!!.change, 0.0001)
     }
 
+    @Test
+    fun frameParserRecoversAfterMalformedLengthAndKeepsLaterPackets() {
+        val malformedPrefix = byteArrayOf(0x00, 0x00, 0x7F)
+        val validFirst = miniPacket(
+            exchangeId = 1,
+            ltpRaw = 12_345_00,
+            closeRaw = 12_340_00,
+            changeRaw = 5_00
+        )
+        val validSecond = miniPacket(
+            exchangeId = 1,
+            ltpRaw = 12_346_00,
+            closeRaw = 12_340_00,
+            changeRaw = 6_00
+        )
+
+        val frame = malformedPrefix + validFirst + validSecond
+        val ticks = KotakNeoBinaryParser().parseFrame(frame)
+
+        assertEquals(2, ticks.size)
+        assertEquals(12_345.0, ticks[0].ltp, 0.0001)
+        assertEquals(12_346.0, ticks[1].ltp, 0.0001)
+    }
+
+    @Test
+    fun frameParserSkipsPacketWithPlausibleLengthButInvalidHeaderAndRecovers() {
+        val invalidPacket = ByteArray(54).also {
+            ByteBuffer.wrap(it).order(ByteOrder.LITTLE_ENDIAN).putShort(0, 54.toShort())
+            ByteBuffer.wrap(it).order(ByteOrder.LITTLE_ENDIAN).putShort(2, 9999.toShort())
+        }
+        val valid = miniPacket(
+            exchangeId = 1,
+            ltpRaw = 12_345_00,
+            closeRaw = 12_340_00,
+            changeRaw = 5_00
+        )
+
+        val ticks = KotakNeoBinaryParser().parseFrame(invalidPacket + valid)
+
+        assertEquals(1, ticks.size)
+        assertEquals(12_345.0, ticks.single().ltp, 0.0001)
+    }
+
     private fun miniPacket(
         exchangeId: Int,
         ltpRaw: Int,

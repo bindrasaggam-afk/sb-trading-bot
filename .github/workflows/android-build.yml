@@ -1,0 +1,108 @@
+name: Android Build and Unit Tests
+
+on:
+  push:
+    branches:
+      - main
+      - 'feature/**'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_instrumentation:
+        description: 'Run Android emulator instrumentation tests (slow)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17 for Android SDK tools
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Install Android SDK packages
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "platforms;android-29" "build-tools;29.0.3"
+
+      - name: Set up Java 11 for Gradle
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+
+      - name: Run JVM unit tests
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :app:testDebugUnitTest --stacktrace
+
+      - name: Upload unit test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sb-unit-test-reports
+          path: app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: ignore
+
+      # Emulator validation is opt-in to avoid slowing/failing every push.
+      # Enable it manually from Actions > Run workflow when device tests are needed.
+      - name: Set up Java 17 for emulator SDK tools
+        if: github.event_name == 'workflow_dispatch' && inputs.run_instrumentation == true
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Run Android instrumentation tests
+        id: instrumentation
+        if: github.event_name == 'workflow_dispatch' && inputs.run_instrumentation == true
+        continue-on-error: true
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 29
+          target: default
+          arch: x86_64
+          emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
+          disable-animations: true
+          boot-timeout: 300
+          script: |
+            export JAVA_HOME="$JAVA_HOME_11_X64" && export PATH="$JAVA_HOME/bin:$PATH" && ./gradlew :app:connectedDebugAndroidTest --stacktrace
+
+      - name: Set up Java 11 for APK build
+        if: always()
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+
+      - name: Build debug APK
+        if: always()
+        run: ./gradlew :app:assembleDebug --stacktrace
+
+      - name: Upload APK
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sb-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: Fail if instrumentation tests failed
+        if: always() && steps.instrumentation.outcome == 'failure'
+        run: exit 1

@@ -2,9 +2,10 @@ package com.sb
 
 import android.app.AlertDialog
 import android.content.Context
-import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.os.Handler
+import android.os.Looper
 import android.text.InputType
 import android.view.View
 import android.view.ViewGroup
@@ -14,8 +15,18 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import com.sb.backend.core.BackendManager
+import com.sb.backend.models.OrderSide
+import com.sb.backend.models.PaperExecution
+import com.sb.backend.models.PaperOrder
+import com.sb.backend.models.Position
+import com.sb.backend.services.PaperSnapshot
+import com.sb.backend.services.PaperTradingEngine
+import com.sb.backend.services.TradeResult
 import com.sb.ui.theme.AppDesign
 import java.util.Locale
+import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 
 object PaperTradingScreen {
 
@@ -28,11 +39,18 @@ object PaperTradingScreen {
     private val GREEN = AppDesign.positive
     private val RED = AppDesign.negative
 
+    private data class ScreenData(
+        val snapshot: PaperSnapshot?,
+        val orders: List<PaperOrder>,
+        val executions: List<PaperExecution>
+    )
+
     fun create(
         context: Context,
         onOpenChart: ((String, String) -> Unit)? = null
     ): View {
-        val db = DashboardDbHelper(context)
+        val handler = Handler(Looper.getMainLooper())
+        val executor = Executors.newSingleThreadExecutor()
 
         val scroll = ScrollView(context).apply {
             setBackgroundColor(BG)
@@ -116,198 +134,213 @@ object PaperTradingScreen {
             )
         }
 
-        fun refresh() {
+        var detached = false
+        var loading = false
+        var refreshQueued = false
+        var retryScheduled = false
+
+        lateinit var requestRefresh: () -> Unit
+        lateinit var runOperation: ((PaperTradingEngine) -> TradeResult) -> Unit
+
+        fun scheduleRetry() {
+            if (detached || retryScheduled) return
+            retryScheduled = true
+            handler.postDelayed({
+                retryScheduled = false
+                requestRefresh()
+            }, 700L)
+        }
+
+        fun renderLoading(message: String) {
+            page.removeAllViews()
+            addText("Paper Trading", 20, TEXT, true)
+            addText(
+                "Unified paper engine · sb_backend.db",
+                11, MUTED
+            ).setPadding(0, dp(context, 3), 0, dp(context, 8))
+            addCard("Paper Trading", "Preparing…", message)
+        }
+
+        fun renderError(message: String) {
+            page.removeAllViews()
+            addText("Paper Trading", 20, TEXT, true)
+            addText(
+                "Unified paper engine · sb_backend.db",
+                11, MUTED
+            ).setPadding(0, dp(context, 3), 0, dp(context, 8))
+            addCard("Paper Trading unavailable", "—", message)
+            addButton("Retry") {
+                requestRefresh()
+            }
+        }
+
+        fun render(data: ScreenData) {
             page.removeAllViews()
 
             addText("Paper Trading", 20, TEXT, true)
             addText(
-                "Local practice mode · No broker connection",
+                "Automated from genuine Research Signals · sb_backend.db",
                 11, MUTED
             ).setPadding(0, dp(context, 3), 0, dp(context, 8))
 
-            val balance = db.getPaperBalance()
-            val orders = db.getPaperOrders()
-            val openOrders = orders.filter { it.status == "OPEN" }
-            val closedOrders = orders.filter { it.status == "CLOSED" }
+            val snapshot = data.snapshot
+            val orders = data.orders
+            val ordersById = orders.associateBy { it.id }
 
-            val realizedPnl = closedOrders.sumOfCompat {
-                it.realizedPnl ?: 0.0
+            if (snapshot == null) {
+                addCard(
+                    "Paper Account",
+                    "Not configured",
+                    "Set a starting balance to begin paper trading."
+                )
+            } else {
+                val account = snapshot.account
+                addCard(
+                    "Available Balance",
+                    rupees(account.availableBalance),
+                    "Cash minus reserved short margin"
+                )
+                addCard(
+                    "Realized P&L",
+                    rupees(snapshot.realizedPnl),
+                    "Closed paper trades"
+                )
+                addCard(
+                    "Unrealized P&L",
+                    rupees(snapshot.unrealizedPnl),
+                    "Open positions marked to market"
+                )
+                addCard(
+                    "Total P&L",
+                    rupees(snapshot.realizedPnl + snapshot.unrealizedPnl),
+                    "Realized plus unrealized"
+                )
+                addCard(
+                    "Total Equity",
+                    rupees(snapshot.totalEquity),
+                    "Starting balance plus realized and unrealized P&L"
+                )
+                addCard(
+                    "Paper Cash Balance",
+                    rupees(account.balance),
+                    "BUY cost and entry charges deducted; short proceeds excluded"
+                )
+                addCard(
+                    "Reserved Capital",
+                    rupees(account.reservedMargin),
+                    "Pending entries plus open short-sale margin"
+                )
             }
 
-            val reservedMargin = db.getReservedMargin()
-            val availableBalance = db.getAvailableBalance()
+            if (snapshot == null || orders.isEmpty()) {
+                addButton("Set Starting Balance") {
+                    showInputDialog(
+                        context,
+                        "Set Starting Paper Balance",
+                        "Amount in ₹",
+                        InputType.TYPE_CLASS_NUMBER or
+                            InputType.TYPE_NUMBER_FLAG_DECIMAL
+                    ) { input ->
+                        val amount = input.toDoubleOrNull()
 
-            addCard(
-                "Paper Cash Balance",
-                balance?.let { rupees(it) } ?: "Not set",
-                "BUY cost deducted; short-sale proceeds excluded"
-            )
-
-            addCard(
-                "Available Balance",
-                availableBalance?.let { rupees(it) } ?: "Not set",
-                "Cash minus reserved short margin"
-            )
-
-            addCard(
-                "Reserved Margin",
-                rupees(reservedMargin),
-                "SELL short: 20% of entry value"
-            )
-
-            addCard(
-                "Realized Paper P&L",
-                rupees(realizedPnl),
-                "Historical closed-trade P&L"
-            )
-
-            addCard(
-                "Open Positions",
-                openOrders.size.toString(),
-                "Locally saved paper orders"
-            )
-
-            addCard(
-                "Trade History",
-                closedOrders.size.toString(),
-                "Locally closed orders"
-            )
-
-            addButton("Set Starting Balance") {
-                showInputDialog(
-                    context,
-                    "Set Starting Paper Balance",
-                    "Amount in ₹",
-                    InputType.TYPE_CLASS_NUMBER or
-                        InputType.TYPE_NUMBER_FLAG_DECIMAL
-                ) { input ->
-                    val amount = input.toDoubleOrNull()
-
-                    if (amount == null ||
-                        !amount.isFinite() ||
-                        amount <= 0.0
-                    ) {
-                        toast(context, "Enter a valid positive amount.")
-                    } else {
-                        try {
-                            db.savePaperBalance(amount)
-                            toast(context, "Starting balance saved.")
-                            refresh()
-                        } catch (e: Exception) {
-                            toast(context, "Could not save balance.")
+                        if (amount == null ||
+                            !amount.isFinite() ||
+                            amount <= 0.0
+                        ) {
+                            toast(context, "Enter a valid positive amount.")
+                        } else {
+                            runOperation { engine ->
+                                engine.setStartingBalance(amount)
+                            }
                         }
                     }
                 }
             }
 
-            addButton("Create Paper Order") {
-                if (balance == null) {
-                    toast(context, "First set your starting balance.")
-                } else {
-                    showCreateOrderDialog(context, db) {
-                        refresh()
-                    }
+            addText("Pending Signal Entries", 17, TEXT, true)
+                .setPadding(0, dp(context, 16), 0, dp(context, 4))
+
+            val pendingOrders = orders.filter { it.isPending }
+            if (pendingOrders.isEmpty()) {
+                addCard(
+                    "No pending entries",
+                    "—",
+                    "New genuine signals will wait here for entry."
+                )
+            } else {
+                pendingOrders.forEach { order ->
+                    page.addView(
+                        orderCard(context, order, onOpenChart),
+                        matchParams().apply {
+                            topMargin = dp(context, 8)
+                        }
+                    )
                 }
             }
 
             addText("Open Positions", 17, TEXT, true)
                 .setPadding(0, dp(context, 16), 0, dp(context, 4))
 
-            if (openOrders.isEmpty()) {
+            val openPositions = snapshot?.openPositions.orEmpty()
+            if (openPositions.isEmpty()) {
                 addCard(
-                    "No open paper orders",
+                    "No open positions",
                     "—",
-                    "Create a paper order to see it here."
+                    "Entries open automatically when price reaches a signal range."
                 )
             } else {
-                openOrders.forEach { order ->
-                    val card = orderCard(context, order, onOpenChart)
-
-                    val closeButton = Button(context).apply {
-                        text = "Close Paper Order"
-                        isAllCaps = false
-                        textSize = 12f
-                        setTextColor(TEXT)
-                        background = rounded(context, PANEL_ALT, 9)
-
-                        setOnClickListener {
-                            showInputDialog(
-                                context,
-                                "Close ${order.symbol}",
-                                "Exit price",
-                                InputType.TYPE_CLASS_NUMBER or
-                                    InputType.TYPE_NUMBER_FLAG_DECIMAL
-                            ) { input ->
-                                val exit = input.toDoubleOrNull()
-
-                                if (exit == null ||
-                                    !exit.isFinite() ||
-                                    exit <= 0.0
-                                ) {
-                                    toast(context, "Enter a valid exit price.")
-                                } else {
-                                    val direction =
-                                        if (order.side == "BUY") 1.0 else -1.0
-
-                                    val pnl = (exit - order.entryPrice) *
-                                        order.quantity * direction
-
-                                    try {
-                                        val pnl = db.closePaperOrder(order.id, exit)
-
-                                        if (pnl == null) {
-                                            toast(context, "Order is already closed or unavailable.")
-                                        } else {
-                                            toast(
-                                                context,
-                                                "Paper order closed. P&L: ${rupees(pnl)}"
-                                            )
-                                            refresh()
-                                        }
-                                    } catch (e: Exception) {
-                                        toast(
-                                            context,
-                                            e.message ?: "Could not close order."
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    card.addView(
-                        closeButton,
-                        LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            dp(context, 44)
-                        ).apply {
-                            topMargin = dp(context, 10)
-                        }
+                openPositions.forEach { position ->
+                    val order = ordersById[position.orderId]
+                    val card = positionCard(
+                        context,
+                        position,
+                        order,
+                        onOpenChart
                     )
 
                     page.addView(
                         card,
-                        matchParams(context).apply {
+                        matchParams().apply {
                             topMargin = dp(context, 8)
                         }
                     )
                 }
             }
 
-            addText("Trade History", 17, TEXT, true)
+            addText("Order History", 17, TEXT, true)
                 .setPadding(0, dp(context, 16), 0, dp(context, 4))
 
-            if (closedOrders.isEmpty()) {
+            if (orders.isEmpty()) {
                 addCard(
-                    "No completed paper trades",
+                    "No paper orders",
                     "—",
-                    "Closed orders will appear here."
+                    "Forwarded genuine signals will appear here."
                 )
             } else {
-                closedOrders.forEach { order ->
+                orders.forEach { order ->
                     page.addView(
                         orderCard(context, order, onOpenChart),
-                        matchParams(context).apply {
+                        matchParams().apply {
+                            topMargin = dp(context, 8)
+                        }
+                    )
+                }
+            }
+
+            addText("Recent Executions", 17, TEXT, true)
+                .setPadding(0, dp(context, 16), 0, dp(context, 4))
+
+            if (data.executions.isEmpty()) {
+                addCard(
+                    "No executions",
+                    "—",
+                    "Entries, partial targets and exits will appear here."
+                )
+            } else {
+                data.executions.take(30).forEach { execution ->
+                    page.addView(
+                        executionCard(context, execution),
+                        matchParams().apply {
                             topMargin = dp(context, 8)
                         }
                     )
@@ -315,129 +348,117 @@ object PaperTradingScreen {
             }
 
             addText(
-                "Offline practice only. Starting balance is a configured value, " +
-                    "not a live account balance. No broker orders are sent.",
+                "Practice only. Trades are opened, scaled out and closed " +
+                    "automatically from genuine signals. No broker orders " +
+                    "are sent and the original signal formulas are unchanged.",
                 12,
                 MUTED
             ).setPadding(0, dp(context, 20), 0, 0)
         }
 
-        refresh()
+        runOperation = { action ->
+            try {
+                executor.execute {
+                    val result = try {
+                        action(BackendManager.paperEngine())
+                    } catch (error: Exception) {
+                        TradeResult(
+                            success = false,
+                            message = error.message ?: "Paper operation failed."
+                        )
+                    }
+
+                    handler.post {
+                        if (detached) return@post
+                        toast(context, operationMessage(result))
+                        requestRefresh()
+                    }
+                }
+            } catch (_: RejectedExecutionException) {
+                if (!detached) {
+                    toast(context, "Paper trading is stopping.")
+                }
+            }
+        }
+
+        requestRefresh = {
+            if (detached) {
+                Unit
+            } else if (!BackendManager.isInitialized()) {
+                renderLoading("Backend is not initialized yet.")
+                scheduleRetry()
+            } else if (!BackendManager.isReady()) {
+                renderLoading("Backend is starting. This may take a moment.")
+                scheduleRetry()
+            } else if (loading) {
+                refreshQueued = true
+            } else {
+                loading = true
+                try {
+                    executor.execute {
+                        val result = runCatching { loadData() }
+
+                        handler.post {
+                            if (detached) return@post
+                            loading = false
+                            result.onSuccess { render(it) }
+                            result.onFailure { error ->
+                                renderError(
+                                    error.message ?: "Could not load paper trading."
+                                )
+                            }
+
+                            if (refreshQueued) {
+                                refreshQueued = false
+                                requestRefresh()
+                            }
+                        }
+                    }
+                } catch (_: RejectedExecutionException) {
+                    loading = false
+                    renderError("Paper trading is stopping.")
+                }
+            }
+        }
+
+        scroll.addOnAttachStateChangeListener(
+            object : View.OnAttachStateChangeListener {
+                override fun onViewAttachedToWindow(view: View) = Unit
+
+                override fun onViewDetachedFromWindow(view: View) {
+                    detached = true
+                    handler.removeCallbacksAndMessages(null)
+                    executor.shutdownNow()
+                }
+            }
+        )
+
+        val periodicRefresh = object : Runnable {
+            override fun run() {
+                if (detached) return
+                requestRefresh()
+                handler.postDelayed(this, 5_000L)
+            }
+        }
+
+        renderLoading("Connecting to the paper trading engine…")
+        requestRefresh()
+        handler.postDelayed(periodicRefresh, 5_000L)
         return scroll
     }
 
-    private fun showCreateOrderDialog(
-        context: Context,
-        db: DashboardDbHelper,
-        onSaved: () -> Unit
-    ) {
-        val layout = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(context, 20), dp(context, 8),
-                dp(context, 20), dp(context, 4))
+    private fun loadData(): ScreenData {
+        val engine = BackendManager.paperEngine()
+        try {
+            engine.markToMarket()
+        } catch (_: Exception) {
+            // Keep the last known marks when live quotes are unavailable.
         }
-
-        fun field(
-            hintText: String,
-            type: Int
-        ): EditText {
-            val edit = EditText(context).apply {
-                hint = hintText
-                inputType = type
-                setSingleLine(true)
-                setTextColor(TEXT)
-                setHintTextColor(MUTED)
-            }
-            layout.addView(edit)
-            return edit
-        }
-
-        val symbol = field(
-            "Symbol (e.g. RELIANCE)",
-            InputType.TYPE_CLASS_TEXT or
-                InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
+        return ScreenData(
+            snapshot = engine.snapshot(),
+            orders = engine.getOrders(),
+            executions = engine.getExecutions(limit = 100)
         )
-
-        val quantity = field(
-            "Quantity",
-            InputType.TYPE_CLASS_NUMBER
-        )
-
-        val price = field(
-            "Entry price",
-            InputType.TYPE_CLASS_NUMBER or
-                InputType.TYPE_NUMBER_FLAG_DECIMAL
-        )
-
-        var side = "BUY"
-
-        val sideButton = Button(context).apply {
-            text = "Side: BUY (tap to change)"
-            isAllCaps = false
-            setOnClickListener {
-                side = if (side == "BUY") "SELL" else "BUY"
-                text = "Side: $side (tap to change)"
-            }
-        }
-
-        layout.addView(sideButton)
-
-        AlertDialog.Builder(context)
-            .setTitle("Create Local Paper Order")
-            .setView(layout)
-            .setNegativeButton("Cancel", null)
-            .setPositiveButton("Save Order", null)
-            .create()
-            .also { dialog ->
-                dialog.setOnShowListener {
-                    dialog.getButton(AlertDialog.BUTTON_POSITIVE)
-                        .setOnClickListener {
-                            val symbolValue = symbol.text.toString().trim()
-                            val quantityValue = quantity.text.toString()
-                                .trim().toIntOrNull()
-                            val priceValue = price.text.toString()
-                                .trim().toDoubleOrNull()
-
-                            if (symbolValue.isBlank()) {
-                                toast(context, "Enter a symbol.")
-                                return@setOnClickListener
-                            }
-
-                            if (quantityValue == null ||
-                                quantityValue <= 0
-                            ) {
-                                toast(context, "Enter a valid quantity.")
-                                return@setOnClickListener
-                            }
-
-                            if (priceValue == null ||
-                                !priceValue.isFinite() ||
-                                priceValue <= 0.0
-                            ) {
-                                toast(context, "Enter a valid entry price.")
-                                return@setOnClickListener
-                            }
-
-                            try {
-                                db.savePaperOrder(
-                                    symbolValue,
-                                    side,
-                                    quantityValue,
-                                    priceValue
-                                )
-
-                                dialog.dismiss()
-                                toast(context, "Paper order saved locally.")
-                                onSaved()
-                            } catch (e: Exception) {
-                                toast(context, "Could not save paper order.")
-                            }
-                        }
-                }
-
-                AppDesign.styleDialog(dialog)
-                dialog.show()
-            }
     }
 
     private fun showInputDialog(
@@ -480,6 +501,87 @@ object PaperTradingScreen {
         dialog.show()
     }
 
+    private fun positionCard(
+        context: Context,
+        position: Position,
+        order: PaperOrder?,
+        onOpenChart: ((String, String) -> Unit)? = null
+    ): LinearLayout {
+        val card = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(context, 13), dp(context, 10),
+                dp(context, 13), dp(context, 10))
+            background = rounded(context, PANEL, 10)
+            isClickable = true
+            setOnClickListener {
+                onOpenChart?.invoke(position.symbol, position.exchange)
+            }
+        }
+
+        card.addView(
+            makeText(
+                context,
+                "${position.symbol} · ${position.side}",
+                17,
+                if (position.side == OrderSide.BUY.name) GREEN else RED,
+                true
+            )
+        )
+
+        card.addView(
+            makeText(
+                context,
+                "Quantity: ${position.quantity}  |  " +
+                    "Entry: ${rupees(position.entryPrice)}  |  " +
+                    "LTP: ${rupees(position.lastPrice)}",
+                13, TEXT, false
+            ).apply {
+                setPadding(0, dp(context, 7), 0, 0)
+            }
+        )
+
+        card.addView(
+            makeText(
+                context,
+                "Unrealized P&L: ${rupees(position.unrealizedPnl)}",
+                14,
+                if (position.unrealizedPnl >= 0) GREEN else RED,
+                true
+            ).apply {
+                setPadding(0, dp(context, 5), 0, 0)
+            }
+        )
+
+        if (order != null) {
+            card.addView(
+                makeText(
+                    context,
+                    "SL: ${order.stopLoss?.let { rupees(it) } ?: "—"}  |  " +
+                        "T1: ${order.target1?.let { rupees(it) } ?: "—"}  |  " +
+                        "T2: ${order.target2?.let { rupees(it) } ?: "—"}  |  " +
+                        "T3: ${order.target3?.let { rupees(it) } ?: "—"}",
+                    12, MUTED, false
+                ).apply {
+                    setPadding(0, dp(context, 5), 0, 0)
+                }
+            )
+
+            card.addView(
+                makeText(
+                    context,
+                    "Remaining: ${order.remainingQuantity}  |  " +
+                        "Signal: ${order.signalCategory.ifBlank { "—" }} · " +
+                        "${order.strategyId.ifBlank { "—" }}",
+                    12, MUTED, false
+                ).apply {
+                    setPadding(0, dp(context, 4), 0, 0)
+                }
+            )
+        }
+
+        return card
+    }
+
     private fun orderCard(
         context: Context,
         order: PaperOrder,
@@ -492,16 +594,16 @@ object PaperTradingScreen {
             background = rounded(context, PANEL, 10)
             isClickable = true
             setOnClickListener {
-                onOpenChart?.invoke(order.symbol, "")
+                onOpenChart?.invoke(order.symbol, order.exchange)
             }
         }
 
         card.addView(
             makeText(
                 context,
-                "${order.symbol} · ${order.side}",
+                "${order.symbol} · ${order.side} · ${order.exchange}",
                 17,
-                if (order.side == "BUY") GREEN else RED,
+                if (order.side == OrderSide.BUY.name) GREEN else RED,
                 true
             )
         )
@@ -509,7 +611,9 @@ object PaperTradingScreen {
         card.addView(
             makeText(
                 context,
-                "Quantity: ${order.quantity}  |  Entry: ${rupees(order.entryPrice)}",
+                "Quantity: ${order.quantity}  |  " +
+                    "Remaining: ${order.remainingQuantity}  |  " +
+                    "Entry: ${rupees(order.entryPrice)}",
                 13, TEXT, false
             ).apply {
                 setPadding(0, dp(context, 7), 0, 0)
@@ -519,12 +623,28 @@ object PaperTradingScreen {
         card.addView(
             makeText(
                 context,
-                "Status: ${order.status}",
+                "Status: ${order.status}  |  " +
+                    "Signal: ${order.signalCategory.ifBlank { "—" }} · " +
+                    "${order.strategyId.ifBlank { "—" }} " +
+                    "v${order.strategyVersion}",
                 12, MUTED, false
             ).apply {
                 setPadding(0, dp(context, 5), 0, 0)
             }
         )
+
+        if (order.entryLow != null || order.entryHigh != null) {
+            card.addView(
+                makeText(
+                    context,
+                    "Entry range: ${order.entryLow?.let { rupees(it) } ?: "—"}" +
+                        " – ${order.entryHigh?.let { rupees(it) } ?: "—"}",
+                    12, MUTED, false
+                ).apply {
+                    setPadding(0, dp(context, 4), 0, 0)
+                }
+            )
+        }
 
         if (order.exitPrice != null) {
             card.addView(
@@ -548,6 +668,77 @@ object PaperTradingScreen {
                     true
                 ).apply {
                     setPadding(0, dp(context, 5), 0, 0)
+                }
+            )
+        }
+
+        card.addView(
+            makeText(
+                context,
+                "SL: ${order.stopLoss?.let { rupees(it) } ?: "—"}  |  " +
+                    "T1: ${order.target1?.let { rupees(it) } ?: "—"}  |  " +
+                    "T2: ${order.target2?.let { rupees(it) } ?: "—"}  |  " +
+                    "T3: ${order.target3?.let { rupees(it) } ?: "—"}",
+                12, MUTED, false
+            ).apply {
+                setPadding(0, dp(context, 5), 0, 0)
+            }
+        )
+
+        if (order.exitReason.isNotBlank()) {
+            card.addView(
+                makeText(
+                    context,
+                    "Exit reason: ${order.exitReason}",
+                    12, MUTED, false
+                ).apply {
+                    setPadding(0, dp(context, 4), 0, 0)
+                }
+            )
+        }
+
+        return card
+    }
+
+    private fun executionCard(
+        context: Context,
+        execution: PaperExecution
+    ): LinearLayout {
+        val card = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(context, 13), dp(context, 10),
+                dp(context, 13), dp(context, 10))
+            background = rounded(context, PANEL, 10)
+        }
+
+        card.addView(
+            makeText(
+                context,
+                "#${execution.orderId} · ${execution.kind}",
+                14, TEXT, true
+            )
+        )
+
+        card.addView(
+            makeText(
+                context,
+                "Qty: ${execution.quantity}  |  " +
+                    "Price: ${rupees(execution.price)}  |  " +
+                    "Net P&L: ${rupees(execution.netPnl)}",
+                13, TEXT, false
+            ).apply {
+                setPadding(0, dp(context, 5), 0, 0)
+            }
+        )
+
+        if (execution.note.isNotBlank()) {
+            card.addView(
+                makeText(
+                    context,
+                    execution.note,
+                    12, MUTED, false
+                ).apply {
+                    setPadding(0, dp(context, 4), 0, 0)
                 }
             )
         }
@@ -578,9 +769,7 @@ object PaperTradingScreen {
         return AppDesign.roundedBackground(context, color, radiusDp)
     }
 
-    private fun matchParams(
-        context: Context
-    ): LinearLayout.LayoutParams {
+    private fun matchParams(): LinearLayout.LayoutParams {
         return LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT
@@ -591,6 +780,15 @@ object PaperTradingScreen {
         return "₹" + String.format(Locale.US, "%.2f", value)
     }
 
+    private fun operationMessage(result: TradeResult): String {
+        val pnl = result.pnl
+        return if (result.success && pnl != null) {
+            "${result.message} P&L: ${rupees(pnl)}"
+        } else {
+            result.message
+        }
+    }
+
     private fun toast(context: Context, message: String) {
         Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
     }
@@ -598,13 +796,5 @@ object PaperTradingScreen {
     private fun dp(context: Context, value: Int): Int {
         return (value * context.resources.displayMetrics.density + 0.5f)
             .toInt()
-    }
-
-    private inline fun <T> Iterable<T>.sumOfCompat(
-        selector: (T) -> Double
-    ): Double {
-        var total = 0.0
-        for (item in this) total += selector(item)
-        return total
     }
 }

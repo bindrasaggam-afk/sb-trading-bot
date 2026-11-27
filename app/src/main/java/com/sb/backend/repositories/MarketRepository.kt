@@ -6,6 +6,9 @@ import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.util.Log
 import com.sb.backend.database.SBDatabaseHelper
+import com.sb.backend.database.DatabaseMaintenanceGate
+import com.sb.backend.market.analysis.CandleRow
+import com.sb.backend.market.analysis.CandleRowMapper
 import com.sb.backend.market.model.MarketTick
 import com.sb.backend.models.Candle
 import com.sb.backend.models.Quote
@@ -18,7 +21,8 @@ import java.util.Locale
 internal fun normalizeCandleTimeframe(value: String): String = value.trim()
 
 class MarketRepository(
-    private val databaseHelper: SBDatabaseHelper
+    private val databaseHelper: SBDatabaseHelper,
+    private val maintenanceGate: DatabaseMaintenanceGate = DatabaseMaintenanceGate.shared
 ) {
 
     data class QuoteBatchSaveResult(
@@ -31,6 +35,18 @@ class MarketRepository(
             get() = attempted == saved && rejected == 0 && failed == 0
     }
 
+    data class TickAuditDelta(
+        val exchange: String,
+        val symbol: String,
+        val received: Int = 0,
+        val parsed: Int = 0,
+        val mapped: Int = 0,
+        val rejected: Int = 0,
+        val rawSaved: Int = 0,
+        val quoteSaved: Int = 0,
+        val saveFailed: Int = 0
+    )
+
     private val quotesTable = SBDatabaseHelper.TABLE_QUOTES
     private val candlesTable = SBDatabaseHelper.TABLE_CANDLES
     private val rawTicksTable = SBDatabaseHelper.TABLE_RAW_TICKS
@@ -38,27 +54,44 @@ class MarketRepository(
     private val retryTable =
         SBDatabaseHelper.TABLE_QUOTE_PERSISTENCE_RETRY
 
+    private enum class QuoteSaveStatus {
+        SAVED,
+        STALE,
+        FAILED
+    }
+
     // ---------------------------------------------------------
     // QUOTE SAVE
     // ---------------------------------------------------------
 
     fun saveQuote(quote: Quote): Boolean {
-        if (!isValidQuote(quote)) return false
+        return maintenanceGate.withOperation {
+            if (!isValidQuote(quote)) return@withOperation false
 
-        return try {
-            databaseHelper.writableDatabase.insertWithOnConflict(
-                quotesTable,
-                null,
-                quoteValues(quote),
-                SQLiteDatabase.CONFLICT_REPLACE
-            ) != -1L
-        } catch (e: Exception) {
-            Log.e("MarketRepository", "Quote save failed", e)
-            false
+            val db = databaseHelper.writableDatabase
+
+            try {
+                db.beginTransaction()
+
+                val saved =
+                    saveQuoteIfNewer(db, quote) == QuoteSaveStatus.SAVED
+
+                if (saved) {
+                    db.setTransactionSuccessful()
+                }
+
+                saved
+            } catch (e: Exception) {
+                Log.e("MarketRepository", "Quote save failed", e)
+                false
+            } finally {
+                if (db.inTransaction()) db.endTransaction()
+            }
         }
     }
 
     fun saveQuotes(quotes: List<Quote>): Int {
+        return maintenanceGate.withOperation {
         if (quotes.isEmpty()) return 0
 
         val db = databaseHelper.writableDatabase
@@ -69,20 +102,8 @@ class MarketRepository(
             quotes.forEach { quote ->
                 if (!isValidQuote(quote)) return@forEach
 
-                try {
-                    val result = db.insertWithOnConflict(
-                        quotesTable,
-                        null,
-                        quoteValues(quote),
-                        SQLiteDatabase.CONFLICT_REPLACE
-                    )
-                    if (result != -1L) saved++
-                } catch (e: Exception) {
-                    Log.e(
-                        "MarketRepository",
-                        "Batch quote save failed: ${quote.symbol}",
-                        e
-                    )
+                if (saveQuoteIfNewer(db, quote) == QuoteSaveStatus.SAVED) {
+                    saved++
                 }
             }
 
@@ -92,11 +113,14 @@ class MarketRepository(
         }
 
         return saved
+    
+        }
     }
 
     fun saveQuotesDetailed(
         quotes: List<Quote>
     ): QuoteBatchSaveResult {
+        return maintenanceGate.withOperation {
         if (quotes.isEmpty()) {
             return QuoteBatchSaveResult(0, 0, 0, 0)
         }
@@ -114,22 +138,10 @@ class MarketRepository(
                     return@forEach
                 }
 
-                try {
-                    val result = db.insertWithOnConflict(
-                        quotesTable,
-                        null,
-                        quoteValues(quote),
-                        SQLiteDatabase.CONFLICT_REPLACE
-                    )
-
-                    if (result == -1L) failed++ else saved++
-                } catch (e: Exception) {
-                    failed++
-                    Log.e(
-                        "MarketRepository",
-                        "Detailed quote save failed: ${quote.symbol}",
-                        e
-                    )
+                when (saveQuoteIfNewer(db, quote)) {
+                    QuoteSaveStatus.SAVED -> saved++
+                    QuoteSaveStatus.STALE -> rejected++
+                    QuoteSaveStatus.FAILED -> failed++
                 }
             }
 
@@ -144,6 +156,8 @@ class MarketRepository(
             rejected = rejected,
             failed = failed
         )
+    
+        }
     }
 
     // ---------------------------------------------------------
@@ -154,7 +168,8 @@ class MarketRepository(
         quote: Quote,
         error: String
     ): Boolean {
-        if (!isValidQuote(quote)) return false
+        return maintenanceGate.withOperation {
+        if (!isValidQuote(quote)) return@withOperation false
 
         val db = databaseHelper.writableDatabase
         val values = quoteValues(quote).apply {
@@ -162,8 +177,30 @@ class MarketRepository(
             put("queued_at", System.currentTimeMillis())
         }
 
-        return try {
+        return@withOperation try {
             db.beginTransaction()
+
+            val existing = db.query(
+                retryTable,
+                quoteProjection,
+                "symbol = ? AND exchange = ?",
+                arrayOf(
+                    normalize(quote.symbol),
+                    normalize(quote.exchange)
+                ),
+                null,
+                null,
+                null,
+                "1"
+            ).use { cursor ->
+                if (cursor.moveToFirst()) readQuote(cursor) else null
+            }
+
+            if (existing != null && !isNewerQuote(quote, existing)) {
+                // Never let an older or equal quote replace a newer retry row.
+                db.setTransactionSuccessful()
+                return@withOperation false
+            }
 
             val updated = db.update(
                 retryTable,
@@ -213,9 +250,11 @@ class MarketRepository(
         } finally {
             if (db.inTransaction()) db.endTransaction()
         }
+        }
     }
 
     fun retryPendingQuotes(limit: Int = 100): Int {
+        return maintenanceGate.withOperation {
         val db = databaseHelper.writableDatabase
         val safeLimit = limit.coerceIn(1, 500)
 
@@ -278,30 +317,43 @@ class MarketRepository(
                 }
 
                 if (currentTimestamp == quote.timestamp) {
-                    val result = db.insertWithOnConflict(
-                        quotesTable,
-                        null,
-                        quoteValues(quote),
-                        SQLiteDatabase.CONFLICT_REPLACE
-                    )
-
-                    if (result != -1L) {
-                        val deleted = db.delete(
-                            retryTable,
-                            """
-                            symbol = ? AND exchange = ? AND timestamp = ?
-                            """.trimIndent(),
-                            arrayOf(
-                                normalize(quote.symbol),
-                                normalize(quote.exchange),
-                                quote.timestamp.toString()
+                    when (saveQuoteIfNewer(db, quote)) {
+                        QuoteSaveStatus.SAVED -> {
+                            val deleted = db.delete(
+                                retryTable,
+                                """
+                                symbol = ? AND exchange = ? AND timestamp = ?
+                                """.trimIndent(),
+                                arrayOf(
+                                    normalize(quote.symbol),
+                                    normalize(quote.exchange),
+                                    quote.timestamp.toString()
+                                )
                             )
-                        )
 
-                        saved = deleted > 0
-                        if (saved) db.setTransactionSuccessful()
-                    } else {
-                        failed = true
+                            saved = deleted > 0
+                            if (saved) db.setTransactionSuccessful()
+                        }
+                        QuoteSaveStatus.STALE -> {
+                            // The persisted quote is already newer or equal.
+                            // Drop the stale retry row so it is not retried
+                            // on every pass.
+                            db.delete(
+                                retryTable,
+                                """
+                                symbol = ? AND exchange = ? AND timestamp = ?
+                                """.trimIndent(),
+                                arrayOf(
+                                    normalize(quote.symbol),
+                                    normalize(quote.exchange),
+                                    quote.timestamp.toString()
+                                )
+                            )
+                            db.setTransactionSuccessful()
+                        }
+                        QuoteSaveStatus.FAILED -> {
+                            failed = true
+                        }
                     }
                 }
 
@@ -352,6 +404,8 @@ class MarketRepository(
         }
 
         return recovered
+    
+        }
     }
 
     private fun updateRetryFailure(
@@ -389,6 +443,7 @@ class MarketRepository(
     // ---------------------------------------------------------
 
     fun saveRawTick(tick: MarketTick): Boolean {
+        return maintenanceGate.withOperation {
         if (!tick.isValid ||
             !tick.ltp.isFinite() ||
             tick.ltp <= 0.0 ||
@@ -435,9 +490,12 @@ class MarketRepository(
             )
             false
         }
+    
+        }
     }
 
     fun pruneRawTicks(olderThanTimestamp: Long): Int {
+        return maintenanceGate.withOperation {
         if (olderThanTimestamp <= 0L) return 0
 
         return try {
@@ -450,11 +508,88 @@ class MarketRepository(
             Log.e("MarketRepository", "Raw tick prune failed", e)
             0
         }
+    
+        }
     }
 
     // ---------------------------------------------------------
     // TICK AUDIT
     // ---------------------------------------------------------
+
+    /**
+     * Applies multiple per-instrument audit deltas in one SQLite transaction.
+     * Intended for the live-feed persistence worker, not the WebSocket callback.
+     */
+    fun recordTickAudits(deltas: List<TickAuditDelta>): Boolean {
+        return maintenanceGate.withOperation {
+            val valid = deltas.filter { delta ->
+                normalize(delta.exchange).isNotBlank() &&
+                    normalize(delta.symbol).isNotBlank() &&
+                    listOf(
+                        delta.received, delta.parsed, delta.mapped,
+                        delta.rejected, delta.rawSaved, delta.quoteSaved,
+                        delta.saveFailed
+                    ).all { it >= 0 }
+            }
+            if (valid.isEmpty()) return@withOperation true
+
+            val db = databaseHelper.writableDatabase
+            val updatedAt = System.currentTimeMillis()
+            try {
+                db.beginTransaction()
+                valid.forEach { delta ->
+                    val exchange = normalize(delta.exchange)
+                    val symbol = normalize(delta.symbol)
+                    db.execSQL(
+                        """
+                        UPDATE `$tickAuditTable`
+                        SET received = received + ?,
+                            parsed = parsed + ?,
+                            mapped = mapped + ?,
+                            rejected = rejected + ?,
+                            raw_saved = raw_saved + ?,
+                            quote_saved = quote_saved + ?,
+                            save_failed = save_failed + ?,
+                            updated_at = ?
+                        WHERE exchange = ? AND symbol = ?
+                        """.trimIndent(),
+                        arrayOf(
+                            delta.received, delta.parsed, delta.mapped,
+                            delta.rejected, delta.rawSaved, delta.quoteSaved,
+                            delta.saveFailed, updatedAt, exchange, symbol
+                        )
+                    )
+                    val rowsUpdated = db.rawQuery("SELECT changes()", null).use { cursor ->
+                        if (cursor.moveToFirst()) cursor.getInt(0) else 0
+                    }
+                    if (rowsUpdated == 0) {
+                        val values = ContentValues().apply {
+                            put("exchange", exchange)
+                            put("symbol", symbol)
+                            put("received", delta.received)
+                            put("parsed", delta.parsed)
+                            put("mapped", delta.mapped)
+                            put("rejected", delta.rejected)
+                            put("raw_saved", delta.rawSaved)
+                            put("quote_saved", delta.quoteSaved)
+                            put("save_failed", delta.saveFailed)
+                            put("updated_at", updatedAt)
+                        }
+                        check(db.insert(tickAuditTable, null, values) != -1L) {
+                            "Tick audit insert failed for $exchange:$symbol"
+                        }
+                    }
+                }
+                db.setTransactionSuccessful()
+                true
+            } catch (e: Exception) {
+                Log.e("MarketRepository", "Batched tick audit save failed", e)
+                false
+            } finally {
+                if (db.inTransaction()) db.endTransaction()
+            }
+        }
+    }
 
     fun recordTickAudit(
         exchange: String,
@@ -467,6 +602,7 @@ class MarketRepository(
         quoteSaved: Int = 0,
         saveFailed: Int = 0
     ): Boolean {
+        return maintenanceGate.withOperation {
         val normalizedExchange = normalize(exchange)
         val normalizedSymbol = normalize(symbol)
 
@@ -552,6 +688,8 @@ class MarketRepository(
         } finally {
             if (db.inTransaction()) db.endTransaction()
         }
+    
+        }
     }
 
     // ---------------------------------------------------------
@@ -562,6 +700,7 @@ class MarketRepository(
         symbol: String,
         exchange: String = "NSE"
     ): Quote? {
+        return maintenanceGate.withOperation {
         val normalizedSymbol = normalize(symbol)
         val normalizedExchange = normalize(exchange)
 
@@ -586,12 +725,15 @@ class MarketRepository(
             Log.e("MarketRepository", "Quote read failed", e)
             null
         }
+    
+        }
     }
 
     fun getQuotes(
         symbols: List<String>,
         exchange: String? = null
     ): List<Quote> {
+        return maintenanceGate.withOperation {
         val result = ArrayList<Quote>()
 
         symbols.forEach { symbol ->
@@ -605,6 +747,8 @@ class MarketRepository(
         }
 
         return result
+    
+        }
     }
 
     private fun getAnyExchangeQuote(symbol: String): Quote? {
@@ -630,6 +774,133 @@ class MarketRepository(
         }
     }
 
+    data class PendingCandlePersistence(
+        val symbol: String,
+        val exchange: String,
+        val timeframe: String,
+        val candle: Candle,
+        val attempts: Int
+    )
+
+    /**
+     * Durable, idempotent pending candle upsert. Latest OHLC update for a
+     * live candle replaces its queue row; finalized candles retain completion.
+     */
+    fun enqueueCandlePersistence(
+        symbol: String,
+        exchange: String,
+        timeframe: String,
+        candle: Candle,
+        error: String? = null
+    ): Boolean = maintenanceGate.withOperation {
+        val s = normalize(symbol)
+        val e = normalize(exchange)
+        val tf = normalizeCandleTimeframe(timeframe)
+        if (s.isBlank() || e.isBlank() || tf.isBlank() || !isValidCandle(candle)) return@withOperation false
+        val values = ContentValues().apply {
+            put("symbol", s); put("exchange", e); put("timeframe", tf)
+            put("timestamp", candle.timestamp); put("open", candle.open)
+            put("high", candle.high); put("low", candle.low); put("close", candle.close)
+            put("volume", candle.volume); put("is_complete", if (candle.isComplete) 1 else 0)
+            put("created_at", System.currentTimeMillis())
+            put("last_error", error?.take(1000))
+        }
+        try {
+            val db = databaseHelper.writableDatabase
+            db.beginTransaction()
+            try {
+                // Serialize check+upsert. A completed candle must never be downgraded
+                // by a later live update for the same identity.
+                val existingComplete = db.rawQuery(
+                    "SELECT is_complete FROM candle_persistence_queue WHERE symbol=? AND exchange=? AND timeframe=? AND timestamp=?",
+                    arrayOf(s, e, tf, candle.timestamp.toString())
+                ).use { cursor -> cursor.moveToFirst() && cursor.getInt(0) == 1 }
+                if (existingComplete && !candle.isComplete) {
+                    db.setTransactionSuccessful()
+                    return@withOperation true // Ignore stale live update.
+                }
+                val inserted = db.insertWithOnConflict(
+                    "candle_persistence_queue", null, values, SQLiteDatabase.CONFLICT_REPLACE
+                )
+                check(inserted != -1L) { "Durable candle enqueue insert failed" }
+                db.setTransactionSuccessful()
+                true
+            } finally {
+                if (db.inTransaction()) db.endTransaction()
+            }
+        } catch (ex: Exception) {
+            Log.e("MarketRepository", "Durable candle enqueue failed", ex)
+            false
+        }
+    }
+
+    fun loadPendingCandlePersistence(limit: Int = 500): List<PendingCandlePersistence> =
+        maintenanceGate.withOperation {
+            val list = ArrayList<PendingCandlePersistence>()
+            try {
+                databaseHelper.readableDatabase.rawQuery(
+                    """SELECT symbol, exchange, timeframe, timestamp, open, high, low,
+                       close, volume, is_complete, attempts FROM candle_persistence_queue
+                       ORDER BY created_at, id LIMIT ?""",
+                    arrayOf(limit.coerceIn(1, 2000).toString())
+                ).use { cursor ->
+                    while (cursor.moveToNext()) {
+                        val sym=cursor.getString(0); val ex=cursor.getString(1); val tf=cursor.getString(2)
+                        list.add(PendingCandlePersistence(sym, ex, tf,
+                            Candle(sym, tf, cursor.getLong(3), cursor.getDouble(4), cursor.getDouble(5),
+                                cursor.getDouble(6), cursor.getDouble(7), cursor.getLong(8),
+                                cursor.getInt(9)==1, ex), cursor.getInt(10)))
+                    }
+                }
+            } catch (ex: Exception) { Log.e("MarketRepository", "Pending candle read failed", ex) }
+            list
+        }
+
+    fun removePendingCandlePersistence(item: PendingCandlePersistence): Boolean =
+        maintenanceGate.withOperation {
+            try {
+                // Delete only the exact queued snapshot that the worker successfully
+                // persisted. If a newer candle update replaced this identity while
+                // the save was in progress, its differing values keep it queued.
+                val c = item.candle
+                databaseHelper.writableDatabase.delete(
+                    "candle_persistence_queue",
+                    """symbol=? AND exchange=? AND timeframe=? AND timestamp=?
+                       AND open=? AND high=? AND low=? AND close=? AND volume=?
+                       AND is_complete=?""",
+                    arrayOf(
+                        item.symbol, item.exchange, item.timeframe, c.timestamp.toString(),
+                        c.open.toString(), c.high.toString(), c.low.toString(), c.close.toString(),
+                        c.volume.toString(), if (c.isComplete) "1" else "0"
+                    )
+                ) > 0
+            } catch (ex: Exception) { Log.e("MarketRepository", "Pending candle delete failed", ex); false }
+        }
+
+    fun markPendingCandlePersistenceFailure(item: PendingCandlePersistence, error: String): Boolean =
+        maintenanceGate.withOperation {
+            try {
+                val statement = databaseHelper.writableDatabase.compileStatement(
+                    """UPDATE candle_persistence_queue
+                       SET attempts=attempts+1, last_error=?
+                       WHERE symbol=? AND exchange=? AND timeframe=? AND timestamp=?
+                       AND open=? AND high=? AND low=? AND close=? AND volume=? AND is_complete=?"""
+                )
+                statement.bindString(1, error.take(1000))
+                statement.bindString(2, item.symbol)
+                statement.bindString(3, item.exchange)
+                statement.bindString(4, item.timeframe)
+                statement.bindString(5, item.candle.timestamp.toString())
+                statement.bindString(6, item.candle.open.toString())
+                statement.bindString(7, item.candle.high.toString())
+                statement.bindString(8, item.candle.low.toString())
+                statement.bindString(9, item.candle.close.toString())
+                statement.bindString(10, item.candle.volume.toString())
+                statement.bindString(11, if (item.candle.isComplete) "1" else "0")
+                statement.executeUpdateDelete() > 0
+            } catch (ex: Exception) { Log.e("MarketRepository", "Pending candle retry update failed", ex); false }
+        }
+
     // ---------------------------------------------------------
     // CANDLE SAVE
     // ---------------------------------------------------------
@@ -640,25 +911,39 @@ class MarketRepository(
         timeframe: String,
         candles: List<Candle>
     ): Int {
-        val normalizedSymbol = normalize(symbol)
-        val normalizedExchange = normalize(exchange)
-        val normalizedTimeframe = normalizeCandleTimeframe(timeframe)
+        return maintenanceGate.withOperation {
+            val normalizedSymbol = normalize(symbol)
+            val normalizedExchange = normalize(exchange)
+            val normalizedTimeframe = normalizeCandleTimeframe(timeframe)
 
-        if (normalizedSymbol.isBlank() ||
-            normalizedExchange.isBlank() ||
-            normalizedTimeframe.isBlank() ||
-            candles.isEmpty()
-        ) return 0
+            if (normalizedSymbol.isBlank() ||
+                normalizedExchange.isBlank() ||
+                normalizedTimeframe.isBlank() ||
+                candles.isEmpty()
+            ) {
+                return@withOperation 0
+            }
 
-        val db = databaseHelper.writableDatabase
-        var saved = 0
+            // Reject the whole batch before opening a transaction. Silently
+            // skipping malformed rows would leave a plausible-looking but
+            // incomplete candle series in the database.
+            val timestamps = HashSet<Long>(candles.size)
+            if (candles.any { !isValidCandle(it) || !timestamps.add(it.timestamp) }) {
+                Log.e(
+                    "MarketRepository",
+                    "Candle batch rejected: invalid candle or duplicate timestamp for " +
+                        "$normalizedExchange:$normalizedSymbol/$normalizedTimeframe"
+                )
+                return@withOperation 0
+            }
 
-        db.beginTransaction()
-        try {
-            candles.forEach { candle ->
-                if (!isValidCandle(candle)) return@forEach
+            val db = databaseHelper.writableDatabase
+            var saved = 0
 
-                try {
+            try {
+                db.beginTransaction()
+
+                candles.forEach { candle ->
                     val values = ContentValues().apply {
                         put("symbol", normalizedSymbol)
                         put("exchange", normalizedExchange)
@@ -670,13 +955,18 @@ class MarketRepository(
                         put("close", candle.close)
                         put("volume", candle.volume)
 
-                        // Candle model does not expose tick metadata.
-                        // Do not invent source tick counts or tick times.
-                        put("status", "FINAL")
+                        put(
+                            "status",
+                            if (candle.isComplete) "COMPLETED" else "LIVE"
+                        )
                         put("source_tick_count", 0)
                         putNull("first_tick_timestamp")
                         putNull("last_tick_timestamp")
-                        put("finalized_at", System.currentTimeMillis())
+                        if (candle.isComplete) {
+                            put("finalized_at", System.currentTimeMillis())
+                        } else {
+                            putNull("finalized_at")
+                        }
                     }
 
                     val result = db.insertWithOnConflict(
@@ -686,22 +976,28 @@ class MarketRepository(
                         SQLiteDatabase.CONFLICT_REPLACE
                     )
 
-                    if (result != -1L) saved++
-                } catch (e: Exception) {
-                    Log.e(
-                        "MarketRepository",
-                        "Candle save failed: $normalizedSymbol",
-                        e
-                    )
+                    check(result != -1L) {
+                        "Candle insert failed at timestamp ${candle.timestamp}"
+                    }
+                    saved++
+                }
+
+                db.setTransactionSuccessful()
+                saved
+            } catch (e: Exception) {
+                Log.e(
+                    "MarketRepository",
+                    "Candle batch transaction rolled back: " +
+                        "$normalizedExchange:$normalizedSymbol/$normalizedTimeframe",
+                    e
+                )
+                0
+            } finally {
+                if (db.inTransaction()) {
+                    db.endTransaction()
                 }
             }
-
-            db.setTransactionSuccessful()
-        } finally {
-            db.endTransaction()
         }
-
-        return saved
     }
 
     // ---------------------------------------------------------
@@ -714,6 +1010,7 @@ class MarketRepository(
         exchange: String = "NSE",
         limit: Int = 500
     ): List<Candle> {
+        return maintenanceGate.withOperation {
         val normalizedSymbol = normalize(symbol)
         val normalizedExchange = normalize(exchange)
         val normalizedTimeframe = normalizeCandleTimeframe(timeframe)
@@ -752,6 +1049,8 @@ class MarketRepository(
             Log.e("MarketRepository", "Candle read failed", e)
             emptyList()
         }
+    
+        }
     }
 
     fun getCandlesBetween(
@@ -762,6 +1061,7 @@ class MarketRepository(
         exchange: String = "NSE",
         limit: Int = 5000
     ): List<Candle> {
+        return maintenanceGate.withOperation {
         val normalizedSymbol = normalize(symbol)
         val normalizedExchange = normalize(exchange)
         val normalizedTimeframe = normalizeCandleTimeframe(timeframe)
@@ -805,6 +1105,8 @@ class MarketRepository(
             Log.e("MarketRepository", "Candle range read failed", e)
             emptyList()
         }
+    
+        }
     }
 
     fun latestCandle(
@@ -812,6 +1114,7 @@ class MarketRepository(
         timeframe: String,
         exchange: String = "NSE"
     ): Candle? {
+        return maintenanceGate.withOperation {
         val normalizedSymbol = normalize(symbol)
         val normalizedExchange = normalize(exchange)
         val normalizedTimeframe = normalizeCandleTimeframe(timeframe)
@@ -845,6 +1148,8 @@ class MarketRepository(
             Log.e("MarketRepository", "Latest candle read failed", e)
             null
         }
+    
+        }
     }
 
     fun countCandles(
@@ -852,6 +1157,7 @@ class MarketRepository(
         timeframe: String,
         exchange: String = "NSE"
     ): Int {
+        return maintenanceGate.withOperation {
         val normalizedSymbol = normalize(symbol)
         val normalizedExchange = normalize(exchange)
         val normalizedTimeframe = normalizeCandleTimeframe(timeframe)
@@ -880,9 +1186,12 @@ class MarketRepository(
             Log.e("MarketRepository", "Candle count failed", e)
             0
         }
+    
+        }
     }
 
     fun pruneCandles(olderThanTimestamp: Long): Int {
+        return maintenanceGate.withOperation {
         if (olderThanTimestamp <= 0L) return 0
 
         return try {
@@ -895,6 +1204,8 @@ class MarketRepository(
             Log.e("MarketRepository", "Candle prune failed", e)
             0
         }
+    
+        }
     }
 
     fun deleteCandles(
@@ -902,6 +1213,7 @@ class MarketRepository(
         timeframe: String,
         exchange: String = "NSE"
     ): Int {
+        return maintenanceGate.withOperation {
         val normalizedSymbol = normalize(symbol)
         val normalizedExchange = normalize(exchange)
         val normalizedTimeframe = normalizeCandleTimeframe(timeframe)
@@ -928,9 +1240,12 @@ class MarketRepository(
             Log.e("MarketRepository", "Candle delete failed", e)
             0
         }
+    
+        }
     }
 
     fun clearQuotes(): Int {
+        return maintenanceGate.withOperation {
         return try {
             databaseHelper.writableDatabase.delete(
                 quotesTable,
@@ -941,9 +1256,12 @@ class MarketRepository(
             Log.e("MarketRepository", "Clear quotes failed", e)
             0
         }
+    
+        }
     }
 
     fun clearCandles(): Int {
+        return maintenanceGate.withOperation {
         return try {
             databaseHelper.writableDatabase.delete(
                 candlesTable,
@@ -953,6 +1271,8 @@ class MarketRepository(
         } catch (e: Exception) {
             Log.e("MarketRepository", "Clear candles failed", e)
             0
+        }
+    
         }
     }
 
@@ -1032,21 +1352,90 @@ class MarketRepository(
     }
 
     private fun readCandle(cursor: Cursor): Candle {
-        return Candle(
-            symbol = cursor.getString(0),
-            timeframe = cursor.getString(1),
-            timestamp = cursor.getLong(2),
-            open = cursor.getDouble(3),
-            high = cursor.getDouble(4),
-            low = cursor.getDouble(5),
-            close = cursor.getDouble(6),
-            volume = cursor.getLong(7)
-        )
+        return CandleRowMapper.read(object : CandleRow {
+            override fun string(index: Int): String? = cursor.getString(index)
+            override fun long(index: Int): Long = cursor.getLong(index)
+            override fun double(index: Int): Double = cursor.getDouble(index)
+        })
     }
 
     // ---------------------------------------------------------
     // VALIDATION
     // ---------------------------------------------------------
+
+    private fun isNewerQuote(
+        incoming: Quote,
+        existing: Quote
+    ): Boolean {
+        val incomingExchangeTime = incoming.exchangeTimestamp
+        val existingExchangeTime = existing.exchangeTimestamp
+
+        if (incomingExchangeTime != null &&
+            existingExchangeTime != null
+        ) {
+            if (incomingExchangeTime != existingExchangeTime) {
+                return incomingExchangeTime > existingExchangeTime
+            }
+            return incoming.receivedAt > existing.receivedAt
+        }
+
+        if (incomingExchangeTime != null &&
+            existingExchangeTime == null
+        ) {
+            return true
+        }
+
+        if (incomingExchangeTime == null &&
+            existingExchangeTime != null
+        ) {
+            return false
+        }
+
+        return incoming.receivedAt > existing.receivedAt
+    }
+
+    private fun saveQuoteIfNewer(
+        db: SQLiteDatabase,
+        quote: Quote
+    ): QuoteSaveStatus {
+        return try {
+            val existing = db.query(
+                quotesTable,
+                quoteProjection,
+                "symbol = ? AND exchange = ?",
+                arrayOf(
+                    normalize(quote.symbol),
+                    normalize(quote.exchange)
+                ),
+                null,
+                null,
+                null,
+                "1"
+            ).use { cursor ->
+                if (cursor.moveToFirst()) readQuote(cursor) else null
+            }
+
+            if (existing != null && !isNewerQuote(quote, existing)) {
+                return QuoteSaveStatus.STALE
+            }
+
+            val result = db.insertWithOnConflict(
+                quotesTable,
+                null,
+                quoteValues(quote),
+                SQLiteDatabase.CONFLICT_REPLACE
+            )
+
+            if (result == -1L) {
+                QuoteSaveStatus.FAILED
+            } else {
+                QuoteSaveStatus.SAVED
+            }
+        } catch (e: Exception) {
+            Log.e("MarketRepository", "Quote save failed", e)
+            QuoteSaveStatus.FAILED
+        }
+    }
 
     private fun isValidQuote(quote: Quote): Boolean {
         return quote.symbol.isNotBlank() &&
@@ -1055,7 +1444,7 @@ class MarketRepository(
             quote.ltp > 0.0 &&
             quote.volume >= 0L &&
             quote.timestamp > 0L &&
-            quote.receivedAt >= 0L
+            quote.receivedAt > 0L
     }
 
     private fun isValidCandle(candle: Candle): Boolean {
@@ -1130,13 +1519,15 @@ class MarketRepository(
 
         private val candleProjection = arrayOf(
             "symbol",
+            "exchange",
             "timeframe",
             "timestamp",
             "open",
             "high",
             "low",
             "close",
-            "volume"
+            "volume",
+            "status"
         )
     }
 }

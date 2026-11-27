@@ -5,6 +5,7 @@ import android.content.ContentValues
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import com.sb.backend.database.SBDatabaseHelper
+import com.sb.backend.database.DatabaseMaintenanceGate
 import com.sb.backend.models.SignalStatus
 import com.sb.backend.models.SignalType
 import com.sb.backend.models.TradingSignal
@@ -12,10 +13,12 @@ import com.sb.backend.models.TradingStyle
 import java.util.Locale
 
 class SignalRepository(
-    private val databaseHelper: SBDatabaseHelper
+    private val databaseHelper: SBDatabaseHelper,
+    private val maintenanceGate: DatabaseMaintenanceGate = DatabaseMaintenanceGate.shared
 ) {
 
     fun save(signal: TradingSignal): Long {
+        return maintenanceGate.withOperation {
         validateSignal(signal)
 
         return databaseHelper.writableDatabase.insertWithOnConflict(
@@ -24,9 +27,12 @@ class SignalRepository(
             valuesOf(signal),
             SQLiteDatabase.CONFLICT_REPLACE
         )
+    
+        }
     }
 
     fun saveAll(signals: List<TradingSignal>): Int {
+        return maintenanceGate.withOperation {
         if (signals.isEmpty()) return 0
 
         // Validate the complete batch before opening the transaction.
@@ -56,9 +62,12 @@ class SignalRepository(
         }
 
         return saved
+    
+        }
     }
 
     fun getActive(limit: Int = 100): List<TradingSignal> {
+        return maintenanceGate.withOperation {
         val now = System.currentTimeMillis()
 
         return query(
@@ -70,27 +79,36 @@ class SignalRepository(
             ),
             limit
         )
+    
+        }
     }
 
     fun getAll(limit: Int = 200): List<TradingSignal> {
+        return maintenanceGate.withOperation {
         return query(null, null, limit)
+    
+        }
     }
 
     fun getByStatus(
         status: SignalStatus,
         limit: Int = 100
     ): List<TradingSignal> {
+        return maintenanceGate.withOperation {
         return query(
             "status = ?",
             arrayOf(status.name),
             limit
         )
+    
+        }
     }
 
     fun getForSymbol(
         symbol: String,
         limit: Int = 20
     ): List<TradingSignal> {
+        return maintenanceGate.withOperation {
         val normalized = normalizeRequired(symbol, "Symbol")
 
         return query(
@@ -98,9 +116,12 @@ class SignalRepository(
             arrayOf(normalized),
             limit
         )
+    
+        }
     }
 
     fun latestForSymbol(symbol: String): TradingSignal? {
+        return maintenanceGate.withOperation {
         val normalized = normalizeRequired(symbol, "Symbol")
 
         return query(
@@ -108,12 +129,15 @@ class SignalRepository(
             arrayOf(normalized),
             1
         ).firstOrNull()
+    
+        }
     }
 
     fun updateStatus(
         id: Long,
         status: SignalStatus
     ): Boolean {
+        return maintenanceGate.withOperation {
         require(id > 0L) {
             "Invalid signal ID."
         }
@@ -128,6 +152,8 @@ class SignalRepository(
             "id = ?",
             arrayOf(id.toString())
         ) == 1
+    
+        }
     }
 
     fun hasRecent(
@@ -136,6 +162,7 @@ class SignalRepository(
         signalType: SignalType,
         sinceTimestamp: Long
     ): Boolean {
+        return maintenanceGate.withOperation {
         val normalizedSymbol =
             normalizeRequired(symbol, "Symbol")
 
@@ -161,11 +188,14 @@ class SignalRepository(
         ).use { cursor ->
             return cursor.moveToFirst() && cursor.getInt(0) > 0
         }
+    
+        }
     }
 
     fun expireOld(
         nowTimestamp: Long = System.currentTimeMillis()
     ): Int {
+        return maintenanceGate.withOperation {
         require(nowTimestamp > 0L) {
             "Invalid expiration timestamp."
         }
@@ -187,9 +217,12 @@ class SignalRepository(
                 nowTimestamp.toString()
             )
         )
+    
+        }
     }
 
     fun deleteOlderThan(timestamp: Long): Int {
+        return maintenanceGate.withOperation {
         require(timestamp > 0L) {
             "Invalid deletion timestamp."
         }
@@ -199,14 +232,19 @@ class SignalRepository(
             "created_at < ?",
             arrayOf(timestamp.toString())
         )
+    
+        }
     }
 
     fun clear(): Int {
+        return maintenanceGate.withOperation {
         return databaseHelper.writableDatabase.delete(
             SBDatabaseHelper.TABLE_SIGNALS,
             null,
             null
         )
+    
+        }
     }
 
     private fun query(

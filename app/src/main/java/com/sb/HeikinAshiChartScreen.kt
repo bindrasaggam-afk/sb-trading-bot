@@ -6,7 +6,6 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.text.InputType
 import android.text.TextUtils
-import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
@@ -19,6 +18,7 @@ import android.widget.TextView
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStoreOwner
 import com.sb.backend.core.BackendManager
+import com.sb.backend.market.MarketDataManager
 import com.sb.backend.market.model.MarketCandle
 import com.sb.backend.market.model.MarketTick
 import com.sb.backend.market.model.MarketUiState
@@ -28,7 +28,16 @@ import com.sb.ui.chart.ChartIndicator
 import com.sb.ui.chart.ChartStyle
 import com.sb.ui.chart.ChartTool
 import com.sb.ui.chart.MarketDepthAdapter
+import com.sb.ui.chart.PriceScaleMode
 import com.sb.ui.chart.ProfessionalChartView
+import com.sb.ui.chart.config.IndicatorConfig
+import com.sb.ui.chart.config.IndicatorConfigPolicy
+import com.sb.ui.chart.config.IndicatorConfigPresets
+import com.sb.ui.chart.config.IndicatorConfigRepository
+import com.sb.ui.chart.config.SharedPreferencesIndicatorConfigStorage
+import com.sb.ui.chart.persistence.ChartDrawingRepository
+import com.sb.ui.chart.persistence.ChartStateScope
+import com.sb.ui.chart.persistence.SharedPreferencesChartDrawingStorage
 import com.sb.ui.market.InstrumentLiveViewModel
 import com.sb.ui.theme.AppDesign
 import com.sb.ui.trade.QuickTradeOverlay
@@ -38,6 +47,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -75,9 +85,16 @@ class HeikinAshiChartScreen(
     private var selectedSymbol = initialSymbol
     private var selectedTimeframe = "1m"
     private var chartStyle = ChartStyle.CANDLE
+    private var priceScaleMode = PriceScaleMode.ABSOLUTE
     private val activeIndicators = linkedSetOf<ChartIndicator>()
     private var activeTool = ChartTool.CROSSHAIR
     private var magnetEnabled = false
+
+    private var persistenceScopeKey = ""
+    private var drawingRepository: ChartDrawingRepository? = null
+    private var indicatorConfigRepository: IndicatorConfigRepository? = null
+    private var drawingsRestoredScope: String? = null
+    private var indicatorConfigRestoredScope: String? = null
 
     private val exchangeHint: String =
         exchange.trim().ifBlank {
@@ -101,6 +118,7 @@ class HeikinAshiChartScreen(
     private lateinit var leftToolbar: LinearLayout
     private lateinit var symbolInfo: TextView
     private lateinit var modeButton: Button
+    private lateinit var priceScaleButton: TextView
     private lateinit var timeframeButton: TextView
     private lateinit var drawingToolsButton: TextView
     private lateinit var fullscreenButton: TextView
@@ -128,7 +146,7 @@ class HeikinAshiChartScreen(
     private var pendingViewportReset = false
 
     private val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.US)
-    private val chartTimeFormat = SimpleDateFormat("dd MMM HH:mm", Locale.US)
+    private val chartTimeFormat = SimpleDateFormat("EEEE · dd MMM yyyy · hh:mm a", Locale.US)
 
     fun createView(): View {
         // The ViewModel is shared activity-wide; keep the visible timeframe in
@@ -241,6 +259,40 @@ class HeikinAshiChartScreen(
         header.addView(
             modeButton,
             LinearLayout.LayoutParams(dp(52), dp(32)).apply {
+                setMargins(0, 0, dp(4), 0)
+            }
+        )
+
+        priceScaleButton = AppDesign.text(
+            context,
+            "ABS",
+            9f,
+            accentColor,
+            bold = true
+        ).apply {
+            gravity = Gravity.CENTER
+            background = AppDesign.fieldBackground(context, 8)
+            isClickable = true
+            contentDescription = "Toggle absolute and relative price scale"
+            setOnClickListener {
+                priceScaleMode = if (priceScaleMode == PriceScaleMode.ABSOLUTE) {
+                    PriceScaleMode.RELATIVE
+                } else {
+                    PriceScaleMode.ABSOLUTE
+                }
+                text = if (priceScaleMode == PriceScaleMode.RELATIVE) {
+                    "%"
+                } else {
+                    "ABS"
+                }
+                if (::chartView.isInitialized) {
+                    chartView.priceScaleMode = priceScaleMode
+                }
+            }
+        }
+        header.addView(
+            priceScaleButton,
+            LinearLayout.LayoutParams(dp(36), dp(32)).apply {
                 setMargins(0, 0, dp(4), 0)
             }
         )
@@ -370,6 +422,7 @@ class HeikinAshiChartScreen(
 
         chartView = ProfessionalChartView(context).apply {
             chartStyle = this@HeikinAshiChartScreen.chartStyle
+            priceScaleMode = this@HeikinAshiChartScreen.priceScaleMode
             activeTool = this@HeikinAshiChartScreen.activeTool
             magnetEnabled = this@HeikinAshiChartScreen.magnetEnabled
             indicators = activeIndicators.toSet()
@@ -425,15 +478,16 @@ class HeikinAshiChartScreen(
             9f,
             mutedColor
         ).apply {
-            gravity = Gravity.CENTER
-            setPadding(0, dp(2), 0, dp(2))
+            gravity = Gravity.CENTER_VERTICAL
+            maxLines = 3
+            setPadding(dp(2), dp(3), dp(2), dp(4))
         }
 
         root.addView(
             disclaimerText,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(20)
+                LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
@@ -454,12 +508,13 @@ class HeikinAshiChartScreen(
         )
         quickTrade.setInstrument(selectedSymbol, exchangeHint)
 
+        // Float in the chart area, not over the fixed live/depth headers.
         val quickPanelParams = FrameLayout.LayoutParams(
-            dp(214),
+            dp(196),
             FrameLayout.LayoutParams.WRAP_CONTENT,
-            Gravity.BOTTOM or Gravity.END
+            Gravity.TOP or Gravity.END
         ).apply {
-            bottomMargin = dp(6)
+            topMargin = dp(112)
             rightMargin = dp(6)
         }
         container.addView(quickTrade.view, quickPanelParams)
@@ -523,6 +578,7 @@ class HeikinAshiChartScreen(
                 }
                 setOnClickListener {
                     val changed = label != selectedTimeframe
+                    if (changed) saveChartState()
                     selectedTimeframe = label
                     (anchor as? TextView)?.text = "$label ▾"
                     popup?.dismiss()
@@ -585,6 +641,7 @@ class HeikinAshiChartScreen(
 
         toolbar.addView(toolButton("C", "Clear drawings") {
             chartView.clearDrawings()
+            saveChartState()
         })
 
         refreshToolButtons()
@@ -673,6 +730,25 @@ class HeikinAshiChartScreen(
         list.addView(title)
 
         var popup: PopupWindow? = null
+        val config = currentIndicatorConfig()
+        val presetName = indicatorPresetName(config)
+        val presets = IndicatorConfigPresets.all()
+        val presetIndex = presets.indexOfFirst { it.first == presetName }
+
+        list.addView(
+            AppDesign.text(
+                context,
+                "Preset: $presetName • ${IndicatorConfigPolicy.label(config, ChartIndicator.EMA_20)}",
+                10f,
+                mutedColor
+            ).apply {
+                setPadding(dp(8), dp(4), dp(8), dp(7))
+                setOnClickListener {
+                    val next = presets[(presetIndex + 1) % presets.size].second
+                    applyIndicatorConfig(next, anchor, popup)
+                }
+            }
+        )
 
         ChartIndicator.values().forEach { indicator ->
             val item = AppDesign.text(
@@ -705,6 +781,7 @@ class HeikinAshiChartScreen(
                         null
                     }
                     chartView.indicators = activeIndicators.toSet()
+                    saveChartState()
                 }
             }
             list.addView(
@@ -722,6 +799,7 @@ class HeikinAshiChartScreen(
                 setOnClickListener {
                     activeIndicators.clear()
                     chartView.indicators = emptySet()
+                    saveChartState()
                     popup?.dismiss()
                     showIndicatorMenu(anchor)
                 }
@@ -741,9 +819,48 @@ class HeikinAshiChartScreen(
         popup.showAsDropDown(anchor, -dp(40), dp(2))
     }
 
+    private fun currentIndicatorConfig(): IndicatorConfig =
+        if (::chartView.isInitialized) {
+            chartView.indicatorConfig
+        } else {
+            indicatorConfigRepository?.load() ?: IndicatorConfigPolicy.DEFAULT
+        }
+
+    private fun indicatorPresetName(config: IndicatorConfig): String {
+        val comparable = config.copy(enabled = emptySet(), timeframeKey = "")
+        return IndicatorConfigPresets.all().firstOrNull { (_, preset) ->
+            preset.copy(enabled = emptySet(), timeframeKey = "") == comparable
+        }?.first ?: "Custom"
+    }
+
+    private fun applyIndicatorConfig(
+        config: IndicatorConfig,
+        anchor: View,
+        popup: PopupWindow?
+    ) {
+        if (!::chartView.isInitialized) return
+        ensureChartStateScope()
+        val normalized = IndicatorConfigPolicy.normalize(
+            config.copy(timeframeKey = selectedTimeframe)
+        )
+        if (!IndicatorConfigPolicy.validate(normalized).ok) return
+        chartView.indicatorConfig = normalized
+        activeIndicators.clear()
+        activeIndicators.addAll(normalized.enabled)
+        indicatorConfigRestoredScope = persistenceScopeKey
+        saveChartState()
+        popup?.dismiss()
+        showIndicatorMenu(anchor)
+    }
+
     private fun indicatorRowLabel(indicator: ChartIndicator): String {
         val check = if (indicator in activeIndicators) "✓  " else "     "
-        return check + indicator.label
+        val config = if (::chartView.isInitialized) {
+            chartView.indicatorConfig
+        } else {
+            IndicatorConfigPolicy.DEFAULT
+        }
+        return check + IndicatorConfigPolicy.label(config, indicator)
     }
 
     private fun showTextDrawingDialog(index: Int, price: Double) {
@@ -761,6 +878,7 @@ class HeikinAshiChartScreen(
                     price,
                     input.text?.toString()?.trim().orEmpty().ifBlank { "Note" }
                 )
+                saveChartState()
             }
             .setNegativeButton("Cancel", null)
             .show()
@@ -956,82 +1074,23 @@ class HeikinAshiChartScreen(
     }
 
     private fun placeQuickPaperOrder(request: QuickTradeRequest) {
-        val scope = liveScope
-        if (scope == null) {
-            quickTrade.showMessage("Chart active nahi hai.")
-            return
-        }
-
-        scope.launch {
-            val result = withContext(Dispatchers.IO) {
-                try {
-                    BackendManager.paperEngine().placeOrder(
-                        symbol = request.symbol,
-                        side = request.side,
-                        quantity = request.quantity,
-                        entryPrice = request.entryPrice,
-                        exchange = request.exchange,
-                        note = "Quick trade ${request.side}"
-                    )
-                } catch (e: Exception) {
-                    TradeResult(
-                        success = false,
-                        message = e.message ?: "Paper engine unavailable."
-                    )
-                }
-            }
-
-            val order = result.order
-            if (!result.success || order == null) {
-                quickTrade.onOrderRejected(result.message)
-                return@launch
-            }
-
-            quickTrade.onOrderPlaced(
-                QuickTradeTracking(
-                    orderId = order.id,
-                    symbol = order.symbol,
-                    exchange = order.exchange,
-                    side = order.side,
-                    quantity = order.quantity,
-                    entryPrice = order.entryPrice,
-                    stopLoss = request.stopLoss,
-                    target = request.target
-                )
-            )
-        }
+        quickTrade.onOrderRejected(
+            "Manual chart paper orders are disabled. " +
+                "Paper trades open only from genuine Research Signals.",
+            request.requestId
+        )
     }
 
+    @Suppress("UNUSED_PARAMETER")
     private fun closeQuickPaperOrder(
         trade: QuickTradeTracking,
         exitPrice: Double,
         reason: String
     ) {
-        val scope = liveScope
-        if (scope == null) return
-
-        scope.launch {
-            val result = withContext(Dispatchers.IO) {
-                try {
-                    BackendManager.paperEngine().closeOrder(
-                        orderId = trade.orderId,
-                        exitPrice = exitPrice,
-                        exchange = trade.exchange
-                    )
-                } catch (e: Exception) {
-                    TradeResult(
-                        success = false,
-                        message = e.message ?: "Paper engine unavailable."
-                    )
-                }
-            }
-
-            if (result.success) {
-                quickTrade.onTradeClosed(reason, result.pnl)
-            } else {
-                quickTrade.showMessage("$reason • Exit failed: ${result.message}")
-            }
-        }
+        quickTrade.showMessage(
+            "Manual paper exits are disabled. " +
+                "Signals manage stops, targets and expiry automatically."
+        )
     }
 
     private fun makeButtonRow(parent: LinearLayout): LinearLayout {
@@ -1075,6 +1134,66 @@ class HeikinAshiChartScreen(
         row.addView(button, params)
     }
 
+    private fun ensureChartStateScope() {
+        val key = ChartStateScope.key(selectedSymbol, selectedTimeframe, exchangeHint)
+        if (key == persistenceScopeKey &&
+            drawingRepository != null &&
+            indicatorConfigRepository != null
+        ) {
+            return
+        }
+        persistenceScopeKey = key
+        drawingRepository = ChartDrawingRepository(
+            SharedPreferencesChartDrawingStorage(context, key)
+        )
+        indicatorConfigRepository = IndicatorConfigRepository(
+            SharedPreferencesIndicatorConfigStorage(context, key)
+        )
+        drawingsRestoredScope = null
+        indicatorConfigRestoredScope = null
+    }
+
+    private fun saveChartState() {
+        if (!::chartView.isInitialized) return
+        ensureChartStateScope()
+
+        if (drawingsRestoredScope == persistenceScopeKey) {
+            drawingRepository?.save(
+                chartView.exportDrawingDocument(
+                    symbol = selectedSymbol,
+                    timeframe = selectedTimeframe,
+                    exchange = exchangeHint
+                )
+            )
+        }
+        if (indicatorConfigRestoredScope == persistenceScopeKey) {
+            val config = chartView.indicatorConfig.copy(timeframeKey = selectedTimeframe)
+            indicatorConfigRepository?.save(config)
+        }
+    }
+
+    private fun restoreChartStateForCurrentScope() {
+        if (!::chartView.isInitialized || currentCandles.isEmpty()) return
+        ensureChartStateScope()
+
+        if (indicatorConfigRestoredScope != persistenceScopeKey) {
+            indicatorConfigRepository?.load()?.let { config ->
+                val scoped = config.copy(timeframeKey = selectedTimeframe)
+                chartView.indicatorConfig = scoped
+                activeIndicators.clear()
+                activeIndicators.addAll(scoped.enabled)
+            }
+            indicatorConfigRestoredScope = persistenceScopeKey
+        }
+
+        if (drawingsRestoredScope != persistenceScopeKey) {
+            drawingRepository?.load()?.let { document ->
+                chartView.applyDrawingDocument(document)
+            }
+            drawingsRestoredScope = persistenceScopeKey
+        }
+    }
+
     private fun updateChart() {
         if (!::chartView.isInitialized) {
             return
@@ -1085,6 +1204,7 @@ class HeikinAshiChartScreen(
         }
 
         liveViewModel?.setTimeframe(selectedTimeframe)
+        chartView.timeframeKey = selectedTimeframe
 
         // A timeframe switch re-renders with a fresh viewport from the
         // incoming candle list. Style/indicator changes keep the viewport.
@@ -1130,21 +1250,84 @@ class HeikinAshiChartScreen(
             }
         }
 
+        restoreOpenQuickTrade(scope)
+        reconcileQuickTrade(scope)
+
         root.addOnAttachStateChangeListener(
             object : View.OnAttachStateChangeListener {
                 override fun onViewAttachedToWindow(v: View) {
                 }
 
                 override fun onViewDetachedFromWindow(v: View) {
+                    saveChartState()
                     stopLiveUpdates()
                 }
             }
         )
     }
 
+    private fun restoreOpenQuickTrade(scope: CoroutineScope) {
+        scope.launch {
+            val openOrders = withContext(Dispatchers.IO) {
+                runCatching {
+                    BackendManager.paperEngine().getOpenOrders()
+                }.getOrDefault(emptyList())
+            }
+            val order = openOrders.filter { candidate ->
+                candidate.symbol.equals(selectedSymbol, ignoreCase = true) &&
+                    candidate.exchange.equals(exchangeHint, ignoreCase = true) &&
+                    candidate.stopLoss != null &&
+                    candidate.target != null
+            }.singleOrNull() ?: return@launch
+            val stopLoss = order.stopLoss ?: return@launch
+            val target = order.target ?: return@launch
+            if (!quickTrade.hasActiveTrade()) {
+                quickTrade.restoreTrade(
+                    QuickTradeTracking(
+                        orderId = order.id,
+                        symbol = order.symbol,
+                        exchange = order.exchange,
+                        side = order.side,
+                        quantity = order.quantity,
+                        entryPrice = order.entryPrice,
+                        stopLoss = stopLoss,
+                        target = target
+                    )
+                )
+            }
+        }
+    }
+
+    private fun reconcileQuickTrade(scope: CoroutineScope) {
+        scope.launch {
+            while (true) {
+                delay(5_000L)
+                val orderId = if (::quickTrade.isInitialized) {
+                    quickTrade.activeOrderId()
+                } else {
+                    null
+                } ?: continue
+                val order = withContext(Dispatchers.IO) {
+                    runCatching {
+                        BackendManager.paperEngine().getOrder(orderId)
+                    }.getOrNull()
+                } ?: continue
+                if (!order.isOpen && ::quickTrade.isInitialized) {
+                    quickTrade.onTradeClosed(
+                        "Paper order closed.",
+                        order.realizedPnl
+                    )
+                }
+            }
+        }
+    }
+
     private fun stopLiveUpdates() {
         liveScope?.cancel()
         liveScope = null
+        if (::quickTrade.isInitialized) {
+            quickTrade.setConnectionAvailable(false)
+        }
         liveViewModel?.releaseInstrument()
     }
 
@@ -1160,34 +1343,57 @@ class HeikinAshiChartScreen(
             return
         }
 
+        val connectionLive =
+            state.connectionState == MarketDataManager.ConnectionState.CONNECTED ||
+                state.connectionState == MarketDataManager.ConnectionState.AUTHENTICATED
+        if (::quickTrade.isInitialized) {
+            quickTrade.setConnectionAvailable(connectionLive && tick != null)
+        }
+
         if (tick == null) {
             lastTick = null
+            if (::chartView.isInitialized) {
+                chartView.lastPrice = null
+                chartView.previousClose = null
+            }
             renderDepth(null)
-            livePriceText.text = "LIVE • waiting for tick"
+            val connectionLabel = when (state.connectionState.name) {
+                "AUTHENTICATED", "CONNECTED" -> "CONNECTED"
+                "CONNECTING" -> "CONNECTING"
+                "DISCONNECTED", "ERROR" -> "DISCONNECTED"
+                else -> state.connectionState.name
+            }
+            livePriceText.text = when {
+                state.chartStatus.candleCount > 0 -> "STORED DATA • waiting for live tick"
+                state.chartStatus.state == "HISTORICAL_UNAVAILABLE" -> "NO CANDLE DATA"
+                connectionLabel == "CONNECTED" -> "CONNECTED • NO TICK YET"
+                connectionLabel == "CONNECTING" -> "CONNECTING • NO TICK YET"
+                else -> "NO LIVE TICK • FEED DISCONNECTED"
+            }
             livePriceText.setTextColor(mutedColor)
             liveDetailText.text = buildString {
-                append(state.connectionState.name)
-                append("  •  ")
-                append(if (state.isSubscribed) "SUBSCRIBED" else "WAITING")
-                append("  •  ").append(selectedSymbol)
+                append(connectionLabel)
+                append(" • ")
+                append(if (state.isSubscribed) "SUBSCRIBED" else "NOT SUBSCRIBED")
+                append(" • ").append(selectedSymbol)
                 val message = state.chartStatus.message
-                if (message.isNotBlank()) {
-                    append('\n').append(message)
-                }
+                if (message.isNotBlank()) append('\n').append(message)
             }
             disclaimerText.text = buildString {
-                append(state.chartStatus.state)
-                append(" • ").append(state.connectionState.name)
-                append(" • Candles ").append(state.chartStatus.candleCount)
+                append("DATA: ").append(state.chartStatus.state.replace('_', ' '))
+                append(" • CONNECTION: ").append(connectionLabel)
+                append(" • CANDLES: ").append(state.chartStatus.candleCount)
                 val message = state.chartStatus.message
-                if (message.isNotBlank()) {
-                    append(" • ").append(message)
-                }
+                if (message.isNotBlank()) append('\n').append(message)
             }
             return
         }
 
         lastTick = tick
+        if (::chartView.isInitialized) {
+            chartView.lastPrice = tick.ltp
+            chartView.previousClose = tick.previousClose ?: tick.close
+        }
 
         val previousClose = tick.previousClose ?: tick.close
         val change = tick.change
@@ -1214,7 +1420,7 @@ class HeikinAshiChartScreen(
 
         symbolInfo.text = "${tick.key.symbol} • ${tick.key.exchange}"
         disclaimerText.text = buildString {
-            append(if (state.isSubscribed) "LIVE • SUBSCRIBED" else "LIVE • NOT SUBSCRIBED")
+            append(if (state.isSubscribed) "TICK • SUBSCRIBED" else "TICK • NOT SUBSCRIBED")
             append(" • ").append(state.connectionState.name)
             append(" • Candles ").append(state.chartStatus.candleCount)
             val message = state.chartStatus.message
@@ -1224,7 +1430,7 @@ class HeikinAshiChartScreen(
         }
 
         renderDepth(tick)
-        if (::quickTrade.isInitialized) {
+        if (::quickTrade.isInitialized && connectionLive) {
             quickTrade.onTick(tick)
         }
     }
@@ -1264,13 +1470,11 @@ class HeikinAshiChartScreen(
 
     private fun chartPrice(value: Double): String {
         if (!value.isFinite()) return "—"
-        return String.format(Locale.US, "%.2f", value)
+        val decimals = if (abs(value) < 1.0) 4 else 2
+        return String.format(Locale.US, "%.${decimals}f", value)
     }
 
     private fun renderCandles(candles: List<MarketCandle>) {
-        val firstTs = candles.firstOrNull()?.timestamp ?: 0L
-        val lastTs = candles.lastOrNull()?.timestamp ?: 0L
-        Log.i("ChartCandleAudit", "symbol=" + selectedSymbol + " exchange=" + exchangeHint + " timeframe=" + selectedTimeframe + " count=" + candles.size + " first=" + firstTs + " last=" + lastTs)
         currentCandles = candles.map {
             ChartCandle(
                 timestamp = it.timestamp,
@@ -1285,11 +1489,13 @@ class HeikinAshiChartScreen(
         if (::chartView.isInitialized) {
             val resetViewport = pendingViewportReset
             pendingViewportReset = false
+            chartView.timeframeKey = selectedTimeframe
             chartView.setChartData(
                 currentCandles,
                 chartStyle,
                 preserveViewport = !resetViewport
             )
+            restoreChartStateForCurrentScope()
         }
     }
 

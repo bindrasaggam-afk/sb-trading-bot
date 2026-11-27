@@ -142,39 +142,71 @@ class KotakNeoBinaryParser {
         var offset = 0
 
         while (offset <= frame.size - 2) {
+            val length = packetLength(frame, offset)
 
-            val length = (
-                (frame[offset].toInt() and 0xFF) or
-                    (
-                        (frame[offset + 1].toInt() and 0xFF)
-                            shl 8
-                    )
-                )
-
-            if (
-                length < HEADER_SIZE ||
-                length > frame.size - offset
-            ) {
-                break
+            if (length < HEADER_SIZE || length > frame.size - offset) {
+                // The stream has no explicit magic marker. Attempt recovery only
+                // at offsets whose length/header and full packet decode validate.
+                val recoveredOffset = findNextValidPacketOffset(frame, offset + 1)
+                if (recoveredOffset < 0) break
+                offset = recoveredOffset
+                continue
             }
 
-            val packet = frame.copyOfRange(
-                offset,
-                offset + length
-            )
-
-            try {
-                parsePacket(packet)?.let {
-                    result.add(it)
-                }
+            val packet = frame.copyOfRange(offset, offset + length)
+            val decoded = try {
+                parsePacket(packet)
             } catch (_: Exception) {
-                // Ignore malformed packet.
+                null
             }
 
-            offset += length
+            if (decoded != null) {
+                result.add(decoded)
+                offset += length
+            } else {
+                // Invalid packet with a plausible length: try a validated
+                // boundary inside the remainder rather than blindly trusting it.
+                val recoveredOffset = findNextValidPacketOffset(frame, offset + 1)
+                if (recoveredOffset < 0) {
+                    offset += length
+                } else {
+                    offset = recoveredOffset
+                }
+            }
         }
 
         return result
+    }
+
+    private fun packetLength(frame: ByteArray, offset: Int): Int {
+        if (offset < 0 || offset > frame.size - 2) return -1
+        return (frame[offset].toInt() and 0xFF) or
+            ((frame[offset + 1].toInt() and 0xFF) shl 8)
+    }
+
+    /**
+     * Best-effort resynchronization: without a magic marker, a candidate is
+     * accepted only when its declared size fits and parsePacket validates it.
+     */
+    private fun findNextValidPacketOffset(
+        frame: ByteArray,
+        startOffset: Int
+    ): Int {
+        var candidate = startOffset.coerceAtLeast(0)
+        while (candidate <= frame.size - HEADER_SIZE) {
+            val length = packetLength(frame, candidate)
+            if (length >= HEADER_SIZE && length <= frame.size - candidate) {
+                val packet = frame.copyOfRange(candidate, candidate + length)
+                val decoded = try {
+                    parsePacket(packet)
+                } catch (_: Exception) {
+                    null
+                }
+                if (decoded != null) return candidate
+            }
+            candidate++
+        }
+        return -1
     }
 
     fun parsePacket(

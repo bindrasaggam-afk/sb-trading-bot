@@ -11,22 +11,68 @@ import com.sb.backend.models.Quote
 import com.sb.backend.repositories.MarketRepository
 import com.sb.backend.security.KotakNeoSecureStore
 import java.util.Locale
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 class KotakNeoLiveFeedService(
     private val secureStore: KotakNeoSecureStore,
     private val marketRepository: MarketRepository,
     private val instruments: List<Instrument>,
-    private val onStatus: (String) -> Unit
+    private val onStatus: (String) -> Unit,
+    private val activeInstrumentsProvider: (() -> List<Instrument>)? = null
 ) {
 
     private val parser = KotakNeoBinaryParser()
-    private val tickCount = AtomicLong(0L)
+
+    // Counts parsed market ticks; accepted/rejected are pipeline outcomes.
+    private val parsedTickCount = AtomicLong(0L)
+    private val mappedTickCount = AtomicLong(0L)
+    private val acceptedTickCount = AtomicLong(0L)
+    private val rejectedTickCount = AtomicLong(0L)
+    private val unmappedTickCount = AtomicLong(0L)
+
+    data class LiveTickMetrics(
+        val parsed: Long,
+        val mapped: Long,
+        val accepted: Long,
+        val rejected: Long,
+        val unmapped: Long
+    )
+
+    private data class TickPersistenceEvent(
+        val tick: MarketTick?,
+        val audit: MarketRepository.TickAuditDelta
+    )
+
+    private val tickPersistenceQueue =
+        ArrayBlockingQueue<TickPersistenceEvent>(8_192)
+    private val tickPersistenceWorkerRunning = AtomicBoolean(false)
+    private val droppedTickPersistenceEvents = AtomicLong(0L)
+
+    data class TickPersistenceMetrics(
+        val enqueued: Long,
+        val processed: Long,
+        val dropped: Long,
+        val failed: Long,
+        val queueSize: Int,
+        val maxQueueSize: Int,
+        val lastProcessedAt: Long
+    )
+
+    private val enqueuedTickPersistenceEvents = AtomicLong(0L)
+    private val processedTickPersistenceEvents = AtomicLong(0L)
+    private val failedTickPersistenceEvents = AtomicLong(0L)
+    private val maxTickPersistenceQueueSize = AtomicInteger(0)
+    private val lastTickPersistenceProcessedAt = AtomicLong(0L)
+
+    @Volatile
+    private var tickPersistenceThread: Thread? = null
 
     private val pendingQuotes = ConcurrentHashMap<String, Quote>()
     private val quoteFlushScheduled = AtomicBoolean(false)
@@ -60,6 +106,9 @@ class KotakNeoLiveFeedService(
 
     private fun instrumentKey(instrument: Instrument): FeedKey? {
         if (!instrument.isActive) return null
+        if (instrument.segment.trim().equals("INDEX", ignoreCase = true)) {
+            return null
+        }
 
         val token = instrument.token
             ?.trim()
@@ -91,6 +140,9 @@ class KotakNeoLiveFeedService(
     private val requestedInstruments =
         java.util.concurrent.ConcurrentHashMap<FeedKey, Instrument>()
 
+    private val activeInstruments =
+        java.util.concurrent.ConcurrentHashMap<FeedKey, Instrument>()
+
     @Synchronized
     fun connect() {
         if (client?.isAuthenticated() == true) {
@@ -113,6 +165,8 @@ class KotakNeoLiveFeedService(
         require(feedUrl.isNotBlank()) {
             "ERROR | Kotak Feed URL missing. Authenticate again."
         }
+
+        startTickPersistenceWorker()
 
         val ws = KotakNeoWebSocketClient(
             ucc = ucc,
@@ -145,17 +199,6 @@ class KotakNeoLiveFeedService(
      */
     @Synchronized
     fun subscribeAll() {
-        val allKeys = (instrumentMap.keys + requestedInstruments.keys).distinct()
-
-        val tokens = allKeys.map { key ->
-            "${key.feedSegment}|${key.token}"
-        }.distinct()
-
-        if (tokens.isEmpty()) {
-            onStatus("No active instruments with valid Kotak tokens")
-            return
-        }
-
         val ws = client
 
         if (ws == null || !ws.isAuthenticated()) {
@@ -163,12 +206,48 @@ class KotakNeoLiveFeedService(
             return
         }
 
-        ws.subscribe(tokens)
-        ws.subscribeIndices(indexTokens)
+        val restored = activeInstrumentsProvider?.invoke().orEmpty()
+
+        restored.forEach { instrument ->
+            instrumentKey(instrument)?.let { key ->
+                activeInstruments[key] = instrument
+            }
+        }
+
+        val restoredIndices = restored
+            .filter {
+                it.segment.trim().equals("INDEX", ignoreCase = true)
+            }
+            .mapNotNull { instrument ->
+                val feedName = indexFeedName(instrument.symbol)
+                if (feedName.isBlank()) {
+                    null
+                } else {
+                    "${feedSegment(instrument)}|$feedName"
+                }
+            }
+
+        val indexFeedTokens = (indexTokens + restoredIndices).distinct()
+
+        val allKeys = (
+            instrumentMap.keys +
+                requestedInstruments.keys +
+                activeInstruments.keys
+            ).distinct()
+
+        val tokens = allKeys.map { key ->
+            "${key.feedSegment}|${key.token}"
+        }.distinct()
+
+        if (tokens.isNotEmpty()) {
+            ws.subscribe(tokens)
+        }
+
+        ws.subscribeIndices(indexFeedTokens)
 
         onStatus(
             "Live feed subscription requested: " +
-                "${tokens.size} instruments, ${indexTokens.size} indices"
+                "${tokens.size} instruments, ${indexFeedTokens.size} indices"
         )
     }
 
@@ -216,6 +295,7 @@ class KotakNeoLiveFeedService(
         }
 
         requestedInstruments[key] = instrument
+        activeInstruments[key] = instrument
         ws.subscribe(
             listOf("${key.feedSegment}|${key.token}")
         )
@@ -252,14 +332,10 @@ class KotakNeoLiveFeedService(
         }
 
         requestedInstruments.remove(key)
-
-        // शुरुआती instrumentMap में मौजूद इंस्ट्रूमेंट को
-        // ऑन-डिमांड unsubscribe से हटाना नहीं है।
-        if (key !in instrumentMap) {
-            ws.unsubscribe(
-                listOf("${key.feedSegment}|${key.token}")
-            )
-        }
+        activeInstruments.remove(key)
+        ws.unsubscribe(
+            listOf("${key.feedSegment}|${key.token}")
+        )
 
         onStatus("Unsubscribe requested: ${instrument.symbol}")
     }
@@ -268,6 +344,11 @@ class KotakNeoLiveFeedService(
      * Resolve Kotak feed segment from exchange + instrument metadata.
      */
     private fun feedSegment(instrument: Instrument): String {
+        val configuredSegment = instrument.exchangeSegment.trim()
+        if (configuredSegment.isNotBlank()) {
+            return configuredSegment
+        }
+
         val exchange = instrument.exchange
             .trim()
             .toUpperCase(Locale.ROOT)
@@ -296,6 +377,143 @@ class KotakNeoLiveFeedService(
                 "Unsupported exchange: ${instrument.exchange}"
             )
         }
+    }
+
+    private fun enqueueTickPersistence(
+        tick: MarketTick?,
+        audit: MarketRepository.TickAuditDelta
+    ) {
+        val event = TickPersistenceEvent(tick, audit)
+        var accepted = false
+
+        // Backpressure instead of immediately dropping events when the bounded
+        // queue is saturated. Keep waiting while the persistence worker is alive.
+        try {
+            while (tickPersistenceWorkerRunning.get()) {
+                val workerAlive = tickPersistenceThread?.isAlive == true
+                if (!workerAlive) break
+
+                if (tickPersistenceQueue.offer(event, 250L, TimeUnit.MILLISECONDS)) {
+                    accepted = true
+                    break
+                }
+            }
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+
+        if (accepted) {
+            enqueuedTickPersistenceEvents.incrementAndGet()
+
+            val size = tickPersistenceQueue.size
+            maxTickPersistenceQueueSize.updateAndGet { previous ->
+                maxOf(previous, size)
+            }
+        } else {
+            val dropped = droppedTickPersistenceEvents.incrementAndGet()
+
+            if (dropped == 1L || dropped % 100L == 0L) {
+                onStatus(
+                    "WARNING | Tick persistence worker unavailable/interrupted; " +
+                        "dropped events=$dropped"
+                )
+            }
+        }
+    }
+
+    private fun startTickPersistenceWorker() {
+        if (!tickPersistenceWorkerRunning.compareAndSet(false, true)) return
+
+        val worker = Thread({
+            val pendingAudits =
+                LinkedHashMap<String, MarketRepository.TickAuditDelta>()
+            var lastAuditFlushAt = System.currentTimeMillis()
+
+            fun mergeAudit(delta: MarketRepository.TickAuditDelta) {
+                val key = delta.exchange.trim().uppercase(Locale.ROOT) + "|" +
+                    delta.symbol.trim().uppercase(Locale.ROOT)
+                val previous = pendingAudits[key]
+                pendingAudits[key] = if (previous == null) {
+                    delta
+                } else {
+                    previous.copy(
+                        received = previous.received + delta.received,
+                        parsed = previous.parsed + delta.parsed,
+                        mapped = previous.mapped + delta.mapped,
+                        rejected = previous.rejected + delta.rejected,
+                        rawSaved = previous.rawSaved + delta.rawSaved,
+                        quoteSaved = previous.quoteSaved + delta.quoteSaved,
+                        saveFailed = previous.saveFailed + delta.saveFailed
+                    )
+                }
+            }
+
+            fun flushAudits() {
+                if (pendingAudits.isEmpty()) return
+                val batch = pendingAudits.values.toList()
+                if (marketRepository.recordTickAudits(batch)) {
+                    pendingAudits.clear()
+                } else {
+                    onStatus("Tick audit batch persistence failed: ${batch.size} instruments")
+                }
+                lastAuditFlushAt = System.currentTimeMillis()
+            }
+
+            while (tickPersistenceWorkerRunning.get() || tickPersistenceQueue.isNotEmpty()) {
+                try {
+                    val batch = ArrayList<TickPersistenceEvent>(512)
+                    val first = tickPersistenceQueue.poll(250L, TimeUnit.MILLISECONDS)
+                    if (first != null) {
+                        batch.add(first)
+                        tickPersistenceQueue.drainTo(batch, 511)
+                    }
+
+                    batch.forEach { event ->
+                        val saved = if (event.tick == null) {
+                            null
+                        } else {
+                            try {
+                                marketRepository.saveRawTick(event.tick)
+                            } catch (e: Exception) {
+                                onStatus("Raw tick save error ${event.tick.key.symbol}: ${e.message}")
+                                false
+                            }
+                        }
+                        mergeAudit(
+                            if (saved == null) event.audit else event.audit.copy(
+                                rawSaved = if (saved) 1 else 0,
+                                saveFailed = if (saved) 0 else 1
+                            )
+                        )
+
+                        processedTickPersistenceEvents.incrementAndGet()
+                        lastTickPersistenceProcessedAt.set(System.currentTimeMillis())
+
+                        if (event.tick != null && saved != true) {
+                            failedTickPersistenceEvents.incrementAndGet()
+                        }
+                    }
+
+                    val now = System.currentTimeMillis()
+                    if (now - lastAuditFlushAt >= 1_000L ||
+                        (!tickPersistenceWorkerRunning.get() && tickPersistenceQueue.isEmpty())
+                    ) {
+                        flushAudits()
+                    }
+                } catch (e: InterruptedException) {
+                    if (!tickPersistenceWorkerRunning.get()) continue
+                } catch (e: Exception) {
+                    onStatus("Tick persistence worker error: ${e.message}")
+                }
+            }
+
+            flushAudits()
+        }, "KotakTickPersistenceWorker").apply {
+            isDaemon = true
+            start()
+        }
+
+        tickPersistenceThread = worker
     }
 
     private fun safeRecordTickAudit(
@@ -337,8 +555,13 @@ class KotakNeoLiveFeedService(
         }
 
         ticks.forEach { tick ->
+            if (tick.messageCode != 105) parsedTickCount.incrementAndGet()
 
             if (tick.messageCode == 105) {
+                com.sb.backend.market.ExchangeSessionCalendar.updateFromStatus(
+                    exchange = tick.exchange,
+                    status = tick.status
+                )
                 onStatus(
                     "Market status ${tick.exchange}: ${tick.status}"
                 )
@@ -353,6 +576,8 @@ class KotakNeoLiveFeedService(
                 exchange = exchangeName(tick.exchange)
 
                 if (symbol.isBlank() || exchange.isBlank()) {
+                    rejectedTickCount.incrementAndGet()
+                    unmappedTickCount.incrementAndGet()
                     return@forEach
                 }
             } else {
@@ -365,14 +590,20 @@ class KotakNeoLiveFeedService(
 
                 val instrument = instrumentMap[key]
                     ?: requestedInstruments[key]
+                    ?: activeInstruments[key]
                     ?: run {
-                        safeRecordTickAudit(
-                            exchange = exchangeName(tick.exchange)
-                                .ifBlank { tick.exchange },
-                            symbol = tick.symbol.ifBlank {
-                                tick.token.toString()
-                            },
-                            rejected = 1
+                        rejectedTickCount.incrementAndGet()
+                        unmappedTickCount.incrementAndGet()
+                        enqueueTickPersistence(
+                            tick = null,
+                            audit = MarketRepository.TickAuditDelta(
+                                exchange = exchangeName(tick.exchange).ifBlank { tick.exchange },
+                                symbol = tick.symbol.ifBlank { tick.token.toString() },
+                                received = 1,
+                                parsed = 1,
+                                mapped = 0,
+                                rejected = 1
+                            )
                         )
                         return@forEach
                     }
@@ -381,13 +612,19 @@ class KotakNeoLiveFeedService(
                 exchange = instrument.exchange
             }
 
+            mappedTickCount.incrementAndGet()
+
             if (tick.ltp <= 0.0 || !tick.ltp.isFinite()) {
-                safeRecordTickAudit(
-                    exchange = exchange,
-                    symbol = symbol,
-                    received = 1,
-                    parsed = 1,
-                    rejected = 1
+                rejectedTickCount.incrementAndGet()
+                enqueueTickPersistence(
+                    tick = null,
+                    audit = MarketRepository.TickAuditDelta(
+                        exchange = exchange,
+                        symbol = symbol,
+                        received = 1,
+                        parsed = 1,
+                        rejected = 1
+                    )
                 )
                 return@forEach
             }
@@ -420,9 +657,8 @@ class KotakNeoLiveFeedService(
                 receivedAt = received
             )
 
+            var outcomeCounted = false
             try {
-                LiveQuoteCache.update(quote)
-
                 val mKey = InstrumentKey(exchange = exchange, symbol = symbol)
                 val bids = tick.buyDepth.take(5).map { d ->
                     DepthLevel(price = d.price, quantity = d.quantity, orders = d.orders)
@@ -459,59 +695,27 @@ class KotakNeoLiveFeedService(
                     receivedAt = received,
                     isIndex = tick.isIndex
                 )
-                // Persist every mapped market tick before quote batching.
-                // Raw ticks must not be lost when pendingQuotes overwrites older quotes.
-                val rawSaved = try {
-                    marketRepository.saveRawTick(mTick)
-                } catch (e: Exception) {
-                    onStatus("Raw tick save error $symbol: ${e.message}")
-                    false
-                }
-
-                // Record per-instrument feed and raw persistence counters.
-                safeRecordTickAudit(
-                    exchange = exchange,
-                    symbol = symbol,
-                    received = 1,
-                    parsed = 1,
-                    mapped = 1,
-                    rejected = 0,
-                    rawSaved = if (rawSaved) 1 else 0,
-                    quoteSaved = 0,
-                    saveFailed = if (rawSaved) 0 else 1
+                // Keep SQLite off OkHttp's WebSocket reader thread.
+                // A bounded worker queue persists raw ticks and batches audit deltas.
+                enqueueTickPersistence(
+                    tick = mTick,
+                    audit = MarketRepository.TickAuditDelta(
+                        exchange = exchange,
+                        symbol = symbol,
+                        received = 1,
+                        parsed = 1,
+                        mapped = 1
+                    )
                 )
 
-                val candleResult = MarketDataManager.onNewTick(mTick)
-                if (candleResult.finalizedBase.isNotEmpty()) {
-                    val finalizedCandles = candleResult.finalizedBase.map { candle ->
-                        Candle(
-                            symbol = symbol,
-                            timeframe = "1m",
-                            timestamp = candle.timestamp,
-                            open = candle.open,
-                            high = candle.high,
-                            low = candle.low,
-                            close = candle.close,
-                            volume = candle.volume,
-                            isComplete = true
-                        )
-                    }
-                    try {
-                        quoteExecutor.execute {
-                            val saved = marketRepository.saveCandles(
-                                symbol = symbol,
-                                exchange = exchange,
-                                timeframe = "1m",
-                                candles = finalizedCandles
-                            )
-                            if (saved != finalizedCandles.size) {
-                                onStatus("Candle persistence incomplete: $symbol saved=$saved/${finalizedCandles.size}")
-                            }
-                        }
-                    } catch (e: Exception) {
-                        onStatus("Candle persistence scheduling failed: $symbol ${e.message}")
-                    }
+                val tickResult = MarketDataManager.onNewTick(mTick)
+                if (tickResult.accepted) {
+                    acceptedTickCount.incrementAndGet()
+                } else {
+                    rejectedTickCount.incrementAndGet()
                 }
+                outcomeCounted = true
+                LiveQuoteCache.updateIfAccepted(quote, tickResult.accepted)
 
                 if (MarketDataManager.currentConnection() !=
                     MarketDataManager.ConnectionState.AUTHENTICATED
@@ -521,9 +725,13 @@ class KotakNeoLiveFeedService(
                     )
                 }
 
-                enqueueQuotePersistence(quote)
+                // Persist quotes only when MarketDataManager accepts the tick.
+                // Raw tick archival above remains independent of acceptance.
+                if (tickResult.accepted) {
+                    enqueueQuotePersistence(quote)
+                }
 
-                val count = tickCount.incrementAndGet()
+                val count = parsedTickCount.get()
 
                 if (count == 1L || count % 250L == 0L) {
                     val price = String.format(
@@ -533,11 +741,14 @@ class KotakNeoLiveFeedService(
                     )
 
                     onStatus(
-                        "Live ticks: $count | " +
-                            "$symbol ₹$price"
+                        "Ticks parsed=$count mapped=${mappedTickCount.get()} " +
+                            "accepted=${acceptedTickCount.get()} rejected=${rejectedTickCount.get()} " +
+                            "unmapped=${unmappedTickCount.get()} | " +
+                            "$symbol | Token: ${tick.token} | ₹$price"
                     )
                 }
             } catch (e: Exception) {
+                if (!outcomeCounted) rejectedTickCount.incrementAndGet()
                 onStatus(
                     "Live quote error $symbol: ${e.message}"
                 )
@@ -746,6 +957,26 @@ class KotakNeoLiveFeedService(
 
     fun webSocketClient(): KotakNeoWebSocketClient? = client
 
+    fun liveTickMetrics(): LiveTickMetrics = LiveTickMetrics(
+        parsed = parsedTickCount.get(),
+        mapped = mappedTickCount.get(),
+        accepted = acceptedTickCount.get(),
+        rejected = rejectedTickCount.get(),
+        unmapped = unmappedTickCount.get()
+    )
+
+    fun tickPersistenceMetrics(): TickPersistenceMetrics {
+        return TickPersistenceMetrics(
+            enqueued = enqueuedTickPersistenceEvents.get(),
+            processed = processedTickPersistenceEvents.get(),
+            dropped = droppedTickPersistenceEvents.get(),
+            failed = failedTickPersistenceEvents.get(),
+            queueSize = tickPersistenceQueue.size,
+            maxQueueSize = maxTickPersistenceQueueSize.get(),
+            lastProcessedAt = lastTickPersistenceProcessedAt.get()
+        )
+    }
+
     @Synchronized
     fun disconnect() {
         client?.unsubscribeIndices(indexTokens)
@@ -760,12 +991,23 @@ class KotakNeoLiveFeedService(
         client?.shutdown()
         client = null
 
+        // Stop accepting events and let the persistence worker drain queued ticks.
+        tickPersistenceWorkerRunning.set(false)
+
         try {
             quoteExecutor.execute { flushPendingQuotes() }
         } catch (_: Exception) {
         }
 
         quoteExecutor.shutdown()
+
+        try {
+            tickPersistenceThread?.join(2_000L)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+        tickPersistenceThread = null
+
         onStatus("Kotak Live Feed closed")
     }
 }

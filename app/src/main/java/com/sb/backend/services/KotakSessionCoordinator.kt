@@ -7,9 +7,11 @@ import android.util.Log
 import com.sb.backend.core.BackendManager
 import com.sb.backend.market.MarketDataManager
 import com.sb.backend.models.Candle
+import com.sb.backend.models.Instrument
 import com.sb.backend.security.KotakNeoSecureStore
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import org.json.JSONArray
 import org.json.JSONObject
@@ -19,13 +21,28 @@ object KotakSessionCoordinator {
     private const val TAG = "KotakSession"
 
     private val lock = Any()
+    private val executorLock = Any()
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val executor: ExecutorService by lazy {
-        Executors.newSingleThreadExecutor()
-    }
-    private val historicalExecutor: ExecutorService by lazy {
-        Executors.newSingleThreadExecutor()
-    }
+    private var executorRef: ExecutorService? = null
+    private var historicalExecutorRef: ExecutorService? = null
+
+    private val executor: ExecutorService
+        get() = synchronized(executorLock) {
+            executorRef ?: Executors.newSingleThreadExecutor { runnable ->
+                Thread(runnable, "kotak-session").apply {
+                    isDaemon = true
+                }
+            }.also { executorRef = it }
+        }
+
+    private val historicalExecutor: ExecutorService
+        get() = synchronized(executorLock) {
+            historicalExecutorRef ?: Executors.newSingleThreadExecutor { runnable ->
+                Thread(runnable, "kotak-history").apply {
+                    isDaemon = true
+                }
+            }.also { historicalExecutorRef = it }
+        }
 
     private var appContext: Context? = null
     private var secureStore: KotakNeoSecureStore? = null
@@ -34,6 +51,7 @@ object KotakSessionCoordinator {
 
     private val syncing = AtomicBoolean(false)
     private val connecting = AtomicBoolean(false)
+    private val reloginIssued = AtomicBoolean(false)
 
     @Volatile
     private var started = false
@@ -79,6 +97,7 @@ object KotakSessionCoordinator {
     }
 
     fun startAutoLogin() {
+        reloginIssued.set(false)
         val store = store()
 
         synchronized(lock) {
@@ -203,12 +222,7 @@ object KotakSessionCoordinator {
                     return@execute
                 }
 
-                val instruments = BackendManager.instruments()
-                    .getActiveWithTokens(2950)
-
-                require(instruments.isNotEmpty()) {
-                    "No instruments with Kotak tokens. Sync scrip master first."
-                }
+                val instruments = activeInstrumentsForFeed()
 
                 val service = KotakNeoLiveFeedService(
                     secureStore = store(),
@@ -216,6 +230,9 @@ object KotakSessionCoordinator {
                     instruments = instruments,
                     onStatus = { message ->
                         updateStatus(message)
+                    },
+                    activeInstrumentsProvider = {
+                        activeInstrumentsForFeed()
                     }
                 )
 
@@ -235,8 +252,7 @@ object KotakSessionCoordinator {
 
     /**
      * Subscribe one instrument on demand (used by the live chart screen).
-     * The global feed already subscribes all tokenised instruments; this
-     * additionally handles indices and instruments outside that snapshot.
+     * The feed only restores active watchlist/chart keys plus primary indices.
      */
     fun requestSubscription(symbol: String, exchange: String) {
         val context = appContext
@@ -277,6 +293,43 @@ object KotakSessionCoordinator {
                     "Live subscribe failed for $exchange:$symbol: ${e.message}"
                 )
             }
+        }
+    }
+
+    fun requestUnsubscription(symbol: String, exchange: String) {
+        val context = appContext
+
+        if (context == null) return
+
+        executor.execute {
+            try {
+                BackendManager.initialize(context)
+
+                val instrument = BackendManager.instruments()
+                    .findBySymbol(symbol, exchange)
+                    ?: return@execute
+
+                val service = synchronized(lock) {
+                    liveFeedService
+                } ?: return@execute
+
+                service.unsubscribeInstrument(instrument)
+            } catch (e: Exception) {
+                updateStatus(
+                    "Live unsubscribe failed for $exchange:$symbol: ${e.message}"
+                )
+            }
+        }
+    }
+
+    private fun activeInstrumentsForFeed(): List<Instrument> {
+        return try {
+            val repository = BackendManager.instruments()
+            MarketDataManager.activeKeys().mapNotNull { key ->
+                repository.findBySymbol(key.symbol, key.exchange)
+            }.distinctBy { "${it.exchange}:${it.symbol}" }
+        } catch (_: Exception) {
+            emptyList()
         }
     }
 
@@ -564,6 +617,47 @@ object KotakSessionCoordinator {
         updateStatus("ERROR | Kotak credentials cleared")
     }
 
+    fun shutdown() {
+        val service: KotakNeoLiveFeedService?
+        val manager: KotakAutoLoginManager?
+
+        synchronized(lock) {
+            started = false
+            service = liveFeedService
+            liveFeedService = null
+            manager = autoLoginManager
+            autoLoginManager = null
+        }
+
+        manager?.stopAutoLogin()
+        manager?.close()
+        service?.close()
+
+        val executors = synchronized(executorLock) {
+            val current = executorRef to historicalExecutorRef
+            executorRef = null
+            historicalExecutorRef = null
+            current
+        }
+        shutdownExecutor(executors.first)
+        shutdownExecutor(executors.second)
+
+        updateStatus("Kotak runtime stopped")
+    }
+
+    private fun shutdownExecutor(executor: ExecutorService?) {
+        executor ?: return
+        executor.shutdown()
+        try {
+            if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                executor.shutdownNow()
+            }
+        } catch (_: InterruptedException) {
+            executor.shutdownNow()
+            Thread.currentThread().interrupt()
+        }
+    }
+
     private fun closeFeed() {
         val service = synchronized(lock) {
             val current = liveFeedService
@@ -579,6 +673,21 @@ object KotakSessionCoordinator {
         Log.d(TAG, message)
 
         val lower = message.toLowerCase()
+
+        if (lower.contains("authenticated")) {
+            reloginIssued.set(false)
+        } else if (
+            lower.contains("authentication failed") &&
+            !reloginIssued.getAndSet(true)
+        ) {
+            synchronized(lock) {
+                val manager = autoLoginManager
+                if (manager?.isRunning() == true) {
+                    manager.loginNow()
+                }
+            }
+        }
+
         when {
             lower.contains("live ticks") || lower.contains("authenticated") ->
                 MarketDataManager.updateConnection(MarketDataManager.ConnectionState.AUTHENTICATED)

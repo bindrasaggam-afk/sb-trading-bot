@@ -1,4 +1,3 @@
-
 package com.sb.backend.services
 
 import android.app.Notification
@@ -11,8 +10,11 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import com.sb.backend.core.BackendManager
+import com.sb.backend.core.BackendRuntimeCoordinator
+import com.sb.backend.security.LocalApiToken
+import com.sb.backend.server.ApiSecurityPolicy
 import com.sb.backend.server.EmbeddedApiServer
+import java.util.concurrent.Executors
 
 class MarketForegroundService : Service() {
 
@@ -27,8 +29,14 @@ class MarketForegroundService : Service() {
 
         private const val NOTIFICATION_ID = 7101
 
+        private enum class RuntimeState {
+            STOPPED,
+            STARTING,
+            STARTED
+        }
+
         @Volatile
-        private var runtimeStarted = false
+        private var runtimeState = RuntimeState.STOPPED
 
         fun start(context: Context) {
             val appContext = context.applicationContext
@@ -53,13 +61,18 @@ class MarketForegroundService : Service() {
 
         private fun resetRuntimeState() {
             synchronized(MarketForegroundService::class.java) {
-                runtimeStarted = false
+                runtimeState = RuntimeState.STOPPED
             }
         }
     }
 
     // API server is owned by this foreground service.
     private var embeddedApiServer: EmbeddedApiServer? = null
+    private val runtimeExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "sb-market-runtime").apply {
+            isDaemon = true
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -74,13 +87,18 @@ class MarketForegroundService : Service() {
     ): Int {
 
         try {
+            // Android requires foreground promotion promptly. Keep this small
+            // operation on the service thread, and move all backend/API work
+            // off the main thread to avoid startup ANRs.
             startForeground(
                 NOTIFICATION_ID,
                 createNotification()
             )
 
             if (intent == null || intent.action == ACTION_START) {
-                startBackendRuntime()
+                runtimeExecutor.execute {
+                    startBackendRuntime()
+                }
             }
 
         } catch (error: Exception) {
@@ -92,48 +110,54 @@ class MarketForegroundService : Service() {
     }
 
     private fun startBackendRuntime() {
-
         synchronized(MarketForegroundService::class.java) {
-            if (runtimeStarted) {
-                Log.d(TAG, "Runtime already started")
+            if (runtimeState != RuntimeState.STOPPED) {
+                Log.d(TAG, "Runtime already starting or started")
                 return
             }
-            runtimeStarted = true
+            runtimeState = RuntimeState.STARTING
         }
 
         try {
-            // Start local API server on port 10000.
             startApiServer()
 
-            // Initialize the main backend.
-            BackendManager.initialize(applicationContext)
-
-            BackendManager.start(
-                seedBuiltInMasters = true
-            ) {
-                try {
-                    KotakSessionCoordinator.initialize(
-                        applicationContext
-                    )
-
-                    KotakSessionCoordinator.startIfEnabled()
-
-                    Log.d(
-                        TAG,
-                        "Backend ready; Kotak feed startup requested"
-                    )
-
-                } catch (error: Exception) {
-                    Log.e(TAG, "Kotak feed startup failed", error)
+            BackendRuntimeCoordinator.start(
+                context = applicationContext,
+                onReady = {
+                    val proceed = synchronized(MarketForegroundService::class.java) {
+                        if (runtimeState == RuntimeState.STARTING) {
+                            runtimeState = RuntimeState.STARTED
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    if (proceed) {
+                        Log.d(
+                            TAG,
+                            "Backend ready; Kotak feed startup requested"
+                        )
+                    }
+                    proceed
+                },
+                onError = { error ->
+                    Log.e(TAG, "Backend initialization failed", error)
+                    synchronized(MarketForegroundService::class.java) {
+                        if (runtimeState == RuntimeState.STARTING) {
+                            runtimeState = RuntimeState.STOPPED
+                        }
+                    }
+                    stopApiServer()
                 }
-            }
-
+            )
         } catch (error: Exception) {
             Log.e(TAG, "Backend initialization failed", error)
-
             synchronized(MarketForegroundService::class.java) {
-                runtimeStarted = false
+                if (runtimeState == RuntimeState.STARTING) {
+                    runtimeState = RuntimeState.STOPPED
+                }
             }
+            stopApiServer()
         }
     }
 
@@ -144,7 +168,10 @@ class MarketForegroundService : Service() {
                 return
             }
 
-            val server = EmbeddedApiServer(10000)
+            val server = EmbeddedApiServer(
+                port = ApiSecurityPolicy.DEFAULT_PORT,
+                tokenProvider = { LocalApiToken.tokens(this) }
+            )
             embeddedApiServer = server
 
             val started = server.start()
@@ -210,8 +237,21 @@ class MarketForegroundService : Service() {
     override fun onDestroy() {
         Log.w(TAG, "Foreground service destroyed")
 
-        stopApiServer()
+        synchronized(MarketForegroundService::class.java) {
+            runtimeState = RuntimeState.STOPPED
+        }
+        val result = BackendRuntimeCoordinator.shutdown {
+            stopApiServer()
+        }
+        if (result != null) {
+            Log.d(
+                TAG,
+                "Shutdown drained=${result.drained} " +
+                    "steps=${result.completedSteps} errors=${result.errors}"
+            )
+        }
         resetRuntimeState()
+        runtimeExecutor.shutdownNow()
 
         super.onDestroy()
     }

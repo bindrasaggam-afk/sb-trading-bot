@@ -1,15 +1,15 @@
 package com.sb.backend.services
 
 import com.sb.backend.core.BackendManager
-import com.sb.backend.market.TimeframeBuckets
+import com.sb.backend.market.analysis.TimeframeAggregator
 import com.sb.backend.market.model.InstrumentKey
 import com.sb.backend.market.model.MarketTimeframe
 import com.sb.backend.models.Candle
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import kotlin.math.max
-import kotlin.math.min
+import java.util.concurrent.TimeUnit
 
 /**
  * Runs [SignalEngine] on candles that are already persisted.
@@ -33,14 +33,53 @@ object SignalScanCoordinator {
         "1h" to listOf("15m", "5m", "1m")
     )
 
-    private val executor = Executors.newSingleThreadExecutor()
+    private val executorLock = Any()
+
+    @Volatile
+    private var executor: ExecutorService? = null
+
+    @Volatile
+    private var stopped = false
+
     private val lastScanAt = ConcurrentHashMap<String, Long>()
     private val inFlight = Collections.newSetFromMap(
         ConcurrentHashMap<String, Boolean>()
     )
 
+    private fun worker(): ExecutorService = synchronized(executorLock) {
+        if (executor?.isShutdown != false) {
+            stopped = false
+            executor = Executors.newSingleThreadExecutor { runnable ->
+                Thread(runnable, "sb-signal-scan").apply { isDaemon = true }
+            }
+        }
+        executor!!
+    }
+
+    fun shutdown() {
+        stopped = true
+        val current = synchronized(executorLock) {
+            val active = executor
+            executor = null
+            active
+        }
+        inFlight.clear()
+        lastScanAt.clear()
+        current?.shutdown()
+        if (current != null) {
+            try {
+                if (!current.awaitTermination(5, TimeUnit.SECONDS)) {
+                    current.shutdownNow()
+                }
+            } catch (_: InterruptedException) {
+                current.shutdownNow()
+                Thread.currentThread().interrupt()
+            }
+        }
+    }
+
     fun scan(key: InstrumentKey, force: Boolean = false) {
-        if (!BackendManager.isInitialized()) return
+        if (stopped || !BackendManager.isInitialized()) return
         if (key.symbol.isBlank() || key.exchange.isBlank()) return
 
         val id = key.key()
@@ -50,7 +89,7 @@ object SignalScanCoordinator {
         if (!inFlight.add(id)) return
 
         lastScanAt[id] = now
-        executor.execute {
+        worker().execute {
             try {
                 if (ensureTargets(key, 0)) {
                     generate(key)
@@ -115,13 +154,13 @@ object SignalScanCoordinator {
 
             if (aggregated.size >= MIN_CANDLES) {
                 return try {
-                    BackendManager.market().saveCandles(
+                    val saved = BackendManager.market().saveCandles(
                         symbol = key.symbol,
                         exchange = key.exchange,
                         timeframe = target,
                         candles = aggregated
                     )
-                    true
+                    saved == aggregated.size
                 } catch (_: Exception) {
                     false
                 }
@@ -136,34 +175,12 @@ object SignalScanCoordinator {
         targetTimeframe: MarketTimeframe,
         targetLabel: String,
         exchange: String
-    ): List<Candle> {
-        val buckets = LinkedHashMap<Long, Candle>()
-
-        source.forEach { candle ->
-            val timestamp = TimeframeBuckets.normalizeTimestamp(candle.timestamp)
-            if (timestamp <= 0L) return@forEach
-
-            val bucket = TimeframeBuckets.bucketStart(
-                timestamp = timestamp,
-                timeframe = targetTimeframe,
-                exchange = exchange
-            )
-
-            val existing = buckets[bucket]
-            buckets[bucket] = if (existing == null) {
-                candle.copy(timestamp = bucket, timeframe = targetLabel)
-            } else {
-                existing.copy(
-                    high = max(existing.high, candle.high),
-                    low = min(existing.low, candle.low),
-                    close = candle.close,
-                    volume = existing.volume + candle.volume
-                )
-            }
-        }
-
-        return buckets.values.toList()
-    }
+    ): List<Candle> = TimeframeAggregator.aggregate(
+        source = source,
+        targetTimeframe = targetTimeframe,
+        targetLabel = targetLabel,
+        exchange = exchange
+    )
 
     private fun generate(key: InstrumentKey) {
         try {

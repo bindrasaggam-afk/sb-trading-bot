@@ -1,7 +1,10 @@
 
 package com.sb.backend.database
 
+import android.content.ContentValues
 import android.database.sqlite.SQLiteDatabase
+import com.sb.backend.core.AppConfig
+import com.sb.backend.trading.PaperSignalPolicy
 
 object DatabaseMigrations {
 
@@ -39,6 +42,24 @@ object DatabaseMigrations {
                 tick_size REAL NOT NULL DEFAULT 0.05,
                 is_active INTEGER NOT NULL DEFAULT 1,
                 expiry_millis INTEGER,
+                exchange_segment TEXT NOT NULL DEFAULT '',
+                category TEXT NOT NULL DEFAULT '',
+                subcategory TEXT NOT NULL DEFAULT '',
+                raw_symbol TEXT NOT NULL DEFAULT '',
+                isin TEXT,
+                description TEXT,
+                group_code TEXT,
+                asset_code TEXT,
+                amc_code TEXT,
+                issue_millis INTEGER,
+                maturity_millis INTEGER,
+                case_eligible INTEGER NOT NULL DEFAULT 0,
+                source_tick_size REAL,
+                source TEXT NOT NULL DEFAULT 'LEGACY',
+                source_updated_at INTEGER,
+                is_alias INTEGER NOT NULL DEFAULT 0,
+                alias_of TEXT,
+                feed_name TEXT,
                 UNIQUE(exchange, symbol)
             )
             """.trimIndent()
@@ -48,6 +69,47 @@ object DatabaseMigrations {
             db, TABLE_INSTRUMENTS,
             "expiry_millis", "INTEGER"
         )
+        ensureColumn(
+            db, TABLE_INSTRUMENTS,
+            "exchange_segment", "TEXT NOT NULL DEFAULT ''"
+        )
+        ensureColumn(
+            db, TABLE_INSTRUMENTS,
+            "category", "TEXT NOT NULL DEFAULT ''"
+        )
+        ensureColumn(
+            db, TABLE_INSTRUMENTS,
+            "subcategory", "TEXT NOT NULL DEFAULT ''"
+        )
+        ensureColumn(
+            db, TABLE_INSTRUMENTS,
+            "raw_symbol", "TEXT NOT NULL DEFAULT ''"
+        )
+        ensureColumn(db, TABLE_INSTRUMENTS, "isin", "TEXT")
+        ensureColumn(db, TABLE_INSTRUMENTS, "description", "TEXT")
+        ensureColumn(db, TABLE_INSTRUMENTS, "group_code", "TEXT")
+        ensureColumn(db, TABLE_INSTRUMENTS, "asset_code", "TEXT")
+        ensureColumn(db, TABLE_INSTRUMENTS, "amc_code", "TEXT")
+        ensureColumn(db, TABLE_INSTRUMENTS, "issue_millis", "INTEGER")
+        ensureColumn(db, TABLE_INSTRUMENTS, "maturity_millis", "INTEGER")
+        ensureColumn(
+            db, TABLE_INSTRUMENTS,
+            "case_eligible", "INTEGER NOT NULL DEFAULT 0"
+        )
+        ensureColumn(db, TABLE_INSTRUMENTS, "source_tick_size", "REAL")
+        ensureColumn(
+            db, TABLE_INSTRUMENTS,
+            "source", "TEXT NOT NULL DEFAULT 'LEGACY'"
+        )
+        ensureColumn(db, TABLE_INSTRUMENTS, "source_updated_at", "INTEGER")
+        ensureColumn(
+            db, TABLE_INSTRUMENTS,
+            "is_alias", "INTEGER NOT NULL DEFAULT 0"
+        )
+        ensureColumn(db, TABLE_INSTRUMENTS, "alias_of", "TEXT")
+        ensureColumn(db, TABLE_INSTRUMENTS, "feed_name", "TEXT")
+
+        backfillInstrumentMetadata(db)
 
         // ---------------------------------------------------------
         // 2. QUOTES
@@ -136,6 +198,39 @@ object DatabaseMigrations {
         ensureColumn(
             db, TABLE_CANDLES,
             "finalized_at", "INTEGER"
+        )
+
+        // ---------------------------------------------------------
+        // 3A. CANDLE PERSISTENCE QUEUE (durable retry backlog)
+        // ---------------------------------------------------------
+
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS candle_persistence_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                exchange TEXT NOT NULL,
+                timeframe TEXT NOT NULL,
+                timestamp INTEGER NOT NULL,
+                open REAL NOT NULL,
+                high REAL NOT NULL,
+                low REAL NOT NULL,
+                close REAL NOT NULL,
+                volume INTEGER NOT NULL DEFAULT 0,
+                is_complete INTEGER NOT NULL DEFAULT 0,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                last_error TEXT,
+                UNIQUE(symbol, exchange, timeframe, timestamp)
+            )
+            """.trimIndent()
+        )
+
+        db.execSQL(
+            """
+            CREATE INDEX IF NOT EXISTS idx_candle_persistence_queue_created
+            ON candle_persistence_queue(created_at, id)
+            """.trimIndent()
         )
 
         // ---------------------------------------------------------
@@ -276,11 +371,128 @@ object DatabaseMigrations {
                 reserved_margin REAL NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'OPEN',
                 note TEXT NOT NULL DEFAULT '',
+                stop_loss REAL,
+                target REAL,
+                legacy_order_id INTEGER,
+                entry_source TEXT NOT NULL DEFAULT 'MARKET',
+                entry_timestamp INTEGER,
+                signal_id INTEGER,
+                signal_category TEXT NOT NULL DEFAULT '',
+                signal_timeframe TEXT NOT NULL DEFAULT '',
+                strategy_id TEXT NOT NULL DEFAULT '',
+                strategy_version TEXT NOT NULL DEFAULT '',
+                signal_generated_at INTEGER,
+                signal_expires_at INTEGER,
+                entry_low REAL,
+                entry_high REAL,
+                cost_bps_per_side REAL NOT NULL DEFAULT 0,
+                slippage_bps_per_side REAL NOT NULL DEFAULT 0,
+                target1 REAL,
+                target2 REAL,
+                target3 REAL,
+                remaining_quantity INTEGER NOT NULL DEFAULT 0,
+                last_price REAL,
+                entry_charges REAL NOT NULL DEFAULT 0,
+                charges REAL NOT NULL DEFAULT 0,
+                exit_reason TEXT NOT NULL DEFAULT '',
+                target1_at INTEGER,
+                target2_at INTEGER,
+                target3_at INTEGER,
+                stopped_at INTEGER,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
             )
             """.trimIndent()
         )
+
+        ensureColumn(db, "paper_orders", "stop_loss", "REAL")
+        ensureColumn(db, "paper_orders", "target", "REAL")
+        ensureColumn(db, "paper_orders", "legacy_order_id", "INTEGER")
+        ensureColumn(
+            db,
+            "paper_orders",
+            "entry_source",
+            "TEXT NOT NULL DEFAULT 'MARKET'"
+        )
+        ensureColumn(db, "paper_orders", "entry_timestamp", "INTEGER")
+        ensureColumn(db, "paper_orders", "signal_id", "INTEGER")
+        ensureColumn(
+            db,
+            "paper_orders",
+            "signal_category",
+            "TEXT NOT NULL DEFAULT ''"
+        )
+        ensureColumn(
+            db,
+            "paper_orders",
+            "signal_timeframe",
+            "TEXT NOT NULL DEFAULT ''"
+        )
+        ensureColumn(
+            db,
+            "paper_orders",
+            "strategy_id",
+            "TEXT NOT NULL DEFAULT ''"
+        )
+        ensureColumn(
+            db,
+            "paper_orders",
+            "strategy_version",
+            "TEXT NOT NULL DEFAULT ''"
+        )
+        ensureColumn(
+            db,
+            "paper_orders",
+            "signal_generated_at",
+            "INTEGER"
+        )
+        ensureColumn(db, "paper_orders", "signal_expires_at", "INTEGER")
+        ensureColumn(db, "paper_orders", "entry_low", "REAL")
+        ensureColumn(db, "paper_orders", "entry_high", "REAL")
+        ensureColumn(
+            db,
+            "paper_orders",
+            "cost_bps_per_side",
+            "REAL NOT NULL DEFAULT 0"
+        )
+        ensureColumn(
+            db,
+            "paper_orders",
+            "slippage_bps_per_side",
+            "REAL NOT NULL DEFAULT 0"
+        )
+        ensureColumn(db, "paper_orders", "target1", "REAL")
+        ensureColumn(db, "paper_orders", "target2", "REAL")
+        ensureColumn(db, "paper_orders", "target3", "REAL")
+        ensureColumn(
+            db,
+            "paper_orders",
+            "remaining_quantity",
+            "INTEGER NOT NULL DEFAULT 0"
+        )
+        ensureColumn(db, "paper_orders", "last_price", "REAL")
+        ensureColumn(
+            db,
+            "paper_orders",
+            "entry_charges",
+            "REAL NOT NULL DEFAULT 0"
+        )
+        ensureColumn(
+            db,
+            "paper_orders",
+            "charges",
+            "REAL NOT NULL DEFAULT 0"
+        )
+        ensureColumn(
+            db,
+            "paper_orders",
+            "exit_reason",
+            "TEXT NOT NULL DEFAULT ''"
+        )
+        ensureColumn(db, "paper_orders", "target1_at", "INTEGER")
+        ensureColumn(db, "paper_orders", "target2_at", "INTEGER")
+        ensureColumn(db, "paper_orders", "target3_at", "INTEGER")
+        ensureColumn(db, "paper_orders", "stopped_at", "INTEGER")
 
         // ---------------------------------------------------------
         // 10. POSITIONS
@@ -302,6 +514,46 @@ object DatabaseMigrations {
                 opened_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 UNIQUE(order_id)
+            )
+            """.trimIndent()
+        )
+
+        // ---------------------------------------------------------
+        // 10A. PAPER EXECUTIONS
+        // ---------------------------------------------------------
+
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS paper_executions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id INTEGER NOT NULL,
+                signal_id INTEGER,
+                kind TEXT NOT NULL,
+                quantity INTEGER NOT NULL CHECK (quantity > 0),
+                price REAL NOT NULL CHECK (price > 0),
+                gross_pnl REAL NOT NULL DEFAULT 0,
+                charges REAL NOT NULL DEFAULT 0,
+                net_pnl REAL NOT NULL DEFAULT 0,
+                executed_at INTEGER NOT NULL,
+                event_key TEXT NOT NULL UNIQUE,
+                note TEXT NOT NULL DEFAULT ''
+            )
+            """.trimIndent()
+        )
+
+        // ---------------------------------------------------------
+        // 10B. PAPER EVENT LOG
+        // ---------------------------------------------------------
+
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS paper_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id INTEGER,
+                signal_id INTEGER,
+                type TEXT NOT NULL,
+                message TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL
             )
             """.trimIndent()
         )
@@ -382,6 +634,34 @@ object DatabaseMigrations {
 
         createIndex(
             db,
+            "idx_instruments_exchange_feed_token",
+            TABLE_INSTRUMENTS,
+            "exchange, exchange_segment, token"
+        )
+
+        createIndex(
+            db,
+            "idx_instruments_category",
+            TABLE_INSTRUMENTS,
+            "category, subcategory, exchange, symbol"
+        )
+
+        createIndex(
+            db,
+            "idx_instruments_isin",
+            TABLE_INSTRUMENTS,
+            "isin"
+        )
+
+        createIndex(
+            db,
+            "idx_instruments_alias",
+            TABLE_INSTRUMENTS,
+            "is_alias, alias_of"
+        )
+
+        createIndex(
+            db,
             "idx_candles_lookup",
             TABLE_CANDLES,
             "symbol, timeframe, timestamp"
@@ -429,6 +709,30 @@ object DatabaseMigrations {
             "status, created_at"
         )
 
+        db.execSQL(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_orders_legacy_order
+            ON `paper_orders` (`legacy_order_id`)
+            """.trimIndent()
+        )
+
+        db.execSQL(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS
+            idx_orders_signal
+            ON `paper_orders` (`signal_id`)
+            WHERE `signal_id` IS NOT NULL
+            """.trimIndent()
+        )
+
+        createIndex(
+            db,
+            "idx_orders_source_status",
+            "paper_orders",
+            "entry_source, status"
+        )
+
         createIndex(
             db,
             "idx_positions_status",
@@ -436,11 +740,92 @@ object DatabaseMigrations {
             "status"
         )
 
+        createIndex(
+            db,
+            "idx_paper_executions_order",
+            "paper_executions",
+            "order_id, executed_at"
+        )
+
+        createIndex(
+            db,
+            "idx_paper_events_created",
+            "paper_events",
+            "created_at"
+        )
+
         // ---------------------------------------------------------
         // 14. CANDLE VALIDATION TRIGGERS
         // ---------------------------------------------------------
 
         createCandleValidationTriggers(db)
+    }
+
+    private fun backfillInstrumentMetadata(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            UPDATE `$TABLE_INSTRUMENTS`
+            SET raw_symbol = symbol
+            WHERE raw_symbol IS NULL OR TRIM(raw_symbol) = ''
+            """.trimIndent()
+        )
+
+        db.execSQL(
+            """
+            UPDATE `$TABLE_INSTRUMENTS`
+            SET exchange_segment = CASE UPPER(exchange)
+                WHEN 'NSE' THEN
+                    CASE WHEN UPPER(segment) IN ('FO', 'FUT', 'OPT')
+                        THEN 'nse_fo' ELSE 'nse_cm' END
+                WHEN 'BSE' THEN
+                    CASE WHEN UPPER(segment) IN ('FO', 'FUT', 'OPT')
+                        THEN 'bse_fo' ELSE 'bse_cm' END
+                WHEN 'MCX' THEN 'mcx_fo'
+                ELSE ''
+            END
+            WHERE exchange_segment IS NULL OR TRIM(exchange_segment) = ''
+            """.trimIndent()
+        )
+
+        db.execSQL(
+            """
+            UPDATE `$TABLE_INSTRUMENTS`
+            SET category = CASE
+                WHEN UPPER(segment) = 'INDEX' THEN 'INDEX'
+                WHEN UPPER(segment) = 'ETF' THEN 'ETF'
+                WHEN UPPER(segment) = 'COMMODITY' THEN 'COMMODITY'
+                WHEN UPPER(segment) = 'BOND' THEN 'BOND'
+                WHEN UPPER(segment) = 'MF' THEN 'MUTUAL_FUND'
+                WHEN UPPER(segment) = 'OTHER' THEN 'OTHER'
+                ELSE 'EQUITY'
+            END
+            WHERE category IS NULL OR TRIM(category) = ''
+            """.trimIndent()
+        )
+
+        db.execSQL(
+            """
+            UPDATE `$TABLE_INSTRUMENTS`
+            SET subcategory = CASE
+                WHEN UPPER(category) = 'INDEX' THEN 'INDEX'
+                WHEN UPPER(category) = 'ETF' THEN 'NSE_ETF'
+                WHEN UPPER(category) = 'COMMODITY' THEN 'MCX_FUTURES'
+                WHEN UPPER(category) = 'EQUITY' AND UPPER(exchange) = 'BSE'
+                    THEN 'BSE_CASH'
+                WHEN UPPER(category) = 'EQUITY' THEN 'NSE_CASH'
+                ELSE ''
+            END
+            WHERE subcategory IS NULL OR TRIM(subcategory) = ''
+            """.trimIndent()
+        )
+
+        db.execSQL(
+            """
+            UPDATE `$TABLE_INSTRUMENTS`
+            SET source = 'LEGACY'
+            WHERE source IS NULL OR TRIM(source) = ''
+            """.trimIndent()
+        )
     }
 
     // -------------------------------------------------------------
@@ -462,6 +847,76 @@ object DatabaseMigrations {
                 """.trimIndent()
             )
         }
+
+        if (oldVersion < 11) {
+            repairPaperAccounting(db)
+        }
+    }
+
+    private fun repairPaperAccounting(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            UPDATE paper_executions
+            SET net_pnl = 0
+            WHERE kind = 'ENTRY'
+            """.trimIndent()
+        )
+
+        var pendingReservation = 0.0
+        val pendingUpdates = ArrayList<Pair<Long, Double>>()
+        db.rawQuery(
+            """
+            SELECT id, side, quantity, entry_price, cost_bps_per_side,
+                   COALESCE(reserved_margin, 0)
+            FROM paper_orders
+            WHERE status = 'PENDING'
+            """.trimIndent(),
+            null
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                val orderId = cursor.getLong(0)
+                val currentReservation = cursor.getDouble(5)
+                if (currentReservation > 0.0) {
+                    pendingReservation += currentReservation
+                    continue
+                }
+                val requirement = PaperSignalPolicy.capitalRequirement(
+                    side = cursor.getString(1),
+                    price = cursor.getDouble(3),
+                    quantity = cursor.getInt(2),
+                    costBpsPerSide = cursor.getDouble(4),
+                    shortMarginRate = AppConfig.get().shortMarginRate
+                )
+                if (requirement.totalReservation > 0.0) {
+                    pendingUpdates.add(
+                        orderId to requirement.totalReservation
+                    )
+                    pendingReservation += requirement.totalReservation
+                }
+            }
+        }
+        pendingUpdates.forEach { (orderId, reservation) ->
+            val values = ContentValues().apply {
+                put("reserved_margin", reservation)
+            }
+            db.update(
+                "paper_orders",
+                values,
+                "id = ? AND status = 'PENDING'",
+                arrayOf(orderId.toString())
+            )
+        }
+        if (pendingReservation > 0.0) {
+            db.execSQL(
+                """
+                UPDATE paper_account
+                SET reserved_margin = reserved_margin + ?
+                WHERE id = 1
+                """.trimIndent(),
+                arrayOf<Any>(pendingReservation)
+            )
+        }
+
     }
 
     // -------------------------------------------------------------

@@ -1,8 +1,11 @@
 package com.sb.ui.market
 
 import androidx.lifecycle.ViewModel
+import android.util.Log
 import androidx.lifecycle.viewModelScope
 import com.sb.backend.market.MarketDataManager
+import com.sb.backend.market.analysis.CandleSeriesReconciler
+import com.sb.backend.market.analysis.CandleSeriesAudit
 import com.sb.backend.market.TimeframeBuckets
 import com.sb.backend.market.engine.CandleEngine
 import com.sb.backend.market.model.ChartStatus
@@ -12,14 +15,12 @@ import com.sb.backend.market.model.MarketTick
 import com.sb.backend.market.model.MarketTimeframe
 import com.sb.backend.market.model.MarketUiState
 import com.sb.backend.market.repo.MarketFeedRepository
-import com.sb.backend.services.SignalScanCoordinator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
@@ -37,7 +38,6 @@ class InstrumentLiveViewModel(
 
     constructor() : this(MarketFeedRepository)
 
-    private val engine = CandleEngine()
     private val instrumentKey = MutableStateFlow<InstrumentKey?>(null)
     private val timeframe = MutableStateFlow(MarketTimeframe.MIN_1)
 
@@ -55,6 +55,12 @@ class InstrumentLiveViewModel(
     private var currentKey: InstrumentKey? = null
 
     private val candleLock = Any()
+
+    private val candleResultListener:
+        (MarketTick, CandleEngine.TickResult) -> Unit = { tick, result ->
+            handleCandleResult(tick, result)
+        }
+
     private val generation = AtomicInteger(0)
     private var liveTargetBucket = 0L
     private var liveActive = false
@@ -92,13 +98,7 @@ class InstrumentLiveViewModel(
     )
 
     init {
-        viewModelScope.launch {
-            repository.observeTickStream().collect { tick ->
-                val active = currentKey ?: return@collect
-                if (!sameInstrument(tick.key, active)) return@collect
-                handleTick(tick)
-            }
-        }
+        MarketDataManager.addCandleResultListener(candleResultListener)
     }
 
     fun setInstrument(exchange: String, symbol: String) {
@@ -121,7 +121,6 @@ class InstrumentLiveViewModel(
         synchronized(candleLock) {
             currentKey = normalized
             instrumentKey.value = normalized
-            engine.clear()
             _candles.value = emptyList()
             liveTargetBucket = 0L
             liveActive = false
@@ -134,7 +133,6 @@ class InstrumentLiveViewModel(
         repository.subscribe(normalized)
         loadStoredCandles(normalized, timeframe.value, token)
         requestHistoricalCandles(normalized, timeframe.value, token)
-        SignalScanCoordinator.scan(normalized)
     }
 
     fun setTimeframe(label: String) {
@@ -155,7 +153,7 @@ class InstrumentLiveViewModel(
             historicalLoaded = false
             historicalUnavailable = false
             historicalMessage = ""
-            _candles.value = engine.candles(key, parsed)
+            _candles.value = MarketDataManager.getCandles(key, parsed)
             publishStatusLocked()
         }
 
@@ -171,7 +169,6 @@ class InstrumentLiveViewModel(
         synchronized(candleLock) {
             currentKey = null
             instrumentKey.value = null
-            engine.clear()
             _candles.value = emptyList()
             liveTargetBucket = 0L
             liveActive = false
@@ -182,64 +179,40 @@ class InstrumentLiveViewModel(
         }
     }
 
-    private fun handleTick(tick: MarketTick) {
-        if (tick.ltp <= 0.0 || !tick.ltp.isFinite()) return
+    private fun handleCandleResult(
+        tick: MarketTick,
+        result: CandleEngine.TickResult
+    ) {
+        if (!result.accepted) return
 
         val key = currentKey ?: return
         if (!sameInstrument(tick.key, key)) return
-
-        var finalizedBase: List<MarketCandle> = emptyList()
-        var finalizedTarget: MarketCandle? = null
-        var finalizedTargetLabel: String? = null
 
         synchronized(candleLock) {
             val active = currentKey ?: return
             if (!sameInstrument(active, key)) return
 
-            val result = engine.addTick(tick)
-            if (!result.accepted) return
-
             val activeTimeframe = timeframe.value
-            val target = engine.candleAt(
-                key = key,
-                timeframe = activeTimeframe,
-                timestamp = result.baseTimestamp
-            ) ?: return
-
-            val existing = _candles.value.firstOrNull {
-                it.timestamp == target.timestamp
-            }
-
-            if (liveTargetBucket != 0L && target.timestamp > liveTargetBucket) {
-                val previous = _candles.value.firstOrNull {
-                    it.timestamp == liveTargetBucket
-                }
-                if (previous != null) {
-                    finalizedTarget = previous
-                    finalizedTargetLabel = activeTimeframe.label
-                }
-            }
+            val target = result.current(activeTimeframe)
+                ?: MarketDataManager.candleAt(
+                    key = key,
+                    timeframe = activeTimeframe,
+                    timestamp = result.baseTimestamp
+                )
+                ?: return
 
             liveTargetBucket = target.timestamp
             liveActive = true
-            finalizedBase = result.finalizedBase
 
+            // CandleEngine already aggregates all ticks for this bucket.
+            // Replace the row atomically; combining old and new OHLC fields
+            // could manufacture a candle that never existed in the market.
             _candles.value = upsertCandle(
                 current = _candles.value,
-                candle = mergeLiveTarget(existing, target)
+                candle = target
             )
 
             publishStatusLocked()
-        }
-
-        if (finalizedBase.isNotEmpty()) {
-            persist(key, MarketTimeframe.MIN_1.label, finalizedBase)
-            SignalScanCoordinator.scan(key)
-        }
-        val targetToPersist = finalizedTarget
-        val targetLabel = finalizedTargetLabel
-        if (targetToPersist != null && targetLabel != null) {
-            persist(key, targetLabel, listOf(targetToPersist))
         }
     }
 
@@ -254,28 +227,35 @@ class InstrumentLiveViewModel(
                 timeframe = requested.label,
                 limit = MAX_CANDLES
             )
-            val storedBase = if (requested == MarketTimeframe.MIN_1) {
-                storedTarget
-            } else {
-                repository.loadStoredCandles(
-                    key = key,
-                    timeframe = MarketTimeframe.MIN_1.label,
-                    limit = MAX_BASE_CANDLES
-                )
-            }
 
             if (generation.get() != token) return@launch
 
             synchronized(candleLock) {
                 if (!isCurrent(key, requested, token)) return@synchronized
 
-                if (storedBase.isNotEmpty()) {
-                    engine.seedBase(key, storedBase)
+                if (storedTarget.isNotEmpty()) {
+                    MarketDataManager.seedCandles(key, storedTarget, requested)
                 }
 
-                val live = engine.candles(key, requested)
+                val live = MarketDataManager.getCandles(key, requested)
+                if (storedTarget.isNotEmpty() && live.isNotEmpty()) {
+                    val audit = CandleSeriesAudit.compare(storedTarget, live)
+                    if (!audit.exactMatch) {
+                        Log.w(
+                            "InstrumentLiveViewModel",
+                            "Stored/live ${requested.label} mismatch for ${key.key()}: " +
+                                "missingLive=${audit.missingFromLive}, " +
+                                "missingStored=${audit.missingFromStored}, " +
+                                "ohlc=${audit.ohlcMismatches}, volume=${audit.volumeMismatches}, " +
+                                "duplicates=${audit.duplicateStoredTimestamps + audit.duplicateLiveTimestamps}"
+                        )
+                    }
+                }
+                val currentLive = live.filter { it.timestamp == liveTargetBucket }
                 val merged = mergeAll(
-                    listOf(storedTarget, _candles.value, live)
+                    sources = listOf(_candles.value, storedTarget, currentLive),
+                    requested = requested,
+                    key = key
                 )
                 if (merged.isNotEmpty()) {
                     _candles.value = merged
@@ -309,9 +289,15 @@ class InstrumentLiveViewModel(
                     historicalUnavailable = true
                     historicalMessage = "Historical data unavailable • live only"
                 } else {
-                    val live = engine.candles(key, requested)
+                    val live = MarketDataManager.getCandles(key, requested)
                     _candles.value = mergeAll(
-                        listOf(valid, _candles.value, live)
+                        sources = listOf(
+                            valid,
+                            _candles.value,
+                            live.filter { it.timestamp == liveTargetBucket }
+                        ),
+                        requested = requested,
+                        key = key
                     )
                     historicalLoaded = true
                     historicalUnavailable = false
@@ -333,72 +319,17 @@ class InstrumentLiveViewModel(
             timeframe.value == requested
     }
 
-    private fun mergeLiveTarget(
-        existing: MarketCandle?,
-        target: MarketCandle
-    ): MarketCandle {
-        if (existing == null) return target
-        return target.copy(
-            open = existing.open,
-            high = max(existing.high, target.high),
-            low = min(existing.low, target.low),
-            close = target.close,
-            volume = max(existing.volume, target.volume)
-        )
-    }
-
-    private fun mergeCandles(
-        base: List<MarketCandle>,
-        live: List<MarketCandle>
+    private fun mergeAll(
+        sources: List<List<MarketCandle>>,
+        requested: MarketTimeframe,
+        key: InstrumentKey
     ): List<MarketCandle> {
-        val merged = LinkedHashMap<Long, MarketCandle>()
-
-        base.forEach { candle ->
-            val normalized = normalizeCandle(candle)
-            if (isValidCandle(normalized)) {
-                merged[normalized.timestamp] = normalized
-            }
-        }
-
-        live.forEach { candle ->
-            val normalized = normalizeCandle(candle)
-            if (!isValidCandle(normalized)) return@forEach
-
-            val existing = merged[normalized.timestamp]
-            merged[normalized.timestamp] = if (existing == null) {
-                normalized
-            } else {
-                normalized.copy(
-                    open = existing.open,
-                    high = max(existing.high, normalized.high),
-                    low = min(existing.low, normalized.low),
-                    close = normalized.close,
-                    volume = max(existing.volume, normalized.volume)
-                )
-            }
-        }
-
-        return merged.values
-            .sortedBy { it.timestamp }
-            .takeLast(MAX_CANDLES)
-    }
-
-    /**
-     * Unions multiple candle sources without dropping data.
-     *
-     * Sources are applied in increasing priority order: the first source keeps
-     * its open/high/low, later sources can extend the range and override the
-     * close. This prevents a late stored/historical load from wiping candles
-     * that were already merged from the other source (multi-timeframe race).
-     */
-    private fun mergeAll(sources: List<List<MarketCandle>>): List<MarketCandle> {
-        var merged: List<MarketCandle> = emptyList()
-        sources.forEach { series ->
-            if (series.isNotEmpty()) {
-                merged = mergeCandles(merged, series)
-            }
-        }
-        return merged
+        return CandleSeriesReconciler.merge(
+            sources = sources,
+            limit = MAX_CANDLES,
+            timeframeLabel = requested.label,
+            exchange = key.exchange
+        )
     }
 
     private fun upsertCandle(
@@ -430,21 +361,6 @@ class InstrumentLiveViewModel(
             ArrayList(result.subList(result.size - MAX_CANDLES, result.size))
         } else {
             result
-        }
-    }
-
-    private fun persist(
-        key: InstrumentKey,
-        label: String,
-        candles: List<MarketCandle>
-    ) {
-        val valid = candles
-            .map { normalizeCandle(it) }
-            .filter { isValidCandle(it) }
-        if (valid.isEmpty()) return
-
-        viewModelScope.launch(Dispatchers.IO) {
-            repository.saveCandles(key, label, valid)
         }
     }
 
@@ -497,9 +413,9 @@ class InstrumentLiveViewModel(
         generation.incrementAndGet()
         val oldKey = currentKey
         oldKey?.let { repository.unsubscribe(it) }
+        MarketDataManager.removeCandleResultListener(candleResultListener)
         synchronized(candleLock) {
             currentKey = null
-            engine.clear()
             _candles.value = emptyList()
         }
         super.onCleared()
@@ -507,7 +423,6 @@ class InstrumentLiveViewModel(
 
     private companion object {
         private const val MAX_CANDLES = 2_000
-        private const val MAX_BASE_CANDLES = 6_000
         private const val HISTORICAL_YEARS = 3
     }
 }
