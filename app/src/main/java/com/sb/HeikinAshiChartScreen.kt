@@ -478,15 +478,16 @@ class HeikinAshiChartScreen(
             9f,
             mutedColor
         ).apply {
-            gravity = Gravity.CENTER
-            setPadding(0, dp(2), 0, dp(2))
+            gravity = Gravity.CENTER_VERTICAL
+            maxLines = 3
+            setPadding(dp(2), dp(3), dp(2), dp(4))
         }
 
         root.addView(
             disclaimerText,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(20)
+                LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
@@ -507,12 +508,13 @@ class HeikinAshiChartScreen(
         )
         quickTrade.setInstrument(selectedSymbol, exchangeHint)
 
+        // Float in the chart area, not over the fixed live/depth headers.
         val quickPanelParams = FrameLayout.LayoutParams(
-            dp(214),
+            dp(196),
             FrameLayout.LayoutParams.WRAP_CONTENT,
-            Gravity.BOTTOM or Gravity.END
+            Gravity.TOP or Gravity.END
         ).apply {
-            bottomMargin = dp(6)
+            topMargin = dp(112)
             rightMargin = dp(6)
         }
         container.addView(quickTrade.view, quickPanelParams)
@@ -1355,26 +1357,34 @@ class HeikinAshiChartScreen(
                 chartView.previousClose = null
             }
             renderDepth(null)
-            livePriceText.text = "LIVE • waiting for tick"
+            val connectionLabel = when (state.connectionState.name) {
+                "AUTHENTICATED", "CONNECTED" -> "CONNECTED"
+                "CONNECTING" -> "CONNECTING"
+                "DISCONNECTED", "ERROR" -> "DISCONNECTED"
+                else -> state.connectionState.name
+            }
+            livePriceText.text = when {
+                state.chartStatus.candleCount > 0 -> "STORED DATA • waiting for live tick"
+                state.chartStatus.state == "HISTORICAL_UNAVAILABLE" -> "NO CANDLE DATA"
+                connectionLabel == "CONNECTED" -> "CONNECTED • NO TICK YET"
+                connectionLabel == "CONNECTING" -> "CONNECTING • NO TICK YET"
+                else -> "NO LIVE TICK • FEED DISCONNECTED"
+            }
             livePriceText.setTextColor(mutedColor)
             liveDetailText.text = buildString {
-                append(state.connectionState.name)
-                append("  •  ")
-                append(if (state.isSubscribed) "SUBSCRIBED" else "WAITING")
-                append("  •  ").append(selectedSymbol)
+                append(connectionLabel)
+                append(" • ")
+                append(if (state.isSubscribed) "SUBSCRIBED" else "NOT SUBSCRIBED")
+                append(" • ").append(selectedSymbol)
                 val message = state.chartStatus.message
-                if (message.isNotBlank()) {
-                    append('\n').append(message)
-                }
+                if (message.isNotBlank()) append('\n').append(message)
             }
             disclaimerText.text = buildString {
-                append(state.chartStatus.state)
-                append(" • ").append(state.connectionState.name)
-                append(" • Candles ").append(state.chartStatus.candleCount)
+                append("DATA: ").append(state.chartStatus.state.replace('_', ' '))
+                append(" • CONNECTION: ").append(connectionLabel)
+                append(" • CANDLES: ").append(state.chartStatus.candleCount)
                 val message = state.chartStatus.message
-                if (message.isNotBlank()) {
-                    append(" • ").append(message)
-                }
+                if (message.isNotBlank()) append('\n').append(message)
             }
             return
         }
@@ -1410,7 +1420,7 @@ class HeikinAshiChartScreen(
 
         symbolInfo.text = "${tick.key.symbol} • ${tick.key.exchange}"
         disclaimerText.text = buildString {
-            append(if (state.isSubscribed) "LIVE • SUBSCRIBED" else "LIVE • NOT SUBSCRIBED")
+            append(if (state.isSubscribed) "TICK • SUBSCRIBED" else "TICK • NOT SUBSCRIBED")
             append(" • ").append(state.connectionState.name)
             append(" • Candles ").append(state.chartStatus.candleCount)
             val message = state.chartStatus.message
