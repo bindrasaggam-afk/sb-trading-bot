@@ -222,23 +222,37 @@ class MainActivity : AppCompatActivity() {
             "Market" to "⌁"
         )
 
+        val navStrip = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(6), 0, dp(6), 0)
+        }
         navItems.forEach { item ->
             val nav = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
-                setPadding(dp(2), dp(3), dp(2), dp(3))
-                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f)
+                setPadding(dp(3), dp(2), dp(3), dp(2))
+                layoutParams = LinearLayout.LayoutParams(dp(64), ViewGroup.LayoutParams.MATCH_PARENT)
                 setOnClickListener { showScreen(item.first) }
             }
 
-            nav.addView(makeText(item.second, 18f, white, true).apply {
+            nav.addView(makeText(item.second, 17f, white, true).apply {
                 gravity = Gravity.CENTER
             })
-            nav.addView(makeText(item.first, 9f, grey, false).apply {
+            nav.addView(makeText(item.first, 8.5f, grey, false).apply {
                 gravity = Gravity.CENTER
+                maxLines = 1
             })
-            footer.addView(nav)
+            navStrip.addView(nav)
         }
+        footer.addView(
+            HorizontalScrollView(this).apply {
+                isHorizontalScrollBarEnabled = false
+                clipToPadding = false
+                addView(navStrip)
+            },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        )
 
         headerDivider = AppDesign.divider(this)
         footerDivider = AppDesign.divider(this)
@@ -1862,7 +1876,7 @@ class MainActivity : AppCompatActivity() {
             itemAnimator = null
             setBackgroundColor(bg)
             clipToPadding = false
-            setPadding(0, 0, 0, dp(8))
+            setPadding(0, 0, 0, dp(24))
             adapter = marketListAdapter
         }
 
