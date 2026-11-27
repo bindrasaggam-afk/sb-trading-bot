@@ -35,7 +35,7 @@ class AllInstrumentsScreen(
     private var filteredItems: List<Instrument> = emptyList()
     private var searchText = ""
     private var exchangeFilter = "All"
-    private var categoryFilter = "All"
+    private var categoryFilter = "All Categories"
     private var visibleLimit = PAGE_SIZE
 
     private lateinit var countText: TextView
@@ -186,7 +186,7 @@ class AllInstrumentsScreen(
             itemAnimator = null
             setBackgroundColor(AppDesign.background)
             clipToPadding = false
-            setPadding(0, 0, 0, dp(8))
+            setPadding(0, 0, 0, dp(28))
             adapter = this@AllInstrumentsScreen.adapter
         }
         root.addView(
@@ -309,7 +309,7 @@ class AllInstrumentsScreen(
     ): HorizontalScrollView {
         val row = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dp(2), 0, dp(2))
+            setPadding(dp(8), dp(2), dp(12), dp(2))
         }
 
         values.forEach { value ->
@@ -336,6 +336,8 @@ class AllInstrumentsScreen(
 
         return HorizontalScrollView(context).apply {
             isHorizontalScrollBarEnabled = false
+            clipToPadding = false
+            setPadding(0, 0, dp(10), 0)
             addView(row)
         }
     }
