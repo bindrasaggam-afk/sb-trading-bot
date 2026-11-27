@@ -27,6 +27,7 @@ class LiveTokenClassifierTest {
 
         assertEquals(2, counts.tokenWithTick)
         assertEquals(3, counts.token)
+        assertEquals(1, counts.tokenOnly)
         assertEquals(2, counts.noToken)
         assertEquals(2, counts.noLivePrice)
         assertEquals(5, counts.total)
@@ -54,7 +55,7 @@ class LiveTokenClassifierTest {
     }
 
     @Test
-    fun tokenEntriesIncludeLiveAndWaitingSymbolsWithStatus() {
+    fun tokenOnlyEntriesExcludeSymbolsThatAlreadyHaveLiveTicks() {
         val instruments = listOf(
             instrument("RELIANCE", "2885"),
             instrument("INFY", "11536"),
@@ -65,12 +66,12 @@ class LiveTokenClassifierTest {
         val entries = LiveTokenClassifier.entries(
             instruments,
             tickKeys,
-            LiveTokenCategory.TOKEN
+            LiveTokenCategory.TOKEN_ONLY
         )
 
-        assertEquals(2, entries.size)
-        assertTrue(entries.any { it.symbol == "RELIANCE" && it.status == "live tick available" })
+        assertEquals(1, entries.size)
         assertTrue(entries.any { it.symbol == "INFY" && it.status == "waiting for live tick" })
+        assertTrue(entries.none { it.symbol == "RELIANCE" })
     }
 
     @Test

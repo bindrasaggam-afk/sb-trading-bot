@@ -5,7 +5,7 @@ import com.sb.backend.models.Instrument
 
 enum class LiveTokenCategory(val label: String) {
     TOKEN_WITH_TICK("Token with Live Tick"),
-    TOKEN("Token"),
+    TOKEN_ONLY("Token Only (No Tick)"),
     NO_TOKEN("No Token"),
     NO_LIVE_PRICE("No Live Price")
 }
@@ -14,7 +14,8 @@ data class LiveTokenCounts(
     val tokenWithTick: Int = 0,
     val token: Int = 0,
     val noToken: Int = 0,
-    val noLivePrice: Int = 0
+    val noLivePrice: Int = 0,
+    val tokenOnly: Int = 0
 ) {
     val total: Int get() = token + noToken
 }
@@ -76,6 +77,7 @@ object LiveTokenClassifier {
         var token = 0
         var noToken = 0
         var noLivePrice = 0
+        var tokenOnly = 0
 
         instruments.forEach { instrument ->
             val hasTick = tickKeys.contains(keyOf(instrument))
@@ -85,6 +87,8 @@ object LiveTokenClassifier {
                 token++
                 if (hasTick) {
                     tokenWithTick++
+                } else {
+                    tokenOnly++
                 }
             }
             if (isMissingLivePrice(instrument, hasTick)) {
@@ -96,7 +100,8 @@ object LiveTokenClassifier {
             tokenWithTick = tokenWithTick,
             token = token,
             noToken = noToken,
-            noLivePrice = noLivePrice
+            noLivePrice = noLivePrice,
+            tokenOnly = tokenOnly
         )
     }
 
@@ -132,7 +137,7 @@ object LiveTokenClassifier {
 
             val included = when (category) {
                 LiveTokenCategory.TOKEN_WITH_TICK -> hasToken && hasTick
-                LiveTokenCategory.TOKEN -> hasToken
+                LiveTokenCategory.TOKEN_ONLY -> hasToken && !hasTick
                 LiveTokenCategory.NO_TOKEN -> !hasToken
                 LiveTokenCategory.NO_LIVE_PRICE -> false
             }

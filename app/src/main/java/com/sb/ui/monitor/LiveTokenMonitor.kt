@@ -113,7 +113,7 @@ class LiveTokenMonitor(
         ) { view -> withTickCountView = view }
         val token = categoryCard(
             root,
-            LiveTokenCategory.TOKEN,
+            LiveTokenCategory.TOKEN_ONLY,
             AppDesign.accent
         ) { view -> tokenCountView = view }
         val noToken = categoryCard(
@@ -128,7 +128,7 @@ class LiveTokenMonitor(
         ) { view -> noLivePriceCountView = view }
 
         withTick.setOnClickListener { showCategory(LiveTokenCategory.TOKEN_WITH_TICK) }
-        token.setOnClickListener { showCategory(LiveTokenCategory.TOKEN) }
+        token.setOnClickListener { showCategory(LiveTokenCategory.TOKEN_ONLY) }
         noToken.setOnClickListener { showCategory(LiveTokenCategory.NO_TOKEN) }
         noLivePrice.setOnClickListener { showCategory(LiveTokenCategory.NO_LIVE_PRICE) }
 
@@ -179,7 +179,7 @@ class LiveTokenMonitor(
             context,
             when (category) {
                 LiveTokenCategory.TOKEN_WITH_TICK -> "Live total count"
-                LiveTokenCategory.TOKEN -> "Names with status"
+                LiveTokenCategory.TOKEN_ONLY -> "Token exists, tick not received"
                 LiveTokenCategory.NO_TOKEN -> "Names with missing details"
                 LiveTokenCategory.NO_LIVE_PRICE -> "Missing price reasons"
             },
@@ -378,7 +378,7 @@ class LiveTokenMonitor(
 
     private fun updateMainCounts() {
         withTickCountView?.text = counts.tokenWithTick.toString()
-        tokenCountView?.text = counts.token.toString()
+        tokenCountView?.text = counts.tokenOnly.toString()
         noTokenCountView?.text = counts.noToken.toString()
         noLivePriceCountView?.text = counts.noLivePrice.toString()
 
@@ -386,8 +386,10 @@ class LiveTokenMonitor(
         statusView?.text = if (error != null) {
             error
         } else {
-            "Active instruments: ${counts.total}  •  live tick keys: ${tickKeys.size}" +
-                "  •  updating live"
+            "Master rows loaded: ${counts.total}  •  token coverage: ${counts.token}/${counts.total} " +
+                "(${if (counts.total > 0) counts.token * 100 / counts.total else 0}%)  •  " +
+                "token-only: ${counts.tokenOnly}  •  missing token: ${counts.noToken}  •  " +
+                "subscribed: ${subscribedKeys().size}  •  tick keys: ${tickKeys.size}  •  updating"
         }
     }
 
@@ -398,7 +400,7 @@ class LiveTokenMonitor(
         countView.text = when (category) {
             LiveTokenCategory.TOKEN_WITH_TICK ->
                 "${counts.tokenWithTick} instruments have token and live tick"
-            LiveTokenCategory.TOKEN -> "Total ${counts.token} tokens"
+            LiveTokenCategory.TOKEN_ONLY -> "Total ${counts.tokenOnly} instruments with token but no live tick"
             LiveTokenCategory.NO_TOKEN -> "Total ${counts.noToken} no token"
             LiveTokenCategory.NO_LIVE_PRICE ->
                 "Total ${counts.noLivePrice} no live price"
@@ -416,7 +418,7 @@ class LiveTokenMonitor(
             .ifEmpty {
                 listOf(
                     when (category) {
-                        LiveTokenCategory.TOKEN -> "No instruments with token."
+                        LiveTokenCategory.TOKEN_ONLY -> "No token-only instruments; every tokenized instrument has a tick."
                         LiveTokenCategory.NO_TOKEN -> "All active instruments have a token."
                         LiveTokenCategory.TOKEN_WITH_TICK -> "No live ticks received yet."
                         LiveTokenCategory.NO_LIVE_PRICE -> "All active instruments have a live price."

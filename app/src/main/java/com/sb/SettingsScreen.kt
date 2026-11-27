@@ -216,6 +216,35 @@ class SettingsScreen(private val context: Context) {
         label(body, "Historical Market Data", 18f, yellow, true)
         label(
             body,
+            "Daily backfill is sequential and may take a long time. It covers only token-verified NSE/BSE cash equities and ETFs, not all instruments or intraday timeframes.",
+            11f,
+            grey
+        )
+        body.addView(actionButton("Start 3-Year Daily Equity/ETF Backfill") {
+            AlertDialog.Builder(context)
+                .setTitle("Start historical daily backfill?")
+                .setMessage(
+                    "This fetches 3 years of daily candles sequentially for token-verified NSE/BSE cash equities and ETFs. " +
+                        "It can take a long time and may be subject to broker/API limits. It does not fetch intraday candles."
+                )
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Start") { _, _ ->
+                    val result = KotakSessionCoordinator.startEquityHistoricalBackfill()
+                    statusText.text = result.toString()
+                    statusText.setTextColor(yellow)
+                }
+                .create()
+                .also { dialog ->
+                    AppDesign.styleDialog(dialog)
+                    dialog.show()
+                }
+        })
+        body.addView(actionButton("Refresh Historical Backfill Status") {
+            statusText.text = KotakSessionCoordinator.historicalImportSnapshot().toString()
+            statusText.setTextColor(yellow)
+        })
+        label(
+            body,
             "Export saved OHLCV candles only. Kotak credentials and account data are not exported.",
             11f,
             grey
